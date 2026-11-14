@@ -19,16 +19,29 @@ In the second case node 0 is restarted in the middle of the flips. The record
 is on disk and the clocks are not: T is still held, the hold begins again at
 the first decline after the restart, and ends one backstop after it.
 
+The return cases: Bitcoin returns to a branch it showed before, and the
+Sequentia branch anchored on it outweighs the one node 0 stands on. In the
+flood case the branch node 0 stands on is anchored at the Bitcoin fork point,
+so the walk keeps it and it leaves by fork choice once the watcher clears the
+returning branch's marks, while a peer sends node 0 getblocks without pause
+(each one runs an activation on the network thread) and the recovery set holds
+stale entries the watcher must ask Bitcoin about. Whichever thread moves node
+0 first, T must be held and R declined, in every try (CR6_FLOOD_TRIES).
+
 A real bitcoind is the parent chain.
 """
 
 import os
+import struct
+import threading
 import time
 from decimal import Decimal
+from io import BytesIO
 
 from feature_pos_held_transactions_rpc_liveness import HeldTransactionsRpcLivenessTest, ROUND_MS, WINDOW_MS
 from test_framework.authproxy import JSONRPCException
-from test_framework.messages import tx_from_hex
+from test_framework.messages import msg_getblocks, tx_from_hex
+from test_framework.p2p import MESSAGEMAP, P2PInterface
 from test_framework.util import assert_equal
 
 BACKSTOP_S = 2 * (12 * ROUND_MS + WINDOW_MS) / 1000.0
@@ -36,6 +49,33 @@ BACKSTOP_S = 2 * (12 * ROUND_MS + WINDOW_MS) / 1000.0
 EVERY_S = BACKSTOP_S / 4
 # What a release may add to the backstop: the maintenance thread's period and this test's sampling.
 SLACK_S = 1.5
+# The flood case: how many tries, and how many stale recovery-set entries each one adds.
+FLOOD_TRIES = int(os.environ.get("CR6_FLOOD_TRIES", "3"))
+FLOOD_DECOYS = int(os.environ.get("CR6_FLOOD_DECOYS", "2"))
+# The flood case restarts node 0 with -posdebugreconsideractivatems at this value, so that the watcher waits
+# between clearing the returning branch's marks and its own activation and the flood's activation moves node 0
+# first; 0 leaves the race to chance (the watcher then mostly wins it).
+FLOOD_DELAY_MS = int(os.environ.get("CR6_FLOOD_DELAY_MS", "300"))
+
+
+class GetblocksFlooder(P2PInterface):
+    """A peer that frames every message but decodes only the handshake's and pings: it never parses a
+    Sequentia block or transaction, which the test framework cannot deserialize."""
+    KEEP = {b"version", b"verack", b"ping", b"pong", b"sendheaders", b"wtxidrelay", b"sendaddrv2",
+            b"feefilter", b"sendcmpct"}
+
+    def _on_data(self):
+        while len(self.recvbuf) >= 24:
+            msgtype = self.recvbuf[4:16].split(b"\x00", 1)[0]
+            msglen = struct.unpack("<i", self.recvbuf[16:20])[0]
+            if len(self.recvbuf) < 24 + msglen:
+                return
+            msg = self.recvbuf[24:24 + msglen]
+            self.recvbuf = self.recvbuf[24 + msglen:]
+            if msgtype in self.KEEP and msgtype in MESSAGEMAP:
+                t = MESSAGEMAP[msgtype]()
+                t.deserialize(BytesIO(msg))
+                self.on_message(t)
 
 
 class HeldTransactionsFlipsTest(HeldTransactionsRpcLivenessTest):
@@ -259,7 +299,7 @@ class HeldTransactionsFlipsTest(HeldTransactionsRpcLivenessTest):
         with open(m.debug_log_path, encoding="utf-8", errors="replace") as f:
             f.seek(size0)
             lines = [x.strip() for x in f if "is canonical again; reconsidering" in x or "reorganization detected" in x
-                     or "Held transactions: holding" in x or "the reconsideration took" in x
+                     or "Held transactions: holding" in x or "left the active chain while the record was open" in x
                      or ("UpdateTip: new best=" + ca[-1]) in x]
         first = [x for x in lines if "[anchorwatch]" in x and "UpdateTip" not in x]
         top = [x for x in lines if ("UpdateTip: new best=" + ca[-1]) in x]
@@ -277,19 +317,105 @@ class HeldTransactionsFlipsTest(HeldTransactionsRpcLivenessTest):
         # The hold ends by the backstop at the latest; the next case starts with nothing held.
         self.wait_until(lambda: m.getheldtxs()["txids"] == [], timeout=BACKSTOP_S + 30)
 
+    def returning_flood(self, case, vout):
+        """CA, anchored on Bitcoin branch A, is certified; Bitcoin leaves A for its parent P, and the walk takes
+        CA off. FLOOD_DECOYS stale entries join the recovery set (each a certified block anchored on a sibling of
+        A that Bitcoin then drops). T is certified in CB, anchored at P, so the walk keeps it. Bitcoin returns
+        to A, where CA outweighs CB, while a peer floods node 0 with getblocks. True when node 0 ended on CA
+        holding T and declined R."""
+        m, att = self.nodes
+        b = self.btc()
+
+        def spend(to, fee):
+            r = att.createrawtransaction([{"txid": self.fund_txid, "vout": vout, "sequence": 0xfffffffd}],
+                                         [{to: Decimal("100") - fee}, {"fee": fee}])
+            return att.signrawtransactionwithwallet(r)["hex"]
+        t_hex, r_hex = spend(m.getnewaddress(), Decimal("0.0001")), spend(att.getnewaddress(), Decimal("0.001"))
+        t_id, r_id = tx_from_hex(t_hex).rehash(), tx_from_hex(r_hex).rehash()
+        self.btc_mine(1)
+        self.wait_until(lambda: self.certified_block(m) and self.anchored_at_tip(m), timeout=60)
+        h0 = b.getblockcount()
+        a_blk = self.btc_mine(1)[0]
+        ca = self.anchored_blocks(m, 3, h0)
+        fork = m.getblockheader(ca[0])["previousblockhash"]
+        self.sync_blocks()
+        b.invalidateblock(a_blk)
+        self.both_on(fork)
+        assert_equal(b.getblockcount(), h0)
+        for _ in range(FLOOD_DECOYS):
+            z = self.btc_mine(1)[0]
+            time.sleep(1.5)  # the watcher must see z as Bitcoin's tip, or its leaving is no tip change
+            d = self.certified_block(m)
+            assert_equal(m.getblockheader(d)["anchorheight"], h0 + 1)
+            self.sync_blocks()
+            b.invalidateblock(z)
+            self.both_on(fork)
+        m.sendrawtransaction(t_hex)
+        cb = [self.certified_block(m) for _ in range(2)]
+        self.sync_blocks()
+        assert t_id in m.getblock(cb[0])["tx"]
+        assert all(m.getblockheader(x)["anchorheight"] == h0 for x in cb)
+        stop = threading.Event()
+        sent = [0]
+        p2p = m.add_p2p_connection(GetblocksFlooder())
+
+        def flood():
+            while not stop.is_set():
+                try:
+                    p2p.send_message(msg_getblocks())
+                except Exception:
+                    return
+                sent[0] += 1
+                if sent[0] % 50 == 0:
+                    time.sleep(0.001)
+        th = threading.Thread(target=flood, daemon=True)
+        th.start()
+        time.sleep(0.5)
+        size0 = os.path.getsize(m.debug_log_path)
+        b.reconsiderblock(a_blk)
+        t_back = time.time()
+        self.wait_until(lambda: m.getbestblockhash() == ca[-1], timeout=60)
+        follow_s = time.time() - t_back
+        stop.set()
+        th.join()
+        m.disconnect_p2ps()
+        time.sleep(1.5)
+        with open(m.debug_log_path, encoding="utf-8", errors="replace") as f:
+            f.seek(size0)
+            lines = [x.strip() for x in f if "is canonical again; reconsidering" in x or "Held transactions: holding" in x
+                     or "left the active chain while the record was open" in x or "the reconsideration took" in x]
+        for x in lines[-6:]:
+            self.log.info("    node 0: %s", (x.split(" ", 1)[0][11:] + " " + x.split("] ", 3)[-1])[:150])
+        # Which thread moved node 0 off CB first: the watcher's own activation, or another one (the flood's).
+        with open(m.debug_log_path, encoding="utf-8", errors="replace") as f:
+            f.seek(size0)
+            moves = [x for x in f if "UpdateTip: new best=" in x]
+        mover = moves[0].split("[", 2)[1].split("]")[0] if moves and "[" in moves[0] else "?"
+        held = t_id in m.getheldtxs()["txids"]
+        self.both_on(ca[-1])
+        att.prioritisetransaction(txid=t_id, fee_delta=-100000000)
+        att.sendrawtransaction(r_hex)
+        declined = self.offer_r(case, t_id, r_id)
+        self.record(case + ": result", "getblocks flood %d msgs, %d stale entries: node 0 on CA's top %.2fs after Bitcoin's "
+                    "return, first moved by [%s]; T %s; R %s" % (sent[0], FLOOD_DECOYS, follow_s, mover,
+                                                                "held" if held else "NOT held",
+                                                                "declined" if declined else "SIGNED"))
+        return held and declined
+
     def body(self):
         m, att = self.nodes
         g = m.getblock(m.getblockhash(0), 2)
         coin = [(tx["txid"], vo["n"], Decimal(vo["value"])) for tx in g["tx"] for vo in tx["vout"]
                 if vo["scriptPubKey"]["hex"] == "51" and vo.get("value", 0) > 0][0]
         raw = m.createrawtransaction([{"txid": coin[0], "vout": coin[1]}],
-                                     [{att.getnewaddress(): Decimal("100")} for _ in range(4)] +
-                                     [{att.getnewaddress(): coin[2] - Decimal("400.001")}, {"fee": Decimal("0.001")}])
+                                     [{att.getnewaddress(): Decimal("100")} for _ in range(4 + FLOOD_TRIES)] +
+                                     [{att.getnewaddress(): coin[2] - Decimal(100 * (4 + FLOOD_TRIES)) - Decimal("0.001")},
+                                      {"fee": Decimal("0.001")}])
         self.fund_txid = m.sendrawtransaction(raw)
         self.certified_block(m)
         self.sync_blocks()
         vouts = [o["n"] for o in m.getrawtransaction(self.fund_txid, 1)["vout"] if o.get("value") == Decimal("100")]
-        cases = os.environ.get("CR4_FLIPS", "flips,restart,return,return_equal").split(",")
+        cases = os.environ.get("CR4_FLIPS", "flips,restart,return,return_equal,return_flood").split(",")
         if "flips" in cases:
             self.log.info("(flips) the backstop while Bitcoin flips between two branches already seen: %.2fs", BACKSTOP_S)
             self.flips("flips", vouts[0], restart=False)
@@ -302,6 +428,16 @@ class HeldTransactionsFlipsTest(HeldTransactionsRpcLivenessTest):
         if "return_equal" in cases:
             self.log.info("(return_equal) the same, with the returning Sequentia branch as high as the current one")
             self.returning("return_equal", vouts[3], higher=False)
+        if "return_flood" in cases:
+            self.log.info("(return_flood) the return, the current branch anchored at the fork point, a peer flooding getblocks")
+            if FLOOD_DELAY_MS > 0:
+                self.restart_node(0, extra_args=self.node_args(0) + ["-posdebugreconsideractivatems=%d" % FLOOD_DELAY_MS])
+                m.loadwallet("w")
+                self.connect_nodes(0, 1)
+                self.sync_blocks()
+            bad = [k for k in range(FLOOD_TRIES) if not self.returning_flood("return_flood%d" % k, vouts[4 + k])]
+            self.record("return_flood: summary", "%d of %d tries left CB without T held and R declined" % (len(bad), FLOOD_TRIES))
+            assert not bad, "tries %s left CB without T held and R declined" % bad
 
 
 if __name__ == '__main__':
