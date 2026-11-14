@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <pos.h>
+
+#include <chrono>
 #include <anchor.h>
 #include <bls.h>
 
@@ -2421,6 +2423,188 @@ BOOST_AUTO_TEST_CASE(pos_record_registry_per_transaction)
     BOOST_CHECK(reg.SignerFor(bob) == bob);
     BOOST_CHECK(reg.ParticipantsBefore(pool, 50).count(alice) == 1);
     reg.Clear();
+}
+
+
+namespace {
+//! Restores the committee globals a test changes.
+struct CommitteeGlobalsGuard {
+    int size{g_pos_committee_size};
+    bool pub{g_pos_public_committee};
+    int hardening{g_pos_hardening_height};
+    uint64_t min_stake{g_pos_min_stake};
+    ~CommitteeGlobalsGuard()
+    {
+        g_pos_committee_size = size;
+        g_pos_public_committee = pub;
+        g_pos_hardening_height = hardening;
+        g_pos_min_stake = min_stake;
+    }
+};
+
+std::vector<unsigned char> FakeBls(int i)
+{
+    std::vector<unsigned char> b(BLS_PK_SIZE);
+    for (size_t j = 0; j < b.size(); ++j) b[j] = (unsigned char)(i * 31 + j);
+    return b;
+}
+
+bool SameSeats(const PosCommitteeSeats& a, const PosCommitteeSeats& b)
+{
+    return a.members == b.members && a.seats == b.seats && a.total == b.total;
+}
+} // namespace
+
+// The cached weights are the uncached ones after every kind of change: stake
+// added and spent, BLS registrations, delegations made, rotated and withdrawn,
+// configured stakers. The election version changes with each of them.
+BOOST_AUTO_TEST_CASE(stake_registry_weight_cache_matches_recompute)
+{
+    CommitteeGlobalsGuard guard;
+    g_pos_public_committee = true;
+    g_pos_committee_size = 5;
+    g_pos_hardening_height = 1;
+    g_pos_min_stake = 0;
+    StakeRegistry reg;
+    std::vector<CPubKey> keys;
+    for (int i = 0; i < 12; ++i) {
+        CKey k;
+        k.MakeNewKey(true);
+        keys.push_back(k.GetPubKey());
+    }
+    FastRandomContext rng(true);
+    std::map<CPubKey, uint64_t> held; // what SubUtxoStake may take back
+    const uint256 seed = uint256S("0x5eed");
+    for (int step = 0; step < 2000; ++step) {
+        const CPubKey& a = keys[rng.randrange(keys.size())];
+        const CPubKey& b = keys[rng.randrange(keys.size())];
+        const uint64_t before = reg.ElectionVersion();
+        const int op = (int)rng.randrange(7);
+        switch (op) {
+        case 0: {
+            const uint64_t amount = 1 + rng.randrange(1000);
+            const bool bls = rng.randbool();
+            reg.AddUtxoStake(a, amount, bls ? FakeBls(a[1]) : std::vector<unsigned char>{}, step);
+            held[a] += amount;
+            break;
+        }
+        case 1:
+            if (held[a] > 0) {
+                const uint64_t amount = 1 + rng.randrange(held[a]);
+                reg.SubUtxoStake(a, amount, 0, rng.randbool());
+                held[a] -= std::min(held[a], amount);
+            } else {
+                reg.SubUtxoStake(a, 1); // nothing to take: must leave weights as they are
+            }
+            break;
+        case 2: reg.AddUtxoDelegation(a, b, step); break;
+        case 3: reg.SubUtxoDelegation(a, b); break;
+        case 4: reg.SetStake(a, rng.randrange(500)); break;
+        case 5: reg.SetBls(a, FakeBls(a[2])); break;
+        case 6: (void)reg.Weights(); break; // a read between changes
+        }
+        const std::map<CPubKey, uint64_t> uncached = reg.WeightsUncached();
+        BOOST_CHECK(reg.Weights() == uncached);
+        BOOST_CHECK_EQUAL(reg.Size(), uncached.size());
+        for (const CPubKey& k : keys) {
+            auto it = uncached.find(k);
+            BOOST_CHECK_EQUAL(reg.GetWeight(k), it == uncached.end() ? 0 : it->second);
+        }
+        BOOST_CHECK(SameSeats(PosPublicCommitteeSeats(reg, seed, 10), PosPublicCommitteeSeatsUncached(reg, seed, 10)));
+        BOOST_CHECK_EQUAL(PosPublicCommitteeSize(reg), PosPublicCommitteeSizeUncached(reg));
+        if (op != 6) BOOST_CHECK(reg.ElectionVersion() != before);
+        if (op == 6) BOOST_CHECK_EQUAL(reg.ElectionVersion(), before); // reading changes nothing
+    }
+}
+
+// A cached committee never outlives the state it was computed from: not in the
+// same registry after a change, and not across two registries that share an
+// address and a history.
+BOOST_AUTO_TEST_CASE(stake_registry_committee_cache_follows_state)
+{
+    CommitteeGlobalsGuard guard;
+    g_pos_public_committee = true;
+    g_pos_committee_size = 3;
+    g_pos_hardening_height = 1;
+    g_pos_min_stake = 0;
+    std::vector<CPubKey> keys;
+    for (int i = 0; i < 4; ++i) {
+        CKey k;
+        k.MakeNewKey(true);
+        keys.push_back(k.GetPubKey());
+    }
+    const uint256 seed = uint256S("0xc0ffee");
+    for (int round = 0; round < 2; ++round) {
+        StakeRegistry reg; // the same stack slot each round
+        for (int i = 0; i < 3; ++i) reg.AddUtxoStake(keys[i], 100, FakeBls(i));
+        if (round == 1) reg.AddUtxoStake(keys[3], 100000, FakeBls(3));
+        const PosCommitteeSeats seats = PosPublicCommitteeSeats(reg, seed, 10);
+        BOOST_CHECK(SameSeats(seats, PosPublicCommitteeSeatsUncached(reg, seed, 10)));
+        const bool has_big = std::find(seats.members.begin(), seats.members.end(), keys[3]) != seats.members.end();
+        BOOST_CHECK_EQUAL(has_big, round == 1);
+    }
+    StakeRegistry reg;
+    for (int i = 0; i < 3; ++i) reg.AddUtxoStake(keys[i], 100, FakeBls(i));
+    BOOST_CHECK_EQUAL(PosPublicCommitteeSize(reg), 3);
+    const PosCommitteeSeats before = PosPublicCommitteeSeats(reg, seed, 10);
+    reg.AddUtxoStake(keys[3], 100000, FakeBls(3)); // a heavy staker joins
+    const PosCommitteeSeats after = PosPublicCommitteeSeats(reg, seed, 10);
+    BOOST_CHECK(!SameSeats(before, after));
+    BOOST_CHECK(SameSeats(after, PosPublicCommitteeSeatsUncached(reg, seed, 10)));
+    reg.SubUtxoStake(keys[3], 100000, 0, true);
+    BOOST_CHECK(SameSeats(PosPublicCommitteeSeats(reg, seed, 10), before));
+    // The globals are part of the key.
+    g_pos_committee_size = 2;
+    BOOST_CHECK_EQUAL(PosPublicCommitteeSize(reg), 2);
+    BOOST_CHECK(SameSeats(PosPublicCommitteeSeats(reg, seed, 10), PosPublicCommitteeSeatsUncached(reg, seed, 10)));
+}
+
+// At the most stakers the supply allows (400M SEQ / 40,000 SEQ minimum stake =
+// 10,000), reading one staker's weight and the committee stays cheap between
+// changes. Uncached, the reads below took about 3.5 s and 2.4 s on the machine
+// that measured them; the bounds leave a hundredfold margin either way.
+BOOST_AUTO_TEST_CASE(stake_registry_reads_scale_to_max_stakers)
+{
+    CommitteeGlobalsGuard guard;
+    g_pos_public_committee = true;
+    g_pos_committee_size = 250;
+    g_pos_hardening_height = 1;
+    g_pos_min_stake = 0;
+    const int n = 10000;
+    std::vector<CPubKey> keys;
+    keys.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        CKey k;
+        k.MakeNewKey(true);
+        keys.push_back(k.GetPubKey());
+    }
+    std::map<CPubKey, uint64_t> utxo;
+    std::map<CPubKey, std::vector<unsigned char>> bls;
+    std::map<CPubKey, CPubKey> deleg;
+    for (int i = 0; i < n; ++i) {
+        utxo[keys[i]] = 100000000ULL + (uint64_t)i * 1000;
+        bls[keys[i]] = FakeBls(i);
+        if (i % 10 == 1) deleg[keys[i]] = keys[i - 1];
+    }
+    StakeRegistry reg;
+    reg.SetUtxoStake(std::move(utxo), std::move(bls), std::move(deleg));
+    const uint256 seed = uint256S("0xabcdef");
+
+    const auto t0 = std::chrono::steady_clock::now();
+    uint64_t sum = 0;
+    for (int r = 0; r < 1000; ++r) sum += reg.GetWeight(keys[(r * 37) % n]);
+    const auto t1 = std::chrono::steady_clock::now();
+    for (int r = 0; r < 200; ++r) (void)PosPublicCommitteeSeats(reg, seed, 100);
+    for (int r = 0; r < 200; ++r) (void)PosSlotQuorumAt(reg, 100);
+    const auto t2 = std::chrono::steady_clock::now();
+    const double weights_s = std::chrono::duration<double>(t1 - t0).count();
+    const double committee_s = std::chrono::duration<double>(t2 - t1).count();
+    BOOST_TEST_MESSAGE(strprintf("10,000 stakers: 1000 GetWeight %.4f s, 200 committees + 200 quorums %.4f s",
+                                 weights_s, committee_s));
+    BOOST_CHECK(sum > 0);
+    BOOST_CHECK(weights_s < 1.0);
+    BOOST_CHECK(committee_s < 1.0);
+    BOOST_CHECK(SameSeats(PosPublicCommitteeSeats(reg, seed, 100), PosPublicCommitteeSeatsUncached(reg, seed, 100)));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
