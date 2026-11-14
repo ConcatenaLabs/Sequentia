@@ -190,6 +190,28 @@ descendants. Block production resumes from the last still-valid Sequentia block,
 whose anchor is still canonical on Bitcoin, and disconnected transactions return
 to the mempool. Rebuilt blocks anchor to Bitcoin's new best chain.
 
+When Bitcoin returns to a branch it showed before, the blocks the watcher
+invalidated for that branch are valid again. The watcher keeps every block it
+invalidated in a recovery set (the block index marks them, so a restart keeps
+the set) and checks their anchors on every tick. A block whose anchor is
+canonical again is reconsidered together with the blocks above it, but only as
+far as Bitcoin's anchors allow: before it clears anything, the watcher checks the
+anchor of every block the reconsideration would bring back, and in the same step
+it keeps invalid each block above whose own anchor is still off Bitcoin's best
+chain, with everything above that one. Those blocks wait in the recovery set for
+their own anchor. A block whose ancestors off the active chain include one with
+an orphaned anchor waits for that ancestor. So no block whose anchor Bitcoin
+does not have is ever connected, not even for the moment before the walk would
+disconnect it again; and an anchor the Bitcoin daemon cannot judge right now
+revives nothing until a later tick can. The `reconsiderblock` RPC follows the
+same rule on a node that watches Bitcoin: it clears an operator's
+`invalidateblock` as before, but every block it would revive whose anchor is
+off Bitcoin's best chain (the block named included) stays invalid, with the
+blocks above it, and waits for its anchor in the recovery set. When the Bitcoin
+daemon does not answer, a block the watcher itself invalidated stays invalid
+until the watcher can judge its anchor, and every other mark is cleared as
+usual, so an operator can still undo an `invalidateblock` during an outage.
+
 This is a **consensus** invalidation, not a local policy choice: every node
 following the same Bitcoin best chain reaches the same decision, because
 Bitcoin's best chain is the shared oracle. The only sanctioned reason to discard

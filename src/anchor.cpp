@@ -25,8 +25,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <tuple>
 #include <utility>
@@ -1171,6 +1173,103 @@ static void MaybeReconcileFinality(ChainstateManager& chainman)
     }
 }
 
+//! The verdicts a reconsideration of `pindex` needs: on the anchors of its
+//! ancestors off the active chain, its own and its descendants'.
+struct BranchVerdicts {
+    std::set<std::pair<uint32_t, uint256>> ok;      //!< on Bitcoin's best chain
+    std::set<std::pair<uint32_t, uint256>> judged;  //!< answered, OK or not
+    bool complete{true};                            //!< false: the daemon stopped answering
+};
+
+//! Ask the parent daemon about them, with no lock held (like everywhere in
+//! this file). Stops at the first NO_CONNECTION: the rest stay unjudged.
+static BranchVerdicts JudgeBranchAnchors(ChainstateManager& chainman, const CBlockIndex* pindex)
+{
+    std::vector<std::pair<uint32_t, uint256>> refs;
+    {
+        LOCK(cs_main);
+        const CChain& active = chainman.ActiveChain();
+        for (const CBlockIndex* a = pindex; a != nullptr && !active.Contains(a); a = a->pprev) {
+            if (!a->m_anchor_hash.IsNull()) refs.emplace_back(a->m_anchor_height, a->m_anchor_hash);
+        }
+        for (const auto& [_, entry] : chainman.m_blockman.m_block_index) {
+            if (entry->nHeight > pindex->nHeight && entry->GetAncestor(pindex->nHeight) == pindex &&
+                !entry->m_anchor_hash.IsNull()) {
+                refs.emplace_back(entry->m_anchor_height, entry->m_anchor_hash);
+            }
+        }
+    }
+    std::sort(refs.begin(), refs.end());
+    refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
+    PrefetchAnchorVerdicts(refs);
+    BranchVerdicts v;
+    for (const auto& ref : refs) {
+        const AnchorCheckResult verdict = CheckMainchainAnchor(ref.first, ref.second);
+        if (verdict == AnchorCheckResult::NO_CONNECTION) {
+            v.complete = false;
+            break;
+        }
+        v.judged.insert(ref);
+        if (verdict == AnchorCheckResult::OK) v.ok.insert(ref);
+    }
+    return v;
+}
+
+//! ReconsiderAnchoredBlock, logging each block it keeps invalid. cs_main held.
+static std::vector<uint256> ReconsiderLocked(ChainstateManager& chainman, CBlockIndex* pindex,
+                                             const std::function<bool(const CBlockIndex*)>& anchor_ok)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    std::vector<uint256> refailed;
+    for (const CBlockIndex* root : chainman.ActiveChainstate().ReconsiderAnchoredBlock(pindex, anchor_ok)) {
+        LogPrintf("Anchor watcher: block %s (height %d) stays invalid: its anchor %s (height %d) is still off Bitcoin's best chain\n",
+                  root->GetBlockHash().ToString(), root->nHeight, root->m_anchor_hash.ToString(), root->m_anchor_height);
+        refailed.push_back(root->GetBlockHash());
+    }
+    return refailed;
+}
+
+//! The blocks kept invalid wait for their own anchors in the recovery set, as
+//! any block the watcher invalidated does (the marker persists, so a restart
+//! re-seeds them from the block index).
+static void AddToRecoverySet(const std::vector<uint256>& hashes) EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
+{
+    if (hashes.empty()) return;
+    LOCK(g_anchor_mutex);
+    for (const uint256& h : hashes) g_anchor_invalidated.insert(h);
+}
+
+void AnchorReconsiderBlock(ChainstateManager& chainman, CBlockIndex* pindex)
+{
+    const BranchVerdicts v = JudgeBranchAnchors(chainman, pindex);
+    std::vector<uint256> refailed;
+    {
+        LOCK(cs_main);
+        // What the watcher itself took off for an anchor reason, among the
+        // blocks this clears: with the daemon silent, its anchor may still be
+        // orphaned, so it stays off until the watcher can judge it. Collected
+        // in the same hold as the clearing.
+        std::set<const CBlockIndex*> watcher_failed;
+        for (const CBlockIndex* a = pindex; a != nullptr && !chainman.ActiveChain().Contains(a); a = a->pprev) {
+            if (a->nStatus & BLOCK_FAILED_ANCHOR) watcher_failed.insert(a);
+        }
+        for (const auto& [_, entry] : chainman.m_blockman.m_block_index) {
+            if ((entry->nStatus & BLOCK_FAILED_ANCHOR) && entry->nHeight > pindex->nHeight &&
+                entry->GetAncestor(pindex->nHeight) == pindex) {
+                watcher_failed.insert(entry);
+            }
+        }
+        const auto anchor_ok = [&v, &watcher_failed](const CBlockIndex* b) {
+            if (b->m_anchor_hash.IsNull()) return true;
+            const std::pair<uint32_t, uint256> ref{b->m_anchor_height, b->m_anchor_hash};
+            if (v.judged.count(ref)) return v.ok.count(ref) > 0;
+            return watcher_failed.count(b) == 0;
+        };
+        refailed = ReconsiderLocked(chainman, pindex, anchor_ok);
+    }
+    AddToRecoverySet(refailed);
+}
+
 void AnchorWatchTask(ChainstateManager& chainman)
 {
     if (!g_con_bitcoin_anchor || !g_validate_anchor) return;
@@ -1330,8 +1429,23 @@ void AnchorWatchTask(ChainstateManager& chainman)
                 // that drops the entry.
                 continue;
             }
-            LogPrintf("Anchor %s (height %d) of block %s is canonical again; reconsidering\n",
-                      anchor_hash.ToString(), anchor_height, hash.ToString());
+            // Revive only what Bitcoin's anchors allow. ResetBlockFailureFlags
+            // clears the marks of every descendant of the block and of every
+            // ancestor, whatever their own anchors say: a block above it whose
+            // anchor is a later Bitcoin block that is still orphaned would be
+            // connected by the activation below and only disconnected again by
+            // section 2, after every reader of the chain had seen it there. So
+            // judge the anchor of every block the reconsideration touches first
+            // (outside cs_main, like every parent-chain call here), and revive
+            // the branch only up to the first block whose anchor is not OK.
+            const BranchVerdicts verdicts = JudgeBranchAnchors(chainman, pindex);
+            // As for the block itself: what cannot be judged now is judged on
+            // the next tick, and nothing is revived on a guess.
+            if (!verdicts.complete) break;
+            const auto anchor_ok = [&verdicts](const CBlockIndex* b) {
+                return b->m_anchor_hash.IsNull() || verdicts.ok.count({b->m_anchor_height, b->m_anchor_hash}) > 0;
+            };
+            std::vector<uint256> refailed;
             {
                 LOCK(cs_main);
                 // ResetBlockFailureFlags also clears every ancestor's failure
@@ -1348,9 +1462,27 @@ void AnchorWatchTask(ChainstateManager& chainman)
                              hash.ToString());
                     continue;
                 }
-                // ResetBlockFailureFlags also clears the BLOCK_FAILED_ANCHOR marker.
-                chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
+                // An ancestor off the active chain whose anchor is still
+                // orphaned: the branch cannot come back yet. It does when that
+                // ancestor's anchor does, through the ancestor's own entry.
+                const CBlockIndex* stale_below = nullptr;
+                for (const CBlockIndex* a = pindex->pprev; a != nullptr && !chainman.ActiveChain().Contains(a); a = a->pprev) {
+                    if (!anchor_ok(a)) stale_below = a;
+                }
+                if (stale_below) {
+                    LogPrint(BCLog::VALIDATION, "Anchor watcher: not reconsidering %s yet: the anchor of its ancestor %s is still off Bitcoin's best chain\n",
+                             hash.ToString(), stale_below->GetBlockHash().ToString());
+                    continue;
+                }
+                LogPrintf("Anchor %s (height %d) of block %s is canonical again; reconsidering\n",
+                          anchor_hash.ToString(), anchor_height, hash.ToString());
+                // ReconsiderAnchoredBlock clears the BLOCK_FAILED_ANCHOR marker
+                // too, and in the same hold marks failed again the descendants
+                // whose own anchor is still orphaned, so no activation, on this
+                // thread or any other, ever connects one.
+                refailed = ReconsiderLocked(chainman, pindex, anchor_ok);
             }
+            AddToRecoverySet(refailed);
             // The hint is NOT erased here: it lives until the branch is seen
             // connected (above), so the certified-sibling guard covers the
             // whole un-fail -> reconnect window.
