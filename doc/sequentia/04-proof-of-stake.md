@@ -838,9 +838,9 @@ The number of members a certificate names (`m_pos_countersigs`, reported as
 `poscountersigs`) is **not** a key. In the BLS certificate forms the
 certificate is outside the block hash and any node holding a quorum of shares
 can assemble one, so one block reaches different nodes with certificates of
-different sizes, and each node keeps the count of the first it received. Ranked
-by that count, two nodes holding the same two certified siblings could order
-them oppositely and finalize different blocks.
+different sizes, and nodes can hold different counts for it. Ranked by that
+count, two nodes holding the same two certified siblings could order them
+oppositely and finalize different blocks.
 
 Whether a block that cannot escape a stall is certified is the same on every
 node, because it is judged against its parent's stake state and never against
@@ -862,14 +862,28 @@ answer is kept in the block's index entry (`BLOCK_POS_CERT_DECIDED`), so a
 restart, which knows the stake state of the tip alone, does not lose it.
 For a block that may escape a stall the count is that of the certificate the
 node holds, which lies outside the block hash, so two nodes holding different
-certificates for it can judge it differently. `getblockheader` reports the
+certificates for it could judge it differently. The count therefore only grows.
+A node that receives such a block with a certificate carrying its parent's
+quorum gossips that certificate (`poscert`), and a node holding the block with
+fewer members, and not yet as certified, adopts it: the larger count, and the
+certificate itself for the block's index entry and, while the block has never
+been connected, its stored body. The block is then judged again and, now
+certified, takes part in fork choice as one. A certificate is a few hundred
+bytes relayed at once, so within the observation window of §6 every node
+holding the block learns it is certified and the comparator gives every node
+the same winner. One that arrives after the node has finalized a sibling still
+raises the count, but finality is never undone, exactly as for a competing
+certificate on any other block. `getblockheader` reports the
 answer as `poscertified`, which reads `false` while the node does not yet know
 it; `poscertifiedknown` says whether it knows, so a caller can tell a block that
 is not certified from one whose answer is still to come and wait on the latter.
 The parent's quorum is `posquorum`, present once the node knows it. Tested in
 `feature_pos_certified_parent_quorum.py` (siblings of which one changes the
-committee) and `feature_pos_certified_stall_quorum.py` (the same on the
-anchored committee, for blocks escaping a stall, across a restart).
+committee), `feature_pos_certified_stall_quorum.py` (the same on the
+anchored committee, for blocks escaping a stall, across a restart) and
+`feature_pos_stall_cert_upgrade.py` (one block delivered with two certificates
+by members who signed two siblings, the fuller one adopted within the window or
+after finality).
 
 The VRF score and the count are computed from the block in
 `SetPosForkChoiceKeys` before the block enters the candidate set, and persisted

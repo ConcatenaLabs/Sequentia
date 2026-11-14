@@ -288,6 +288,15 @@ public:
         return proof.value();
     }
 
+    //! SEQUENTIA PoS (#282): replace the certificate (the proof solution,
+    //! outside the block hash) with a fuller one for the same block. False
+    //! when the proof is trimmed from memory.
+    bool SetProofSolution(const CScript& solution) {
+        if (m_trimmed || !proof) return false;
+        proof->solution = solution;
+        return true;
+    }
+
     bool is_dynafed_block() const {
         if (m_trimmed) {
             return m_trimmed_dynafed_block;
@@ -312,8 +321,11 @@ public:
     unsigned int nTimeMax{0};
 
     //! SEQUENTIA PoS certification and fork-choice keys (whitepaper §3.8).
-    //! m_pos_countersigs is the number of committee members on the certificate
-    //! this node first received with the block; m_pos_vrf_score is the leader's
+    //! m_pos_countersigs is the number of committee members on the fullest
+    //! certificate this node has received for the block: the one it arrived
+    //! with, raised when a verified certificate naming more members arrives
+    //! later on gossip (PosUpgradeCertificate, #282), never lowered;
+    //! m_pos_vrf_score is the leader's
     //! VRF score over the slot seed (lower is better). Both are persisted in
     //! CDiskBlockIndex on PoS chains.
     //!

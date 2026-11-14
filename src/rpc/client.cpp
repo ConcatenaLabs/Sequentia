@@ -212,6 +212,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "setfeeexchangerates", 0, "rates"},
     { "setfeeexchangerates", 1, "persist"},
     { "generateposblock", 1, "committeekeys"},
+    { "recertifyposblock", 2, "committeekeys"},
     { "getstakescript", 1, "csv_blocks"},
     { "getstakescript", 2, "csv_seconds"},
     { "getstakescript", 5, "liquid_locktime"},

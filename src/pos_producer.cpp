@@ -101,6 +101,71 @@ CScript BuildPublicCertificate(const std::vector<unsigned char>& leader_sig, con
                                        PosSeatsActiveAt(height) ? seats : -1);
 }
 
+} // namespace
+
+int PosRecertifyBlock(ChainstateManager& chainman, CBlock& block, const CKey& leader_key,
+                      const std::vector<CKey>& member_keys, std::string& error)
+{
+    if (!g_pos_bls || !g_pos_public_committee || g_pos_committee_size <= 1) {
+        error = "Only the public BLS committee carries a bitfield certificate";
+        return -1;
+    }
+    std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(block.proof.challenge);
+    if (!parts || !parts->is_bls) {
+        error = "Not a BLS committee block";
+        return -1;
+    }
+    if (!leader_key.IsValid() || leader_key.GetPubKey() != parts->leader) {
+        error = "The leader key does not match the block's leader";
+        return -1;
+    }
+    const CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveChain().Tip();
+    }
+    // The committee and its seats come from the registry, which mirrors the
+    // active tip: the block must be its child.
+    if (!tip || block.hashPrevBlock != tip->GetBlockHash()) {
+        error = "The block's parent must be the active tip";
+        return -1;
+    }
+    const int height = tip->nHeight + 1;
+    const uint256 seed = PosSeedForChild(tip);
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    const std::set<CPubKey> committee = PosPublicCommitteeSetAt(reg, seed, height);
+    const uint256 hash = block.GetHash();
+    std::set<CPubKey> signers;
+    std::vector<std::vector<unsigned char>> shares;
+    for (const CKey& key : member_keys) {
+        if (!key.IsValid()) {
+            error = "Invalid member key";
+            return -1;
+        }
+        if (!committee.count(key.GetPubKey()) || !signers.insert(key.GetPubKey()).second) continue;
+        auto share = BlsSign(PosBlsSeedFromKey(key), Span<const unsigned char>(hash.begin(), 32));
+        if (!share) {
+            error = "Failed to produce a BLS share";
+            return -1;
+        }
+        shares.push_back(std::move(*share));
+    }
+    if (shares.empty()) {
+        error = "None of the keys is a committee member for this block";
+        return -1;
+    }
+    auto agg = BlsAggregate(shares);
+    std::vector<unsigned char> leader_sig;
+    if (!agg || !leader_key.Sign(hash, leader_sig)) {
+        error = "Failed to sign the certificate";
+        return -1;
+    }
+    block.proof.solution = BuildPublicCertificate(leader_sig, *agg, reg, seed, height, signers);
+    return PublicSeatsOf(reg, seed, height, signers);
+}
+
+namespace {
+
 //! A block this node could not assemble is a missed slot, and when it keeps
 //! failing the chain can stop; the reason must reach the default log. Once per
 //! height and reason, since a producer retries every poll.
@@ -2129,7 +2194,10 @@ PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManag
         parent = chainman.m_blockman.LookupBlockIndex(header.hashPrevBlock);
         parent_is_tip = parent && parent == chainman.ActiveChain().Tip();
     }
-    if (already_have) return PosGossipAction::Ignore; // nothing new: the block itself already arrived
+    // The block itself already arrived: nothing new, unless this certificate
+    // names more members than the copy we hold. Then it is verified like any
+    // other, and the caller adopts it (PosUpgradeCertificate, #282).
+    if (already_have && !PosCertificateIsFuller(chainman, header)) return PosGossipAction::Ignore;
     if (!parent) return PosGossipAction::Ignore;
     const int height = parent->nHeight + 1;
     const StakeRegistry& reg = StakeRegistry::GetInstance();

@@ -246,6 +246,32 @@ extern int64_t g_pos_finality_hold_ms;
  *  Returns false if it was already known. */
 bool PosNoteCompetingCertificate(const uint256& hash, int height);
 
+/** The number of committee members (seats, under the public committee) a BLS
+ *  certificate names, as the fork-choice keys measure it; 0 for any other
+ *  form. */
+int PosCertificateMembers(const CBlockHeader& header);
+
+/** Whether `header`'s certificate names more members than the one this node
+ *  holds for the same block: true only for a block whose body is stored here,
+ *  measured, not failed, and not already known to carry its parent's quorum
+ *  (for such a block a larger count changes nothing). The caller still
+ *  verifies the certificate. */
+bool PosCertificateIsFuller(ChainstateManager& chainman, const CBlockHeader& header);
+
+/** Adopt a verified certificate for a block this node already holds with a
+ *  smaller one (#282). The certificate lies outside the block hash, so one
+ *  block can reach two nodes with different certificates; under a stall
+ *  escape the count decides whether the block is certified, and a count fixed
+ *  at the first copy left two nodes ranking the same siblings differently for
+ *  good. The count only grows: the stored count, the index entry's proof and
+ *  the stored body take the larger certificate, the block is judged again
+ *  against its parent's quorum, and when it now carries that quorum it is
+ *  offered to fork choice again, or opens its observation window if it is
+ *  already active. Returns true when the count grew; the caller then runs
+ *  ActivateBestChain. A block already at or below the finalized point stays
+ *  where it is: finality is never undone. */
+bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& header);
+
 /** SEQUENTIA: bumped by the anchor watcher (anchor.cpp, RefetchDeferredBlocks)
  *  each time peers are to be asked again for blocks left aside because the
  *  parent chain daemon could not yet vouch for their anchor. net_processing
