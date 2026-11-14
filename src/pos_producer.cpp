@@ -1434,14 +1434,40 @@ int64_t PosProducer::DriveRound()
     // Share-lock, ancestry arm (3A residual): our current parent is a
     // same-height RIVAL of a block we share-signed. Signing on top of it
     // would help certify a chain that orphans a block that may have quietly
-    // certified elsewhere. Hold until the escaping-stall anchor gap passes
-    // (the same valve the whitepaper uses for a genuine stall: a partition
-    // hiding X's certificate can outlast any number of rounds, so the
-    // release is keyed on parent-chain progress, not the clock) — or, when
-    // anchoring is off, a bounded grace of two rounds.
+    // certified elsewhere, before fork choice has settled the height. Hold
+    // until it has:
+    //
+    //  - the parent is final on this node (#369): a quorum block whose
+    //    observation window has passed. Two certificates at one height
+    //    exist only if members signed both, and within the window every
+    //    node resolves them with the same comparator (certified first,
+    //    then VRF, then hash; whitepaper §8.4); after it, the finality gate
+    //    refuses the rival here whatever this member signs. The hold then
+    //    protects nothing and only costs blocks: when several members are
+    //    locked on a rival of the block that certified, fewer than a quorum
+    //    can sign at the next height, and the escaping-stall valve below
+    //    opened only after about three Bitcoin blocks, or never while
+    //    Bitcoin did not move. A certified parent is treated like any other
+    //    certified block: the escaping-stall condition only makes a
+    //    sub-quorum block valid, it does not delay building on a quorum one;
+    //  - the escaping-stall anchor gap passes, for a parent that is not
+    //    final, as a sub-quorum stall escape is not (a partition hiding X's
+    //    certificate can outlast any number of rounds, so this release is
+    //    keyed on parent-chain progress, not the clock). For a parent that
+    //    itself escaped a stall the gap from the grandparent has already
+    //    passed (anchors never decrease), so it holds nothing there;
+    //  - when anchoring is off, a bounded grace of two rounds.
     {
         bool ancestry_hold = false;
         uint256 locked;
+        bool rival_lock = false;
+        {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            rival_lock = m_lock_height == tip->nHeight && !m_lock_hash.IsNull() &&
+                m_lock_hash != tip->GetBlockHash();
+        }
+        // Read before the gossip lock is taken: finality takes cs_main.
+        const bool parent_final = rival_lock && PosIsImmediatelyFinal(m_chainman, tip);
         {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
             if (m_lock_height == tip->nHeight && !m_lock_hash.IsNull() &&
@@ -1465,12 +1491,12 @@ int64_t PosProducer::DriveRound()
                                              /*record_unverified=*/false) == EscapeStallTimeVerdict::ALLOWED;
                 const bool grace_passed = !g_con_bitcoin_anchor &&
                     (now - m_lock_grace_start_ms >= 2 * ROUND_MS);
-                ancestry_hold = !(gap_passed || grace_passed);
+                ancestry_hold = !(parent_final || gap_passed || grace_passed);
             }
         }
         if (ancestry_hold) {
             SendCertQueryOnce(locked);
-            return 150; // keep polling: a certificate for X releases via the pin, the gap/grace via time
+            return 150; // keep polling: a certificate for X releases via the pin, the parent's finality, the gap or the grace via time
         }
     }
 

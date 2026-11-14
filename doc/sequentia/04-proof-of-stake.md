@@ -1158,6 +1158,18 @@ evidence consensus accepts for a sub-quorum block - and it asks its peers for
 X's certificate while it waits. The cut-off minority waits out the partition; the
 majority side never waits.
 
+That wait applies only to a parent that is not final. A quorum-certified parent
+is final on the node once its observation window has passed (§6), and from then
+on the arm releases: two certificates at one height exist only if members
+signed both, the comparator settled them within the window on every node that
+saw both, and the finality gate now refuses X here whatever this member signs.
+Holding on would protect nothing and only cost blocks. After a block that
+needed several rounds, enough seats can be locked on a rival of the block that
+certified that fewer than a quorum could sign the next height, and the chain
+would wait for Bitcoin. A parent that itself escaped a stall is not affected
+either way: its anchor already clears the gap from the grandparent, and anchors
+never decrease. Tested in `feature_pos_ancestry_lock_certified_parent.py`.
+
 The share-lock is local signing policy, not a validity rule: no block is valid
 or invalid because of it. It turns the round timings into a liveness matter
 only. A node whose clock or round length differs from its peers' contributes

@@ -4683,6 +4683,16 @@ void PosRefreshImmediateFinality(ChainstateManager& chainman)
     }
 }
 
+bool PosIsImmediatelyFinal(ChainstateManager& chainman, const CBlockIndex* pindex)
+{
+    if (pindex == nullptr) return false;
+    LOCK(::cs_main);
+    if (g_pos_immediate_final_height < 0 || pindex->nHeight > g_pos_immediate_final_height) return false;
+    const CBlockIndex* final_block = chainman.m_blockman.LookupBlockIndex(g_pos_immediate_final_hash);
+    return final_block && chainman.ActiveChain().Contains(final_block) &&
+           final_block->GetAncestor(pindex->nHeight) == pindex;
+}
+
 PosFinalityInfo PosGetFinalityInfo(ChainstateManager& chainman)
 {
     LOCK(::cs_main);

@@ -260,6 +260,11 @@ struct PosFinalityInfo {
 };
 PosFinalityInfo PosGetFinalityInfo(ChainstateManager& chainman);
 
+/** Whether `pindex` is at or below this node's immediately-finalized point on
+ *  the active chain: a quorum block whose observation window has elapsed, or
+ *  an ancestor of one. False when this node keeps no finalized point. */
+bool PosIsImmediatelyFinal(ChainstateManager& chainman, const CBlockIndex* pindex);
+
 /** Re-evaluate the immediate-finality point against the active tip, so a
  *  quorum block whose observation window has elapsed becomes final even when no
  *  new block arrives. Called periodically from the scheduler. */
