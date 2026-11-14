@@ -924,12 +924,23 @@ extern int g_pos_hardening_height;
  *  - a committee member whose clock agrees with its peers' does not back a
  *    proposal stamped more than POS_PROPOSAL_AHEAD_SECONDS beyond both its
  *    clock and the earliest time consensus allows (PosProposalTooFarAhead);
- *    with a doubtful clock it backs proposals as before, and says so. */
-static constexpr int64_t POS_PROPOSAL_AHEAD_SECONDS = 300;
+ *    with a doubtful clock it backs proposals as before, and says so;
+ *  - a committee member starts the round schedule from round 0's stamp, but
+ *    never later than POS_PARENT_AHEAD_SLACK_SECONDS after it received that
+ *    proposal (PosRoundOriginMs), so a stamp ahead of real time does not hold
+ *    the rounds back until the clock reaches it (#286).
+ *
+ *  POS_PROPOSAL_AHEAD_SECONDS is therefore how far ahead of real time the
+ *  chain can run. It stays above twice POS_CLOCK_AGREEMENT_SECONDS: a leader
+ *  and a member whose clocks both agree with the peers' can be that far apart,
+ *  and below it honest members would split over an honest proposal. */
+static constexpr int64_t POS_PROPOSAL_AHEAD_SECONDS = 150;
 /** How closely the local clock must agree with the peers' median to be trusted. */
 static constexpr int64_t POS_CLOCK_AGREEMENT_SECONDS = 60;
-/** A parent stamped at most this far ahead of the local clock is ordinary skew,
- *  scheduled from its stamp as before. */
+static_assert(POS_PROPOSAL_AHEAD_SECONDS > 2 * POS_CLOCK_AGREEMENT_SECONDS);
+/** A parent, or round 0's proposal, stamped at most this far ahead of the
+ *  local clock is ordinary skew, scheduled from its stamp as before: every
+ *  member reads the same stamp, so every member is in the same round. */
 static constexpr int64_t POS_PARENT_AHEAD_SLACK_SECONDS = 5;
 
 /** Whether the local clock agrees with the peers' (`peer_offset`, the median of
@@ -943,6 +954,15 @@ bool PosProposalTooFarAhead(int64_t stamp, int64_t consensus_min, int64_t now, b
  *  consensus allows; or, when the parent is stamped ahead of the local clock,
  *  the same interval after `parent_seen_ms`, the moment this node saw it. */
 int64_t PosProposalStartMs(int64_t parent_time, int64_t earliest_sec, int64_t parent_seen_ms, int64_t now_ms);
+/** Where a member starts the round schedule (ms) from a proposal stamped
+ *  `stamp` (seconds) that it received at `received_ms`: the stamp, which every
+ *  member shares, unless that lies more than POS_PARENT_AHEAD_SLACK_SECONDS
+ *  after the receipt, in which case the receipt plus that slack. */
+int64_t PosRoundOriginMs(int64_t stamp, int64_t received_ms);
+/** Whether a block rejected for `reason` may become valid once this node's
+ *  view of the parent chain catches up: its anchor is not known yet, not on
+ *  the parent chain's best chain now, or the parent chain cannot be asked. */
+bool PosAnchorRejectIsProvisional(const std::string& reason);
 
 /** Consensus::Params::pos_records_v2_height, mirrored like the one above.
  *  0 = never. */

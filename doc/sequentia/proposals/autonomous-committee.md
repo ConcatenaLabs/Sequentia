@@ -162,7 +162,12 @@ One round state per height being worked, discarded when the tip advances.
 ```
 
 **Backing.** Candidates are ordered by Bitcoin anchor height, fresher first,
-and then by the election key: the exponential-race score from
+counted only up to the Bitcoin height the member knows (#286): a claimed anchor
+above it, one the member has not seen yet or one that does not exist, ranks
+like an anchor at that height, so claiming a higher one buys nothing. A
+proposal whose anchor cannot be verified yet (`anchor-unknown`, `-stale`,
+`-unverifiable`) is left aside rather than excluding its leader, and is tried
+again once the member's view of Bitcoin moves. Then by the election key: the exponential-race score from
 `pos_exprace_height`, the raw leader VRF output below it. Round *r* backs the
 (r+1)-th candidate in that order. Every eligible staker proposes, not only
 committee members, so the order is complete and the same on every node that has
@@ -173,6 +178,17 @@ seen the same proposals.
 timestamp of the best-ranked candidate currently known. Reading the clock off a
 gossiped block rather than off each node's arrival time keeps honest nodes in
 the same round. `WINDOW_MS` and `ROUND_MS` are in §6.
+
+A stamp ahead of real time (a leader whose clock runs fast) would hold every
+round back until the members' clocks reached it. So `T·1000` is replaced by the
+moment the member received that candidate plus 5 s
+(`POS_PARENT_AHEAD_SLACK_SECONDS`) whenever that is earlier (#286). Honest
+clocks never reach the slack and keep the shared origin; a fast clock costs at
+most 5 s, and members then differ only by gossip latency, far inside a round. A
+member whose clock agrees with its peers' does not back a proposal stamped more
+than 150 s ahead (`POS_PROPOSAL_AHEAD_SECONDS`), which bounds how far the chain
+can run ahead of real time; the next blocks, stamped at the minimum consensus
+allows, bring it back by the length of each collection.
 
 **Validate before signing.** Proposals are recorded after only the cheap
 checks. Full validation (`TestBlockValidity`) runs once, on the proposal a node

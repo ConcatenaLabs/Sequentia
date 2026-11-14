@@ -275,6 +275,8 @@ BASE_SCRIPTS = [
     'feature_pos_records_v2.py',
     'feature_pos_split_rounds.py',
     'feature_pos_clock_warning.py',
+    'feature_pos_fast_clock_round_origin.py',
+    'feature_pos_fake_anchor.py',
     'feature_pos_min_stake.py',
     'feature_pos_escaping_stall.py',
     'feature_pos_escape_stall_activation_height.py',

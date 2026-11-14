@@ -140,6 +140,11 @@ struct MainchainSyncSnapshot {
 };
 MainchainSyncSnapshot GetMainchainSyncSnapshot();
 
+/** The parent chain's height as its daemon reports it once synced, asked again
+ *  at most every few seconds; -1 while it is unreachable or still syncing. For
+ *  ranking committee proposals by anchor freshness, never a verdict. */
+int MainchainKnownHeight();
+
 /** A block whose anchor the daemon could not yet vouch for (NOT_FOUND, STALE or
  *  NO_CONNECTION) is rejected without being remembered, so that it can be taken
  *  once the daemon's view catches up. Record that one was left aside: the

@@ -19,6 +19,7 @@
 #include <pos.h>
 #include <primitives/block.h>
 #include <protocol.h>
+#include <random.h>
 #include <script/generic.hpp>
 #include <script/sign.h>
 #include <timedata.h>
@@ -653,6 +654,7 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
 {
     m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
+    m_byzantine_fake_anchor = std::clamp<int>(gArgs.GetIntArg("-posbyzantinefakeanchor", 0), 0, 1000000);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
     m_debug_share_delay_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posdebugsharedelayms", 0), 0, 10000);
     m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
@@ -794,6 +796,7 @@ int64_t PosProducer::Step()
                 m_candidates.clear();
                 m_collected.clear();
                 m_excluded.clear();
+                m_anchor_deferred.clear();
                 m_backed_hash.SetNull();
                 m_signed_round = -1;
             }
@@ -1200,6 +1203,7 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
         m_round_height = height;
         m_candidates.clear();
         m_excluded.clear();
+        m_anchor_deferred.clear();
         m_collected.clear();
         m_backed_hash.SetNull();
         m_signed_round = -1;
@@ -1210,7 +1214,8 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
     auto it = m_candidates.find(leader);
     if (it != m_candidates.end()) return;                       // already have this leader's block
     if (m_candidates.size() >= (size_t)MAX_POS_AGG_COMMITTEE_SIZE) return;
-    m_candidates.emplace(leader, RoundCandidate{block, leader_beta});
+    m_candidates.emplace(leader, RoundCandidate{block, leader_beta,
+                                                PosRoundOriginMs(block->GetBlockTime(), GetTimeMillis() + m_debug_round_skew_ms)});
 }
 
 std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
@@ -1232,25 +1237,40 @@ std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
     // A collection can run more rounds than it has candidates (see
     // RoundsExhaustedAtMs); the order then starts over, giving each candidate
     // another round rather than leaving the extra rounds idle.
+    //
+    // Anchor freshness counts only up to the parent-chain height this node
+    // knows (#286). A claimed anchor above it is either one this node has not
+    // seen yet or one that does not exist; either way it ranks like an anchor
+    // at that height, so claiming a higher one buys nothing, and the claim is
+    // judged when the block is validated. A proposal whose anchor could not
+    // be validated yet (m_anchor_deferred) is left out until this node's view
+    // of the parent chain moves.
     if (r < 0 || m_candidates.empty()) return nullptr;
-    r %= (int)m_candidates.size();
 
     const bool exprace = PosExpRaceActive(m_chainparams.GetConsensus(), m_round_height);
     const StakeRegistry& registry = StakeRegistry::GetInstance();
     const uint64_t total_weight = exprace ? PosTotalWeight(registry) : 0;
+    const int parent_tip = m_parent_tip_seen;
+    auto ranked_anchor = [parent_tip](const RoundCandidate* c) -> int64_t {
+        const int64_t claimed = c->block->m_anchor_height;
+        return parent_tip >= 0 ? std::min<int64_t>(claimed, parent_tip) : claimed;
+    };
 
     struct Entry { const RoundCandidate* cand; arith_uint256 score; };
     std::vector<Entry> ordered;
     ordered.reserve(m_candidates.size());
     for (const auto& [leader, cand] : m_candidates) {
+        if (m_anchor_deferred.count(leader)) continue;
         arith_uint256 score;
         if (exprace) score = PosVrfScoreExp(cand.beta, registry.GetWeight(leader), total_weight);
         ordered.push_back({&cand, score});
     }
+    if (ordered.empty()) return nullptr;
+    r %= (int)ordered.size();
     std::sort(ordered.begin(), ordered.end(),
-              [exprace](const Entry& a, const Entry& b) {
-                  if (a.cand->block->m_anchor_height != b.cand->block->m_anchor_height)
-                      return a.cand->block->m_anchor_height > b.cand->block->m_anchor_height; // fresher anchor first
+              [exprace, &ranked_anchor](const Entry& a, const Entry& b) {
+                  const int64_t anchor_a = ranked_anchor(a.cand), anchor_b = ranked_anchor(b.cand);
+                  if (anchor_a != anchor_b) return anchor_a > anchor_b; // fresher anchor first
                   if (exprace) return a.score < b.score;   // exp-race: lowest weighted score
                   return a.cand->beta < b.cand->beta;       // legacy: lowest raw VRF
               });
@@ -1284,8 +1304,18 @@ std::optional<int64_t> PosProducer::RoundsExhaustedAtMs(int height) const
 {
     // m_gossip_mutex held.
     if (m_round_height != height || m_candidates.empty()) return std::nullopt;
+    return *ScheduleOriginMs() + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
+}
+
+std::optional<int64_t> PosProducer::ScheduleOriginMs() const
+{
+    // m_gossip_mutex held.
     const std::shared_ptr<const CBlock> round0 = BackedForRound(0);
-    return (int64_t)round0->nTime * 1000 + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
+    if (!round0) return std::nullopt;
+    for (const auto& [leader, cand] : m_candidates) {
+        if (cand.block == round0) return cand.origin_ms;
+    }
+    return (int64_t)round0->nTime * 1000; // unreachable: round 0 is a candidate
 }
 
 std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
@@ -1301,6 +1331,7 @@ std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
     m_propose_at_ms = ((exhausted.value_or(now) + 999) / 1000) * 1000;
     m_round_height = 0;
     m_candidates.clear();
+    m_anchor_deferred.clear();
     m_collected.clear();
     m_backed_hash.SetNull();
     m_signed_round = -1;
@@ -1385,6 +1416,24 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         }
     }
 
+    if (m_byzantine_fake_anchor > 0) {
+        // Fault injection (#286): claim an anchor far above the real one, at a
+        // hash the parent chain does not have. Cheap checks pass, so it is
+        // recorded as a candidate everywhere; the ranking must not prefer it.
+        auto fake = std::make_shared<CBlock>(*block);
+        fake->m_anchor_height += m_byzantine_fake_anchor;
+        fake->m_anchor_hash = GetRandHash();
+        fake->proof.solution = CScript();
+        std::vector<unsigned char> sig_fake;
+        if (leader_key.Sign(fake->GetHash(), sig_fake)) {
+            fake->proof.solution = CScript() << sig_fake;
+            LogPrintf("PoS gossip: BYZANTINE proposing block %s at height %d with fake anchor %s at height %u\n",
+                      fake->GetHash().GetHex(), height, fake->m_anchor_hash.GetHex(), fake->m_anchor_height);
+            FloodCompactProposal(*fake);
+            return;
+        }
+    }
+
     if (m_byzantine_invalid) {
         // Fault injection: propose a consensus-invalid block (a second coinbase →
         // bad-cb-multiple). Cheap checks (VRF, leader signature) pass, so it is
@@ -1429,6 +1478,14 @@ int64_t PosProducer::DriveRound()
     // gossiped block, so all honest nodes compute the same round_index together.
     // (Requires only loose clock agreement, well within one slot — the same
     // assumption the slot schedule already makes.)
+    // A stamp ahead of real time would hold every round back until the clock
+    // reached it, up to the POS_PROPOSAL_AHEAD_SECONDS a member accepts (#286).
+    // So the origin is the stamp only while it lies within
+    // POS_PARENT_AHEAD_SLACK_SECONDS of when this node received the proposal;
+    // past that, the receipt plus the slack (PosRoundOriginMs). Honest clocks
+    // never reach the slack and keep the shared origin; a leader's fast clock
+    // costs at most the slack, and members then differ only by gossip latency,
+    // far inside a round.
     // Scale the collection window and round length with committee size: at large
     // N, every node's proposal (to agree on the lowest-VRF leader) and a quorum of
     // BLS shares must propagate across a multi-hop gossip mesh and be verified
@@ -1470,6 +1527,22 @@ int64_t PosProducer::DriveRound()
         }
     }
 
+    // This node's view of the parent chain, for ranking anchors (#286). When it
+    // moves, proposals left aside for an anchor not yet verifiable are tried
+    // again.
+    const int parent_tip = (g_con_bitcoin_anchor && g_validate_anchor) ? MainchainKnownHeight() : -1;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (parent_tip != m_parent_tip_seen) {
+            m_parent_tip_seen = parent_tip;
+            if (!m_anchor_deferred.empty()) {
+                LogPrint(BCLog::VALIDATION, "PoS gossip: parent chain now at %d; retrying %u proposal(s) with an anchor not yet verifiable\n",
+                         parent_tip, (unsigned)m_anchor_deferred.size());
+                m_anchor_deferred.clear();
+            }
+        }
+    }
+
     // Determine the current round index and the proposal it backs.
     int round_index;
     std::shared_ptr<const CBlock> backed;
@@ -1477,10 +1550,9 @@ int64_t PosProducer::DriveRound()
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_round_height != height) return POS_PRODUCER_POLL_MS; // no active round yet
-        std::shared_ptr<const CBlock> round0 = BackedForRound(0);
-        if (!round0) return 150;                                    // no candidates yet, still collecting
-        const int64_t anchor_ms = (int64_t)round0->nTime * 1000;    // network-global schedule origin
-        const int64_t elapsed = now - anchor_ms;
+        const std::optional<int64_t> anchor_ms = ScheduleOriginMs(); // network-global schedule origin
+        if (!anchor_ms) return 150;                                  // no candidates yet, still collecting
+        const int64_t elapsed = now - *anchor_ms;
         if (elapsed < WINDOW_MS) return 150;                        // still collecting proposals
         round_index = (int)((elapsed - WINDOW_MS) / ROUND_MS);
         if (round_index >= RoundsPerCollection()) {
@@ -1612,6 +1684,7 @@ int64_t PosProducer::DriveRound()
         // An invalid block excludes its leader; next pass we back the next-lowest
         // valid candidate.
         bool valid = false;
+        std::string reject_reason;
         {
             LOCK(cs_main);
             CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
@@ -1619,13 +1692,25 @@ int64_t PosProducer::DriveRound()
                 BlockValidationState state;
                 valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *backed, tip2,
                                           /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
+                if (!valid) reject_reason = state.GetRejectReason();
             }
         }
         if (!valid) {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
             if (auto parts = ParsePosBlockChallenge(backed->proof.challenge)) {
-                m_excluded.insert(parts->leader);
-                m_candidates.erase(parts->leader);
+                if (PosAnchorRejectIsProvisional(reject_reason)) {
+                    // Not invalid, only not verifiable on this node's view of
+                    // the parent chain yet: an honest leader that saw a new
+                    // Bitcoin block first lands here too. Leave the proposal
+                    // aside, sign the next one, and try it again once this
+                    // node's view moves (#286).
+                    LogPrintf("PoS gossip: leaving aside proposal %s at height %d for now (%s)\n",
+                              backed->GetHash().GetHex(), height, reject_reason);
+                    m_anchor_deferred[parts->leader] = m_parent_tip_seen;
+                } else {
+                    m_excluded.insert(parts->leader);
+                    m_candidates.erase(parts->leader);
+                }
             }
             return 150; // re-pick the next-lowest valid leader promptly
         }

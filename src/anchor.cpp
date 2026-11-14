@@ -590,6 +590,13 @@ void LoadPosCheckpointState() EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
 
 } // namespace
 
+int MainchainKnownHeight()
+{
+    if (!MainchainSyncedTo(0)) return -1;
+    LOCK(g_anchor_mutex);
+    return g_mainchain_sync_blocks;
+}
+
 MainchainSyncSnapshot GetMainchainSyncSnapshot()
 {
     LOCK(g_anchor_mutex);
