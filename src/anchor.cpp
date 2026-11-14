@@ -1355,20 +1355,13 @@ static bool InvalidateOrphanedAnchors(ChainstateManager& chainman)
             // the blocks being disconnected are not misbehaving either
             // (ChainstateManager::IsAnchorOrphaned).
             chainman.m_anchor_invalidating = pindex_bad;
-            // Held transactions (doc 04, "Held transactions"): from before the
-            // invalidation until the record holds what left, members sign
-            // nothing and every block that leaves the active chain is noted, on
-            // whatever thread it leaves: the invalidation's own disconnects,
-            // and what the activation after it takes off below the invalidated
-            // block when another branch outweighs what remains.
-            HeldTxsOpenRecord();
         }
         BlockValidationState state;
         if (!chainman.ActiveChainstate().InvalidateBlock(state, pindex_bad)) {
             LogPrintf("WARNING: failed to invalidate block %s after parent chain reorganization: %s\n",
                       lowest_bad.ToString(), state.ToString());
             WITH_LOCK(cs_main, chainman.m_anchor_invalidating = nullptr);
-            HeldTxsCloseRecord(chainman);
+            HeldTxsFlush();
             return false;
         }
         {
@@ -1378,8 +1371,8 @@ static bool InvalidateOrphanedAnchors(ChainstateManager& chainman)
             // which no restart or later tick would ever reconsider: the node
             // would sit below the network for good. Undo the partial work
             // instead; the next start re-derives the verdict from scratch.
-            // What it took off before it stopped is recorded all the same:
-            // those blocks' anchors are off Bitcoin's best chain too.
+            // What it took off before it stopped is in the record all the same
+            // (pos_heldtxs.h, HeldTxsRecordDeparted).
             bool interrupted = false;
             {
                 LOCK(cs_main);
@@ -1392,7 +1385,7 @@ static bool InvalidateOrphanedAnchors(ChainstateManager& chainman)
                 }
             }
             if (interrupted) {
-                HeldTxsCloseRecord(chainman);
+                HeldTxsFlush();
                 return false;
             }
         }
@@ -1411,10 +1404,11 @@ static bool InvalidateOrphanedAnchors(ChainstateManager& chainman)
         }
         BlockValidationState abc_state;
         const bool activated = chainman.ActiveChainstate().ActivateBestChain(abc_state);
-        // Held transactions: keep what the certified blocks that left carried.
-        // After the activation, never on its path, so following Bitcoin is not
-        // delayed.
-        HeldTxsCloseRecord(chainman);
+        // Held transactions (doc 04, "Held transactions"): the disconnects
+        // themselves recorded what the certified blocks that left carried
+        // (HeldTxsRecordDeparted); the file is written here, after the
+        // activation, never on its path.
+        HeldTxsFlush();
         if (!activated) {
             LogPrintf("WARNING: ActivateBestChain failed after anchor invalidation: %s\n", abc_state.ToString());
             return false;
@@ -1744,15 +1738,9 @@ void AnchorWatchTask(ChainstateManager& chainman)
                 // moment the marks clear, the revived branch is a candidate, and
                 // any activation on any thread (this one's below, a peer's
                 // block, a peer's getblocks, an RPC) can take the active branch
-                // off for it. So the record opens in this hold, before the
-                // marks clear: members sign nothing, and whatever leaves the
-                // active chain is noted, until the record holds it. The walk
-                // above has already invalidated every block whose anchor was
-                // orphaned, so what can still leave is a branch that loses
-                // fork choice to the one revived, or one whose anchor Bitcoin
-                // dropped since the walk; either way it leaves because Bitcoin
-                // moved.
-                HeldTxsOpenRecord();
+                // off for it. Whichever does, its disconnects record what the
+                // certified blocks that leave carried, before it releases
+                // cs_main (HeldTxsRecordDeparted).
                 // ReconsiderAnchoredBlock clears the BLOCK_FAILED_ANCHOR marker
                 // too, and in the same hold marks failed again the descendants
                 // whose own anchor is still orphaned, so no activation, on this
@@ -1766,13 +1754,12 @@ void AnchorWatchTask(ChainstateManager& chainman)
                 UninterruptibleSleep(std::chrono::milliseconds{ms});
             }
             // Activate now, before the next entry's calls to the Bitcoin
-            // daemon, so that the record closes as soon as it can and members
-            // are kept from signing only for the activation.
+            // daemon, so the node follows the return without waiting on them.
             BlockValidationState state;
             if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
                 LogPrintf("WARNING: ActivateBestChain failed after anchor reconsideration: %s\n", state.ToString());
             }
-            HeldTxsCloseRecord(chainman);
+            HeldTxsFlush();
             // The hint is NOT erased here: it lives until the branch is seen
             // connected (above), so the certified-sibling guard covers the
             // whole un-fail -> reconnect window.

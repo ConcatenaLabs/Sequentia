@@ -699,7 +699,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-posdebugsharedelayms", "SEQUENTIA TEST ONLY: hold every received proof-of-stake share this many milliseconds before handling it, so a test can stop the node while its message handler is inside the producer. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posdebugignoreheld", "SEQUENTIA TEST ONLY: turn off the held-transactions rule (a member keeps the transactions of certified blocks a Bitcoin reorganization disconnected, and signs nothing that respends them), to build an attacker's or an old node's side in a test. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posdebugreconsideractivatems=<n>", "SEQUENTIA TEST ONLY: after the anchor watcher clears the failure marks of a branch whose Bitcoin anchor came back, wait this many milliseconds before its own activation, so that a test can have another thread's activation move the node first. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
-    argsman.AddArg("-posdebugheldfillms=<n>", "SEQUENTIA TEST ONLY: after the anchor watcher disconnects certified blocks, wait this many milliseconds before recording their transactions, so that a test can reach the signing paths while the record is being filled. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posdebugheldfillms=<n>", "SEQUENTIA TEST ONLY: after the held-transactions record takes a departure, write it to disk only this many milliseconds later, unless a flush of the chainstate writes it first, so that a test can stop the node in between. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posdebugroundskewms", "SEQUENTIA TEST ONLY: add this many milliseconds of clock skew to the autonomous producer's gossip round scheduler, to measure how much inter-node synchrony loss the round anchor tolerates before rounds desync. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posanchorrecoverywait=<n>", "SEQUENTIA: seconds the autonomous producer refuses to treat a height as vacant while a quorum-certified block at that height awaits anchor-reorg recovery (committee-equivocation prevention: it neither proposes nor countersigns a rival there). The hold ends early when the block is restored or its anchor is confirmed off the parent chain's best chain; 0 disables the guard. (default: 30)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posescapestallmtpgap=<n>", strprintf("SEQUENTIA: seconds of parent-chain (Bitcoin) median-time-past that must separate a sub-quorum (escaping-stall) block's anchor from its parent's anchor, in addition to the consensus anchor-height gap. Real-time stall evidence: during a parent-chain block-storm heights advance in seconds, so the height gap alone can be met with the chain fully alive (the 2026-07-17 finality partition). 0 disables. Skipped with -validateanchor=0. (default: %d)", (int)DEFAULT_POS_ESCAPE_STALL_MTP_GAP), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -1741,6 +1741,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 #endif
 
+    // SEQUENTIA: the held-transactions record (pos_heldtxs.h), read before
+    // anything can disconnect a block: every disconnect records what it took
+    // off, the first activation after the chainstate loads included.
+    HeldTxsInit();
+
     // ********************************************************* Step 7: load block chain
 
     fReindex = args.GetBoolArg("-reindex", false);
@@ -2314,12 +2319,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     g_pos_reconcile_min_depth = (int)std::clamp<int64_t>(
         gArgs.GetIntArg("-posreconcilemindepth", DEFAULT_POS_RECONCILE_MIN_DEPTH), 1, 1000);
 
-    // SEQUENTIA: the held-transactions record (pos_heldtxs.h), read before the
-    // producer and the anchor watcher, which use it, start. Its maintenance
-    // (the liveness bound and the backstop, the releases, the mempool) runs on
-    // a thread of its own from here, so that it never waits on the parent
+    // SEQUENTIA: the held-transactions maintenance (pos_heldtxs.h: the
+    // liveness bound and the backstop, the releases, the mempool) runs on a
+    // thread of its own from here, so that it never waits on the parent
     // daemon; Shutdown joins it before the chain state and the mempool go.
-    HeldTxsInit();
     HeldTxsStart(chainman, *node.mempool);
 
     // SEQUENTIA PoS: start the autonomous block producer if configured. With

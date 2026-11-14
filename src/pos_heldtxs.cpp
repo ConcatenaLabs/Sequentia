@@ -54,10 +54,18 @@ struct AsideBlock {
 };
 
 std::atomic<bool> g_held_active{false};
-//! The record is open (HeldTxsOpenRecord); written under cs_main.
-std::atomic<bool> g_held_filling{false};
-//! The blocks that left the active chain while the record was open.
-std::vector<const CBlockIndex*> g_departed GUARDED_BY(::cs_main);
+//! The blocks DisconnectTip took off the active chain that the record has
+//! not taken yet, with the block it read to disconnect them. Emptied, under
+//! the same cs_main hold, by HeldTxsRecordDeparted.
+struct Departed {
+    const CBlockIndex* pindex;
+    std::shared_ptr<const CBlock> block;
+};
+std::vector<Departed> g_pending GUARDED_BY(::cs_main);
+//! Certified blocks that left and are still off the active chain: a block
+//! below one of them on its old branch is held too, whichever activation
+//! took it off.
+std::set<const CBlockIndex*> g_departed_cert GUARDED_BY(::cs_main);
 //! How many blocks are set aside, read without the lock by the certification hook.
 std::atomic<size_t> g_aside_count{0};
 
@@ -131,7 +139,8 @@ int MinForkHeight() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
     return m;
 }
 
-void AddEntry(const CTransactionRef& tx, int fork_height, uint32_t release_anchor) EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
+void AddEntry(const CTransactionRef& tx, int fork_height, uint32_t release_anchor, std::optional<uint64_t> order = std::nullopt)
+    EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
     const uint256 txid = tx->GetHash();
     auto it = g_held.find(txid);
@@ -140,7 +149,7 @@ void AddEntry(const CTransactionRef& tx, int fork_height, uint32_t release_ancho
         it->second.release_anchor = std::max(it->second.release_anchor, release_anchor);
         return;
     }
-    g_held[txid] = HeldEntry{tx, fork_height, release_anchor, g_seq++};
+    g_held[txid] = HeldEntry{tx, fork_height, release_anchor, order ? *order : g_seq++};
     for (const CTxIn& in : tx->vin) {
         if (in.m_is_pegin) continue;
         g_spent_by[in.prevout] = txid;
@@ -163,6 +172,10 @@ void EraseEntry(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 //! released: validation takes g_held_mutex for every newly certified block
 //! (HeldTxsNoteCertified), and must never wait on a disk sync.
 std::optional<std::vector<unsigned char>> g_pending_save GUARDED_BY(g_held_mutex);
+//! The record changed since it was last serialized: FlushRecord serializes it.
+bool g_save_due GUARDED_BY(g_held_mutex){false};
+//! When the record last took a departure (steady ms), for -posdebugheldfillms.
+int64_t g_departure_ms GUARDED_BY(g_held_mutex){0};
 Mutex g_held_file_mutex;
 
 void SaveLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
@@ -185,11 +198,21 @@ void SaveLocked() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 //! at the end of every public function that can change the record, and by
 //! the maintenance thread. A later form always replaces an earlier one that
 //! has not been written yet, and writes happen one at a time in that order.
-void FlushRecord() LOCKS_EXCLUDED(g_held_mutex, g_held_file_mutex)
+void FlushRecord(bool force = false) LOCKS_EXCLUDED(g_held_mutex, g_held_file_mutex)
 {
     LOCK(g_held_file_mutex);
     std::optional<std::vector<unsigned char>> data;
-    WITH_LOCK(g_held_mutex, data.swap(g_pending_save));
+    {
+        LOCK(g_held_mutex);
+        // Test only (-posdebugheldfillms): a departure waits in memory for a
+        // while, unless a flush of the chainstate needs it on disk first.
+        if (!force && g_departure_ms != 0) {
+            const int64_t fill_ms = gArgs.GetIntArg("-posdebugheldfillms", 0);
+            if (fill_ms > 0 && SteadyMs() - g_departure_ms < fill_ms) return;
+        }
+        if (std::exchange(g_save_due, false)) SaveLocked();
+        data.swap(g_pending_save);
+    }
     if (!data) return;
     const fs::path tmp = gArgs.GetDataDirNet() / "heldtxs.dat.new";
     FILE* f = fsbridge::fopen(tmp, "wb");
@@ -212,7 +235,8 @@ void Changed() EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
 {
     g_block_conflict.clear();
     g_dirty_mempool = true;
-    SaveLocked();
+    // Serialized by FlushRecord, off every caller's path.
+    g_save_due = true;
 }
 
 std::optional<uint256> ConflictLocked(const CTransaction& tx) EXCLUSIVE_LOCKS_REQUIRED(g_held_mutex)
@@ -311,21 +335,140 @@ void ReleaseAllLocked(const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(g_held_mu
 } // namespace
 
 bool HeldTxsActive() { return g_held_active; }
-bool HeldTxsFilling() { return g_held_filling; }
-
-void HeldTxsOpenRecord()
+void HeldTxsNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block)
 {
     AssertLockHeld(cs_main);
+    if (!g_held_active || !pindex || !block) return;
+    g_pending.push_back(Departed{pindex, block});
+}
+
+void HeldTxsRecordDeparted(const CBlockIndex* tip)
+{
+    const auto on_chain = [tip](const CBlockIndex* p) { return tip && p->nHeight <= tip->nHeight && tip->GetAncestor(p->nHeight) == p; };
+    AssertLockHeld(cs_main);
+    if (g_pending.empty()) return;
+    std::vector<Departed> pending;
+    pending.swap(g_pending);
     if (!g_held_active) return;
-    g_departed.clear();
-    g_held_filling = true;
+    const int64_t start = GetTimeMicros();
+    // What left and has not come back, lowest first, once each: a block that
+    // left and returned within the same activation is no departure.
+    std::map<const CBlockIndex*, std::shared_ptr<const CBlock>> by_block;
+    for (const Departed& d : pending) {
+        if (!on_chain(d.pindex)) by_block[d.pindex] = d.block;
+    }
+    std::vector<std::pair<const CBlockIndex*, std::shared_ptr<const CBlock>>> off(by_block.begin(), by_block.end());
+    std::sort(off.begin(), off.end(), [](const auto& x, const auto& y) {
+        return x.first->nHeight != y.first->nHeight ? x.first->nHeight < y.first->nHeight : x.first < y.first;
+    });
+    LOCK(g_held_mutex);
+    if (g_held.empty()) g_departed_cert.clear();
+    for (auto it = g_departed_cert.begin(); it != g_departed_cert.end();) {
+        it = on_chain(*it) ? g_departed_cert.erase(it) : std::next(it);
+    }
+    // A block is as final as the highest certified block above it on its
+    // branch: hold every block at or below one that carried its parent's
+    // quorum, whether that one left in this activation or an earlier one.
+    for (const auto& [p, _] : off) {
+        if (CarriesQuorum(p)) g_departed_cert.insert(p);
+    }
+    uint32_t release_anchor = 0;
+    for (const auto& [p, _] : off) release_anchor = std::max(release_anchor, p->m_anchor_height);
+    release_anchor += POS_HELD_WINDOW;
+    // A transaction that spends the coinbase of a block that left can never be
+    // mined on the new chain (that coinbase is not mined again), nor can one
+    // that spends its outputs: holding them would only freeze their other
+    // inputs. Such a block can leave after the block that spends it, so what
+    // is already held is pruned too.
+    std::set<uint256> dead;
+    for (const auto& [p, block] : off) {
+        if (!block->vtx.empty() && block->vtx[0]->IsCoinBase()) dead.insert(block->vtx[0]->GetHash());
+    }
+    int blocks = 0;
+    int fork_height = std::numeric_limits<int>::max();
+    size_t n = 0;
+    for (const auto& [p, block] : off) {
+        // A block the rule set aside itself is the maintenance pass's, not a departure.
+        bool aside = false;
+        for (const auto& [hash, a] : g_aside) {
+            if (p->nHeight >= a.pindex->nHeight && p->GetAncestor(a.pindex->nHeight) == a.pindex) aside = true;
+        }
+        if (aside) continue;
+        bool held = false;
+        for (const CBlockIndex* c : g_departed_cert) {
+            if (c->nHeight >= p->nHeight && c->GetAncestor(p->nHeight) == p) {
+                held = true;
+                break;
+            }
+        }
+        if (!held) continue;
+        const CBlockIndex* fork = tip ? LastCommonAncestor(tip, p) : nullptr;
+        const int fh = fork ? fork->nHeight : -1;
+        fork_height = std::min(fork_height, fh);
+        ++blocks;
+        for (size_t i = 0; i < block->vtx.size(); ++i) {
+            const CTransactionRef& tx = block->vtx[i];
+            if (tx->IsCoinBase()) continue;
+            bool is_dead = false;
+            for (const CTxIn& in : tx->vin) {
+                if (!in.m_is_pegin && dead.count(in.prevout.hash)) is_dead = true;
+            }
+            if (is_dead) {
+                dead.insert(tx->GetHash());
+                continue;
+            }
+            // Parents before children, whatever order the blocks leave in.
+            AddEntry(tx, fh, release_anchor, ((uint64_t)p->nHeight << 24) | (uint64_t)i);
+            ++n;
+        }
+    }
+    for (bool more = true; more;) {
+        more = false;
+        std::vector<uint256> drop;
+        for (const auto& [txid, e] : g_held) {
+            for (const CTxIn& in : e.tx->vin) {
+                if (!in.m_is_pegin && dead.count(in.prevout.hash)) {
+                    drop.push_back(txid);
+                    break;
+                }
+            }
+        }
+        for (const uint256& txid : drop) {
+            dead.insert(txid);
+            EraseEntry(txid);
+            more = true;
+        }
+    }
+    if (blocks == 0) return;
+    // Only the lowest point any held block left from bounds the check of a
+    // proposal's ancestors (MinForkHeight), whichever entry carries it.
+    for (auto& [_, e] : g_held) e.fork_height = std::min(e.fork_height, fork_height);
+    // The departure lowered the chain: progress is read again from the new
+    // tip, and counted from here on: only a block certified after this
+    // departure ends the hold. The bound's clock starts again from the
+    // member's next honest proposal or share after a decline, since what it
+    // now holds has had no round yet. The backstop's clock runs on.
+    g_release_scanned.clear();
+    g_cert_block = HighestCertified(tip);
+    g_hold_since_ms = 0;
+    g_declined = false;
+    if (g_hold_first_ms != 0) g_hold_mark = g_cert_seq;
+    g_departure_ms = SteadyMs();
+    Changed();
+    LogPrintf("Held transactions: holding %u transaction(s) of %d disconnected block(s) above height %d "
+              "(release by anchor %u), %u held in all, filled in %.2fms\n",
+              n, blocks, fork_height, release_anchor, g_held.size(), (GetTimeMicros() - start) * 0.001);
 }
 
-void HeldTxsNoteDisconnected(const CBlockIndex* pindex)
+void HeldTxsCheckNoneCarried(const CBlockIndex* tip)
 {
     AssertLockHeld(cs_main);
-    if (g_held_filling) g_departed.push_back(pindex);
+    if (g_pending.empty()) return;
+    LogPrintf("Held transactions: ERROR: %u departure(s) carried into another activation; recording them now\n", g_pending.size());
+    HeldTxsRecordDeparted(tip);
 }
+
+void HeldTxsFlush(bool force) { FlushRecord(force); }
 
 int64_t HeldTxsBoundMs()
 {
@@ -365,79 +508,6 @@ void HeldTxsInit()
     } catch (const std::exception& e) {
         LogPrintf("Held transactions: failed to read the record: %s\n", e.what());
     }
-}
-
-static void RecordDisconnect(ChainstateManager& chainman, const std::vector<const CBlockIndex*>& disconnected)
-{
-    if (!g_held_active || disconnected.empty()) return;
-    const int64_t start = GetTimeMicros();
-    // A block is as final as the highest certified block above it: hold every
-    // block up to the highest one that carried its parent's quorum.
-    int top = -1;
-    uint32_t release_anchor = 0;
-    std::vector<std::shared_ptr<CBlock>> blocks;
-    const CBlockIndex* cert_now{nullptr};
-    {
-        LOCK(cs_main);
-        cert_now = HighestCertified(chainman.ActiveChain().Tip());
-        for (size_t i = 0; i < disconnected.size(); ++i) {
-            if (disconnected[i]->PosCarriesQuorum()) top = (int)i;
-            release_anchor = std::max(release_anchor, disconnected[i]->m_anchor_height);
-        }
-        for (int i = 0; i <= top; ++i) {
-            auto block = std::make_shared<CBlock>();
-            if (!ReadBlockFromDisk(*block, disconnected[i], Params().GetConsensus())) {
-                LogPrintf("Held transactions: cannot read disconnected block %s\n", disconnected[i]->GetBlockHash().ToString());
-                continue;
-            }
-            blocks.push_back(block);
-        }
-    }
-    LOCK(g_held_mutex);
-    g_release_scanned.clear();
-    // The disconnect lowered the chain: progress is read again from the new
-    // tip, not left for the next maintenance pass, and counted from here on:
-    // only a block certified after this disconnect ends the hold. The
-    // bound's clock starts again from the member's next honest proposal or
-    // share after a decline, since what it now holds has had no round yet.
-    // The backstop's clock runs on, so a set-aside stays bounded.
-    g_cert_block = cert_now;
-    g_hold_since_ms = 0;
-    g_declined = false;
-    if (g_hold_first_ms != 0) g_hold_mark = g_cert_seq;
-    if (top < 0) {
-        LogPrintf("Held transactions: none of the %u disconnected block(s) was certified; nothing held\n", disconnected.size());
-        return;
-    }
-    release_anchor += POS_HELD_WINDOW;
-    const int fork_height = disconnected.front()->nHeight - 1;
-    // A transaction that spends the coinbase of a disconnected block can never
-    // be mined on the new chain (that coinbase is not mined again), nor can one
-    // that spends its outputs: holding them would only freeze their other inputs.
-    std::set<uint256> dead;
-    size_t n = 0;
-    for (const auto& block : blocks) {
-        for (const CTransactionRef& tx : block->vtx) {
-            if (tx->IsCoinBase()) {
-                dead.insert(tx->GetHash());
-                continue;
-            }
-            bool is_dead = false;
-            for (const CTxIn& in : tx->vin) {
-                if (!in.m_is_pegin && dead.count(in.prevout.hash)) is_dead = true;
-            }
-            if (is_dead) {
-                dead.insert(tx->GetHash());
-                continue;
-            }
-            AddEntry(tx, fork_height, release_anchor);
-            ++n;
-        }
-    }
-    Changed();
-    LogPrintf("Held transactions: holding %u transaction(s) of %d disconnected block(s) above height %d "
-              "(release by anchor %u), %u held in all, filled in %.2fms\n",
-              n, top + 1, fork_height, release_anchor, g_held.size(), (GetTimeMicros() - start) * 0.001);
 }
 
 std::optional<uint256> HeldTxsConflict(const CTransaction& tx)
@@ -824,61 +894,6 @@ static bool Maintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
         if (added) LogPrintf("Held transactions: readmitted %u held transaction(s) to the mempool\n", added);
     }
     return false;
-}
-
-void HeldTxsCloseRecord(ChainstateManager& chainman)
-{
-    if (!g_held_active) return;
-    bool widened = false;
-    while (true) {
-        // What left and has not come back, as branches, each from its fork
-        // with the active chain up to the highest block of it that left. A
-        // block noted is off the chain only if every block above it on its
-        // branch left too, so each branch is whole. A branch the rule set
-        // aside itself (its lowest block is set aside) is the maintenance
-        // pass's, not a departure.
-        std::vector<std::vector<const CBlockIndex*>> branches;
-        {
-            LOCK(cs_main);
-            std::vector<const CBlockIndex*> departed;
-            departed.swap(g_departed);
-            const CChain& active = chainman.ActiveChain();
-            std::set<const CBlockIndex*> off;
-            for (const CBlockIndex* p : departed) {
-                if (!active.Contains(p)) off.insert(p);
-            }
-            if (off.empty()) {
-                // Closed in the hold that found nothing left to record: a
-                // block that leaves after this is not the departure's.
-                g_held_filling = false;
-                return;
-            }
-            std::set<const CBlockIndex*> below;
-            for (const CBlockIndex* p : off) below.insert(p->pprev);
-            for (const CBlockIndex* top : off) {
-                if (below.count(top)) continue;
-                std::vector<const CBlockIndex*> branch;
-                for (const CBlockIndex* p = top; p && !active.Contains(p); p = p->pprev) branch.push_back(p);
-                std::reverse(branch.begin(), branch.end());
-                if (WITH_LOCK(g_held_mutex, return g_aside.count(branch.front()->GetBlockHash()) > 0)) continue;
-                branches.push_back(std::move(branch));
-            }
-        }
-        // Test only (-posdebugheldfillms): widen the window before the record holds it.
-        if (!branches.empty() && !std::exchange(widened, true)) {
-            if (const int64_t fill_ms = gArgs.GetIntArg("-posdebugheldfillms", 0); fill_ms > 0) {
-                UninterruptibleSleep(std::chrono::milliseconds{fill_ms});
-            }
-        }
-        for (const auto& branch : branches) {
-            LogPrintf("Held transactions: %u block(s) above height %d left the active chain while the record was open\n",
-                      (unsigned)branch.size(), branch.front()->nHeight - 1);
-            RecordDisconnect(chainman, branch);
-        }
-        FlushRecord();
-        // Then look again: a block that left while this was written is noted
-        // too, and the record closes only in a hold that finds none.
-    }
 }
 
 void HeldTxsRelease(const uint256& txid, const std::string& why)
