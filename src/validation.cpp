@@ -4587,6 +4587,45 @@ bool PosCertificateIsFuller(ChainstateManager& chainman, const CBlockHeader& hea
     return std::min(PosCertificateMembers(header), PosMaxCommitteeMembers()) > (int)pindex->m_pos_countersigs;
 }
 
+std::optional<CBlockHeader> PosStoredCertificate(ChainstateManager& chainman, const uint256& hash)
+{
+    if (!g_con_pos) return std::nullopt;
+    LOCK(::cs_main);
+    const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(hash);
+    if (!pindex || !pindex->PosCarriesQuorum()) return std::nullopt;
+    if (!pindex->trimmed()) return pindex->GetBlockHeader();
+    CBlockIndex full;
+    const CBlockIndex* pfull = pindex->untrim_to(&full);
+    if (!pfull) return std::nullopt;
+    return pfull->GetBlockHeader();
+}
+
+std::shared_ptr<const StakeRegistry> PosRegistryAfter(ChainstateManager& chainman, const CBlockIndex* block)
+{
+    if (!block) return nullptr;
+    LOCK(::cs_main);
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    // The live registry is the tip's state; hand out a copy so it cannot move
+    // under the caller.
+    if (block == tip) return StakeRegistry::GetInstance().Clone();
+    if (auto snapshot = PosRegistryAfterSnapshot(block->GetBlockHash())) return snapshot;
+    // After a restart, or a sync, no snapshot is held: the tip's parent is
+    // derived from the tip's state by undoing the tip on a copy, which is the
+    // one other state a sibling certificate usually needs.
+    if (tip && tip->pprev == block && tip->nHeight > 0 && (tip->nStatus & BLOCK_HAVE_UNDO)) {
+        CBlock tip_block;
+        CBlockUndo tip_undo;
+        if (ReadBlockFromDisk(tip_block, tip, Params().GetConsensus()) && UndoReadFromDisk(tip_undo, tip)) {
+            std::shared_ptr<StakeRegistry> registry = StakeRegistry::GetInstance().Clone();
+            PosRevertBlockStake(*registry, tip_block, tip_undo, tip->nHeight);
+            PosRememberRegistryAfter(block->GetBlockHash(), registry);
+            LogPrint(BCLog::VALIDATION, "PoS: stake registry after %s rebuilt by undoing the tip\n", block->GetBlockHash().ToString());
+            return registry;
+        }
+    }
+    return nullptr;
+}
+
 bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& header)
 {
     if (!g_con_pos) return false;
@@ -4597,30 +4636,35 @@ bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& head
     const int before = pindex->m_pos_countersigs;
     if (members <= before) return false;
 
+    // The certificate is kept in the block index entry, which is persisted
+    // and is what every read of the block serves (#387): the stored body keeps
+    // the certificate it arrived with, and ReadBlockFromDisk puts the index's
+    // fuller one in its place. The certificate lies outside the block hash, so
+    // the body, its file position and its undo data stay untouched. An entry
+    // whose proof was trimmed from memory is restored first; without the proof
+    // nothing is adopted, so the count never runs ahead of what can be served.
+    if (pindex->trimmed()) pindex->untrim();
+    if (!pindex->SetProofSolution(header.proof.solution)) {
+        LogPrintf("PoS: cannot store the fuller certificate of %s (height %d); keeping %d member(s)\n",
+                  pindex->GetBlockHash().ToString(), pindex->nHeight, before);
+        return false;
+    }
     const bool carried = pindex->PosCarriesQuorum();
     pindex->m_pos_countersigs = (uint16_t)members;
-    (void)pindex->SetProofSolution(header.proof.solution);
     // Judged again against the quorum of the parent's stake state, exactly as
-    // on arrival; PosSetCertified keeps the candidate sets ordered.
-    (void)PosRecordCertified(chainman, pindex, PosQuorumAfter(pindex->pprev));
-    chainman.m_blockman.MarkBlockIndexDirty(pindex);
-
-    // Serve the fuller certificate with the body from now on. Only a block
-    // that has never been connected here is moved: its undo data, once
-    // written, is addressed by the block file the body sits in. A connected
-    // block keeps its first body; its count, verdict and index entry still
-    // carry the upgrade, and the certificate itself was relayed on gossip.
-    if (!(pindex->nStatus & BLOCK_HAVE_UNDO)) {
-        CBlock block;
-        if (ReadBlockFromDisk(block, pindex, Params().GetConsensus())) {
-            block.proof.solution = header.proof.solution;
-            const FlatFilePos pos{chainman.m_blockman.SaveBlockToDisk(block, pindex->nHeight, chainman.ActiveChain(), Params(), nullptr)};
-            if (!pos.IsNull()) {
-                pindex->nFile = pos.nFile;
-                pindex->nDataPos = pos.nPos;
-            }
+    // on arrival; PosSetCertified keeps the candidate sets ordered. A node that
+    // restarted since the parent was connected no longer knows that quorum;
+    // it derives it from the parent's registry, as the certificate was just
+    // verified against it (#277).
+    int parent_quorum = PosQuorumAfter(pindex->pprev);
+    if (parent_quorum < 0 && g_pos_public_committee) {
+        if (std::shared_ptr<const StakeRegistry> parent_registry = PosRegistryAfter(chainman, pindex->pprev)) {
+            parent_quorum = PosSlotQuorumAt(*parent_registry, pindex->nHeight);
+            pindex->pprev->m_pos_child_quorum = parent_quorum;
         }
     }
+    (void)PosRecordCertified(chainman, pindex, parent_quorum);
+    chainman.m_blockman.MarkBlockIndexDirty(pindex);
 
     const bool carries = pindex->PosCarriesQuorum();
     if (carries && !carried) {
@@ -5007,6 +5051,11 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
     if (g_con_pos && pindexDelete->nHeight > 0) {
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexDelete)) {
+            // The state this block leaves, for certificates of its children
+            // on the branch being left (#277).
+            if (!IsInitialBlockDownload()) {
+                PosRememberRegistryAfter(pindexDelete->GetBlockHash(), StakeRegistry::GetInstance().Clone());
+            }
             PosRevertBlockStake(block, block_undo, pindexDelete->nHeight);
             pindexDelete->pprev->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexDelete->nHeight);
         } else {
@@ -5285,6 +5334,11 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     if (g_con_pos && pindexNew->nHeight > 0) {
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexNew)) {
+            // The state the parent leaves, for certificates of this block's
+            // siblings once it is the tip (#277).
+            if (!IsInitialBlockDownload()) {
+                PosRememberRegistryAfter(pindexNew->pprev->GetBlockHash(), StakeRegistry::GetInstance().Clone());
+            }
             PosApplyBlockStake(blockConnecting, block_undo, pindexNew->nHeight);
             pindexNew->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexNew->nHeight + 1);
         } else {

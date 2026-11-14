@@ -19,6 +19,7 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <deque>
 #include <limits>
 
 // g_con_pos is defined in primitives/block.cpp (the consensus library) so the
@@ -2112,7 +2113,11 @@ bool CheckPosUnbondingTx(const CTransaction& tx, const CCoinsViewCache& inputs,
 
 void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 {
-    StakeRegistry& registry = StakeRegistry::GetInstance();
+    PosApplyBlockStake(StakeRegistry::GetInstance(), block, undo, height);
+}
+
+void PosApplyBlockStake(StakeRegistry& registry, const CBlock& block, const CBlockUndo& undo, int height)
+{
     // New staking outputs add weight (and, if they carry a committee BLS
     // registration whose PoP ConnectBlock has verified, register the key).
     // Creation heights ride along: the split-payout claim rules pay a delegator
@@ -2200,7 +2205,46 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 
 void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 {
-    StakeRegistry& registry = StakeRegistry::GetInstance();
+    PosRevertBlockStake(StakeRegistry::GetInstance(), block, undo, height);
+}
+
+namespace {
+Mutex g_registry_snapshots_mutex;
+//! Most recent first.
+std::deque<std::pair<uint256, std::shared_ptr<const StakeRegistry>>> g_registry_snapshots GUARDED_BY(g_registry_snapshots_mutex);
+} // namespace
+
+void PosRememberRegistryAfter(const uint256& block_hash, std::shared_ptr<const StakeRegistry> registry)
+{
+    if (!registry) return;
+    LOCK(g_registry_snapshots_mutex);
+    for (auto it = g_registry_snapshots.begin(); it != g_registry_snapshots.end(); ++it) {
+        if (it->first == block_hash) {
+            g_registry_snapshots.erase(it);
+            break;
+        }
+    }
+    g_registry_snapshots.emplace_front(block_hash, std::move(registry));
+    while (g_registry_snapshots.size() > POS_REGISTRY_SNAPSHOTS) g_registry_snapshots.pop_back();
+}
+
+std::shared_ptr<const StakeRegistry> PosRegistryAfterSnapshot(const uint256& block_hash)
+{
+    LOCK(g_registry_snapshots_mutex);
+    for (const auto& [hash, registry] : g_registry_snapshots) {
+        if (hash == block_hash) return registry;
+    }
+    return nullptr;
+}
+
+void PosClearRegistrySnapshots()
+{
+    LOCK(g_registry_snapshots_mutex);
+    g_registry_snapshots.clear();
+}
+
+void PosRevertBlockStake(StakeRegistry& registry, const CBlock& block, const CBlockUndo& undo, int height)
+{
     // Delegation and payout records first, the exact inverse of their
     // per-transaction application in PosApplyBlockStake: last transaction
     // first, each removing what it created and restoring what it spent.
