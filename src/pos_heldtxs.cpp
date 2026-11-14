@@ -385,6 +385,12 @@ void HeldTxsRecordDeparted(const CBlockIndex* tip)
         if (!block->vtx.empty() && block->vtx[0]->IsCoinBase()) dead.insert(block->vtx[0]->GetHash());
     }
     int blocks = 0;
+    //! A block left that the record does not refuse: neither one the rule set
+    //! aside, nor one that respends a held transaction, nor one built on such
+    //! a block (an operator's invalidateblock of a respend does on an RPC-only
+    //! member what a set-aside does on a producer).
+    bool departed = false;
+    std::set<const CBlockIndex*> refused;
     int fork_height = std::numeric_limits<int>::max();
     size_t n = 0;
     for (const auto& [p, block] : off) {
@@ -394,6 +400,11 @@ void HeldTxsRecordDeparted(const CBlockIndex* tip)
             if (p->nHeight >= a.pindex->nHeight && p->GetAncestor(a.pindex->nHeight) == a.pindex) aside = true;
         }
         if (aside) continue;
+        if ((p->pprev && refused.count(p->pprev)) || TxsConflictLocked(*block)) {
+            refused.insert(p);
+        } else {
+            departed = true;
+        }
         bool held = false;
         for (const CBlockIndex* c : g_departed_cert) {
             if (c->nHeight >= p->nHeight && c->GetAncestor(p->nHeight) == p) {
@@ -439,20 +450,25 @@ void HeldTxsRecordDeparted(const CBlockIndex* tip)
             more = true;
         }
     }
-    if (blocks == 0) return;
-    // Only the lowest point any held block left from bounds the check of a
-    // proposal's ancestors (MinForkHeight), whichever entry carries it.
-    for (auto& [_, e] : g_held) e.fork_height = std::min(e.fork_height, fork_height);
-    // The departure lowered the chain: progress is read again from the new
-    // tip, and counted from here on: only a block certified after this
-    // departure ends the hold. The bound's clock starts again from the
-    // member's next honest proposal or share after a decline, since what it
-    // now holds has had no round yet. The backstop's clock runs on.
+    if (!departed) return;
+    // The departure lowered the chain, whether or not anything certified
+    // left: progress is read again from the new tip, and counted from here
+    // on: only a block certified after this departure ends the hold. The
+    // bound's clock starts again from the member's next honest proposal or
+    // share after a decline, since what it holds has had no round on this
+    // chain yet. The backstop's clock runs on.
     g_release_scanned.clear();
     g_cert_block = HighestCertified(tip);
     g_hold_since_ms = 0;
     g_declined = false;
     if (g_hold_first_ms != 0) g_hold_mark = g_cert_seq;
+    if (blocks == 0) {
+        LogPrint(BCLog::VALIDATION, "Held transactions: none of the %u block(s) that left was certified; nothing held\n", off.size());
+        return;
+    }
+    // Only the lowest point any held block left from bounds the check of a
+    // proposal's ancestors (MinForkHeight), whichever entry carries it.
+    for (auto& [_, e] : g_held) e.fork_height = std::min(e.fork_height, fork_height);
     g_departure_ms = SteadyMs();
     Changed();
     LogPrintf("Held transactions: holding %u transaction(s) of %d disconnected block(s) above height %d "
