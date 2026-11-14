@@ -362,9 +362,16 @@ void HeldTxsRecordDeparted(const CBlockIndex* tip)
         return x.first->nHeight != y.first->nHeight ? x.first->nHeight < y.first->nHeight : x.first < y.first;
     });
     LOCK(g_held_mutex);
-    if (g_held.empty()) g_departed_cert.clear();
+    // A certified block that left is kept until it is back on the chain, or
+    // until the tip anchors POS_HELD_WINDOW Bitcoin blocks above it, when
+    // whatever it would make the record hold is released anyway. It is not
+    // forgotten because nothing is held: InvalidateBlock takes blocks off one
+    // per hold, top down, and a certified block that carried no transaction
+    // leaves first and holds nothing, yet the blocks below it are as final.
+    const uint32_t tip_anchor = tip ? tip->m_anchor_height : 0;
     for (auto it = g_departed_cert.begin(); it != g_departed_cert.end();) {
-        it = on_chain(*it) ? g_departed_cert.erase(it) : std::next(it);
+        const bool expired = tip_anchor >= (*it)->m_anchor_height + POS_HELD_WINDOW;
+        it = (on_chain(*it) || expired) ? g_departed_cert.erase(it) : std::next(it);
     }
     // A block is as final as the highest certified block above it on its
     // branch: hold every block at or below one that carried its parent's
