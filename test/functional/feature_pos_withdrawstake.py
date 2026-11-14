@@ -108,10 +108,10 @@ class PosWithdrawStakeTest(BitcoinTestFramework):
         assert_equal(utxos[0]["withdrawable"], False)
         assert_equal(utxos[0]["funded_height"], fund_height)
         assert_equal(utxos[0]["spendable_height"], fund_height + UNBONDING)
-        assert "unbonding until block %d" % (fund_height + UNBONDING) in utxos[0]["status"]
+        assert "locked until block %d" % (fund_height + UNBONDING) in utxos[0]["status"]
 
         self.log.info("Too early: withdrawstake refuses, naming the unlock height")
-        assert_raises_rpc_error(-4, "unbonding until block %d" % (fund_height + UNBONDING),
+        assert_raises_rpc_error(-4, "locked until block %d" % (fund_height + UNBONDING),
                                 n0.withdrawstake)
 
         self.log.info("Mature the unbonding lock and withdraw everything")
@@ -203,7 +203,7 @@ class PosWithdrawStakeTest(BitcoinTestFramework):
         assert_equal(utxos[0]["amount"], Decimal(140))
         assert_equal(utxos[0]["withdrawable"], False)  # the clock restarted
         assert_equal(utxos[0]["spendable_height"], restake_height + UNBONDING)
-        assert_raises_rpc_error(-4, "unbonding until block %d" % (restake_height + UNBONDING),
+        assert_raises_rpc_error(-4, "locked until block %d" % (restake_height + UNBONDING),
                                 n0.withdrawstake)
 
         self.log.info("A withdrawal above the mature total is refused")
