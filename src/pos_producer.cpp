@@ -1145,7 +1145,8 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
     auto it = m_candidates.find(leader);
     if (it != m_candidates.end()) return;                       // already have this leader's block
     if (m_candidates.size() >= (size_t)MAX_POS_AGG_COMMITTEE_SIZE) return;
-    m_candidates.emplace(leader, RoundCandidate{block, leader_beta});
+    m_candidates.emplace(leader, RoundCandidate{block, leader_beta,
+                                                PosRoundOriginMs(block->GetBlockTime(), GetTimeMillis() + m_debug_round_skew_ms)});
 }
 
 std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
@@ -1219,8 +1220,18 @@ std::optional<int64_t> PosProducer::RoundsExhaustedAtMs(int height) const
 {
     // m_gossip_mutex held.
     if (m_round_height != height || m_candidates.empty()) return std::nullopt;
+    return *ScheduleOriginMs() + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
+}
+
+std::optional<int64_t> PosProducer::ScheduleOriginMs() const
+{
+    // m_gossip_mutex held.
     const std::shared_ptr<const CBlock> round0 = BackedForRound(0);
-    return (int64_t)round0->nTime * 1000 + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
+    if (!round0) return std::nullopt;
+    for (const auto& [leader, cand] : m_candidates) {
+        if (cand.block == round0) return cand.origin_ms;
+    }
+    return (int64_t)round0->nTime * 1000; // unreachable: round 0 is a candidate
 }
 
 std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
@@ -1364,6 +1375,14 @@ int64_t PosProducer::DriveRound()
     // gossiped block, so all honest nodes compute the same round_index together.
     // (Requires only loose clock agreement, well within one slot — the same
     // assumption the slot schedule already makes.)
+    // A stamp ahead of real time would hold every round back until the clock
+    // reached it, up to the POS_PROPOSAL_AHEAD_SECONDS a member accepts (#286).
+    // So the origin is the stamp only while it lies within
+    // POS_PARENT_AHEAD_SLACK_SECONDS of when this node received the proposal;
+    // past that, the receipt plus the slack (PosRoundOriginMs). Honest clocks
+    // never reach the slack and keep the shared origin; a leader's fast clock
+    // costs at most the slack, and members then differ only by gossip latency,
+    // far inside a round.
     // Scale the collection window and round length with committee size: at large
     // N, every node's proposal (to agree on the lowest-VRF leader) and a quorum of
     // BLS shares must propagate across a multi-hop gossip mesh and be verified
@@ -1412,10 +1431,9 @@ int64_t PosProducer::DriveRound()
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_round_height != height) return POS_PRODUCER_POLL_MS; // no active round yet
-        std::shared_ptr<const CBlock> round0 = BackedForRound(0);
-        if (!round0) return 150;                                    // no candidates yet, still collecting
-        const int64_t anchor_ms = (int64_t)round0->nTime * 1000;    // network-global schedule origin
-        const int64_t elapsed = now - anchor_ms;
+        const std::optional<int64_t> anchor_ms = ScheduleOriginMs(); // network-global schedule origin
+        if (!anchor_ms) return 150;                                  // no candidates yet, still collecting
+        const int64_t elapsed = now - *anchor_ms;
         if (elapsed < WINDOW_MS) return 150;                        // still collecting proposals
         round_index = (int)((elapsed - WINDOW_MS) / ROUND_MS);
         if (round_index >= RoundsPerCollection()) {

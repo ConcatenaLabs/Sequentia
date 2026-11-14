@@ -149,6 +149,9 @@ member whose clock agrees with its peers' does not countersign a proposal
 stamped more than five minutes ahead of both its clock and the earliest time
 consensus allows; and a node warns when its clock and the network disagree.
 Consensus still accepts a block up to two hours ahead of the receiving clock.
+Since #286 the bound is 150 s instead of five minutes, and a stamp ahead of real
+time no longer holds the round schedule back: members start it no later than
+5 s after receiving the proposal.
 25.2.1 also relays the split round script, which 25.2.0 left out of the default
 relay policy, so split pool claims reach the network.
 

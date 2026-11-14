@@ -252,6 +252,9 @@ private:
     //! starting over from the first once every candidate has had a round;
     //! nullptr if no candidate is known. m_gossip_mutex held.
     std::shared_ptr<const CBlock> BackedForRound(int r) const;
+    //! Where the round schedule starts (ms): round 0's origin_ms; nullopt
+    //! with no candidates. m_gossip_mutex held.
+    std::optional<int64_t> ScheduleOriginMs() const;
     //! Proposal collection window and round length (ms): local liveness timings
     //! scaled with the committee size, or the -poswindowms/-posroundms overrides.
     int64_t WindowMs() const;
@@ -329,6 +332,10 @@ private:
     struct RoundCandidate {
         std::shared_ptr<const CBlock> block;
         uint256 beta;
+        //! Where the round schedule starts if this is round 0's proposal: its
+        //! stamp, or shortly after this node received it when the stamp is
+        //! further ahead (PosRoundOriginMs).
+        int64_t origin_ms{0};
     };
 
     // Gossip round state (one round per height). Every eligible member proposes,

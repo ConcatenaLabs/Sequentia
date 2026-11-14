@@ -174,6 +174,17 @@ timestamp of the best-ranked candidate currently known. Reading the clock off a
 gossiped block rather than off each node's arrival time keeps honest nodes in
 the same round. `WINDOW_MS` and `ROUND_MS` are in §6.
 
+A stamp ahead of real time (a leader whose clock runs fast) would hold every
+round back until the members' clocks reached it. So `T·1000` is replaced by the
+moment the member received that candidate plus 5 s
+(`POS_PARENT_AHEAD_SLACK_SECONDS`) whenever that is earlier (#286). Honest
+clocks never reach the slack and keep the shared origin; a fast clock costs at
+most 5 s, and members then differ only by gossip latency, far inside a round. A
+member whose clock agrees with its peers' does not back a proposal stamped more
+than 150 s ahead (`POS_PROPOSAL_AHEAD_SECONDS`), which bounds how far the chain
+can run ahead of real time; the next blocks, stamped at the minimum consensus
+allows, bring it back by the length of each collection.
+
 **Validate before signing.** Proposals are recorded after only the cheap
 checks. Full validation (`TestBlockValidity`) runs once, on the proposal a node
 is about to sign. A block that fails it excludes its leader for the height, and

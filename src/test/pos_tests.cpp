@@ -2326,9 +2326,12 @@ BOOST_AUTO_TEST_CASE(pos_clock_policy)
     BOOST_CHECK(!PosClockAgreesWithPeers(-2 * 3600));
 
     const int64_t now = 1'800'000'000;
-    // Up to five minutes ahead of the clock is backed; beyond, not.
-    BOOST_CHECK(!PosProposalTooFarAhead(now + 300, now - 100, now, true));
-    BOOST_CHECK(PosProposalTooFarAhead(now + 301, now - 100, now, true));
+    // Up to 150 s ahead of the clock is backed; beyond, not.
+    BOOST_CHECK(!PosProposalTooFarAhead(now + 150, now - 100, now, true));
+    BOOST_CHECK(PosProposalTooFarAhead(now + 151, now - 100, now, true));
+    // A leader and a member that both agree with the peers can be two minutes
+    // apart: such a proposal is still backed.
+    BOOST_CHECK(!PosProposalTooFarAhead(now + 2 * POS_CLOCK_AGREEMENT_SECONDS, now - 100, now, true));
     // Never stricter than consensus: the earliest stamp it allows is backed
     // however far ahead it is, and nothing after it beyond the margin.
     BOOST_CHECK(!PosProposalTooFarAhead(now + 3600, now + 3600, now, true));
@@ -2348,6 +2351,16 @@ BOOST_AUTO_TEST_CASE(pos_clock_policy)
     BOOST_CHECK_EQUAL(PosProposalStartMs(now + 3600, now + 3660, seen_ms, now_ms), seen_ms + 60000);
     // A larger slot gate keeps its length too.
     BOOST_CHECK_EQUAL(PosProposalStartMs(now + 3600, now + 3690, seen_ms, now_ms), seen_ms + 90000);
+
+    // #286: the round schedule starts at round 0's stamp, which every member
+    // shares, while that lies within 5 s of when the proposal arrived...
+    const int64_t recv_ms = now_ms;
+    BOOST_CHECK_EQUAL(PosRoundOriginMs(now - 2, recv_ms), (now - 2) * 1000);
+    BOOST_CHECK_EQUAL(PosRoundOriginMs(now + 5, recv_ms), (now + 5) * 1000);
+    // ...and no later than 5 s after arrival when the stamp is further ahead:
+    // a leader's fast clock no longer holds the rounds back.
+    BOOST_CHECK_EQUAL(PosRoundOriginMs(now + 6, recv_ms), recv_ms + 5000);
+    BOOST_CHECK_EQUAL(PosRoundOriginMs(now + 149, recv_ms), recv_ms + 5000);
 }
 
 // A delegation record spent and re-created with the same content in one block,

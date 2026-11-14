@@ -2668,8 +2668,12 @@ static void UpdatePosClockWarning(const CBlockIndex* tip)
                         "time zone right: with a wrong clock this node judges block times wrongly.",
                         minutes, *offset > 0 ? "behind" : "ahead of");
     }
+    // The committee lets the chain run up to POS_PROPOSAL_AHEAD_SECONDS ahead
+    // of a clock that agrees with the peers' (to within
+    // POS_CLOCK_AGREEMENT_SECONDS), and the next blocks bring it back: that
+    // much is no sign of a wrong clock here, so it raises no warning (#286).
     const int64_t ahead = (int64_t)tip->nTime - GetTime<std::chrono::seconds>().count();
-    if (ahead > POS_CLOCK_AGREEMENT_SECONDS) {
+    if (ahead > POS_PROPOSAL_AHEAD_SECONDS + POS_CLOCK_AGREEMENT_SECONDS) {
         if (!msg.empty()) msg += " ";
         msg += strprintf("The newest block is stamped about %d minute(s) after this computer's clock: either this "
                          "clock is behind, or the block's producer has a clock running fast.", (ahead + 59) / 60);

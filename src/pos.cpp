@@ -513,6 +513,12 @@ int64_t PosProposalStartMs(int64_t parent_time, int64_t earliest_sec, int64_t pa
     if (parent_time * 1000 <= now_ms + POS_PARENT_AHEAD_SLACK_SECONDS * 1000) return earliest_sec * 1000;
     return parent_seen_ms + std::max<int64_t>(0, earliest_sec - parent_time) * 1000;
 }
+
+int64_t PosRoundOriginMs(int64_t stamp, int64_t received_ms)
+{
+    return std::min<int64_t>(stamp * 1000, received_ms + POS_PARENT_AHEAD_SLACK_SECONDS * 1000);
+}
+
 int g_pos_records_v2_height = 0;
 
 uint256 PosPayoutSeedForChild(const CBlockIndex* pindexPrev)
