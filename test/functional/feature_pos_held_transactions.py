@@ -587,6 +587,11 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.wait_until(lambda: len(self.nodes[1].getheldtxs()["txids"]) >= n_tx, timeout=300)
         lines = self.log_has(1, "Held transactions: holding", sizes[1])
         self.record("i", "fill", lines[-1].split(" ", 1)[1] if lines else "no fill line")
+        # The record is taken in each disconnect's own hold of cs_main: its cost is the sum over them.
+        import re
+        ms = [float(m.group(1)) for m in (re.search(r"filled in ([0-9.]+)ms", x) for x in lines) if m]
+        self.record("i", "fill total", "%d record line(s), %.2f ms in all, %.2f ms at most in one hold" %
+                    (len(ms), sum(ms), max(ms) if ms else 0.0))
         dis = self.log_has(1, "Parent chain reorganization detected", sizes[1])
         self.record("i", "disconnect lines", len(dis))
         self.rejoin()

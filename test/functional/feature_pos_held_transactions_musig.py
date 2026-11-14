@@ -7,12 +7,11 @@
 The gossip round is attacked in feature_pos_held_transactions.py. Here the
 other ways a key signs a block are run against a node that holds a certified
 transaction T a Bitcoin reorganization disconnected:
-- while the anchor watcher fills the record (widened with the test-only
-  -posdebugheldfillms), generateposblock, getposblocktemplate,
-  musigpartialsign and submitposblock all refuse with held-filling;
-- a block that carries R, a respend of T, is refused by getposblocktemplate's
-  caller's partners: musigpartialsign and submitposblock, with the transaction
-  named;
+- the record holds T in the hold of cs_main that disconnects its block, so
+  with the file's write held back (the test-only -posdebugheldfillms), a block
+  that carries R, a respend of T, is already refused by musigpartialsign and
+  submitposblock, with the transaction named, and R by the mempool, before the
+  record is on disk;
 - once a single-signer escaping-stall block X carrying R is the node's tip,
   generateposblock, getposblocktemplate, musigpartialsign and submitposblock
   each refuse a block built on it, naming X;
@@ -25,6 +24,7 @@ parent chain.
 """
 
 import os
+import struct
 import subprocess
 import time
 import urllib.parse
@@ -160,6 +160,15 @@ class HeldTransactionsMuSigTest(BitcoinTestFramework):
             partials.append(node.musigpartialsign(*args)["partialsig"])
         return node.musigaggregate(tmpl["members"], nonces, partials, msg)["signature"]
 
+    def held_on_disk(self, node):
+        """How many transactions node's record file holds (0 when it has none)."""
+        p = os.path.join(node.datadir, CHAIN, "heldtxs.dat")
+        if not os.path.exists(p):
+            return 0
+        with open(p, "rb") as f:
+            data = f.read(12)
+        return struct.unpack("<IQ", data)[1] if len(data) == 12 else 0
+
     def anchored_at_tip(self, node):
         return node.getblockheader(node.getbestblockhash())["anchorheight"] == self.btc().getblockcount()
 
@@ -205,10 +214,9 @@ class HeldTransactionsMuSigTest(BitcoinTestFramework):
         self.sync_blocks()
         assert t_id in m.getblock(b_t)["tx"]
         self.record("T", "%s certified in %s" % (t_id, b_t))
-        # A template for the fill-window probe of submitposblock (leader key 0).
-        pre = self.template(att)
-
-        # Bitcoin reorganizes 2 deep. Node 0 then sleeps FILL_MS before filling its record.
+        # Bitcoin reorganizes 2 deep. Node 0 writes its record to disk only
+        # FILL_MS after the departure (-posdebugheldfillms): every refusal
+        # below happens before that write, from the record in memory.
         log0 = m.debug_log_path
         size0 = os.path.getsize(log0)
         b = self.btc()
@@ -222,19 +230,18 @@ class HeldTransactionsMuSigTest(BitcoinTestFramework):
                 return "Parent chain reorganization detected" in f.read()
         self.wait_until(reorg_seen, timeout=30)
         t_seen = time.time()
-        self.refused("fill: generateposblock", "held-filling", lambda: m.generateposblock(self.stakers[0][0], self.wifs()[1:]))
-        self.refused("fill: getposblocktemplate", "held-filling", lambda: self.template(m))
-        self.refused("fill: musigpartialsign", "held-filling",
-                     lambda: m.musigpartialsign("f", self.stakers[1][0], pre["members"], ["00" * 66] * 3, pre["signhash"], pre["block"]))
-        self.refused("fill: submitposblock", "held-filling", lambda: m.submitposblock(pre["block"], self.stakers[0][0], "00" * 64))
-        self.record("fill probes", "all four refused %.1fs after the reorganization was logged (window %d ms)" % (time.time() - t_seen, FILL_MS))
-        assert time.time() - t_seen < FILL_MS / 1000.0
-        self.wait_until(lambda: t_id in m.getheldtxs()["txids"], timeout=60)
+        while t_id not in m.getheldtxs()["txids"]:
+            assert time.time() - t_seen < FILL_MS / 1000.0, "T not held within the file-write delay"
+            time.sleep(0.05)
+        t_held = time.time() - t_seen
+        assert_equal(self.held_on_disk(m), 0)
         self.sync_blocks()
         p_hash = m.getbestblockhash()
-        self.record("held", "node 0 holds T; both nodes on P %s (height %d)" % (p_hash, m.getblockcount()))
+        self.record("held", "node 0 holds T %.2f s after the reorganization was logged, its file not yet written; both nodes on P %s (height %d)" %
+                    (t_held, p_hash, m.getblockcount()))
 
-        # A block carrying R, assembled by the attacker, which runs no rule.
+        # R, everywhere at once: node 0 never signs over the departure.
+        self.refused("direct: sendrawtransaction of R", "txn-held-conflict", lambda: m.sendrawtransaction(r_hex))
         att.prioritisetransaction(txid=t_id, fee_delta=-100000000)
         att.sendrawtransaction(r_hex)
         d = self.template(att)
@@ -246,6 +253,14 @@ class HeldTransactionsMuSigTest(BitcoinTestFramework):
                      lambda: m.submitposblock(dblk, self.stakers[0][0], d_sig))
         self.refused("direct: musigpartialsign without the block", "pass the block to sign",
                      lambda: self.musig(m, d, "d2"))
+        elapsed = time.time() - t_seen
+        on_disk = self.held_on_disk(m)
+        self.record("before the write", "every path refused R %.2f s after the reorganization was logged; %d held on disk (write held back %d ms)" %
+                    (elapsed, on_disk, FILL_MS))
+        assert_equal(on_disk, 0)
+        assert elapsed < FILL_MS / 1000.0
+        self.wait_until(lambda: self.held_on_disk(m) >= 1, timeout=FILL_MS / 1000.0 + 30)
+        self.record("after the write", "%d held on disk %.2f s after the reorganization was logged" % (self.held_on_disk(m), time.time() - t_seen))
 
         # X: a single-signer escaping-stall block carrying R, the holding node's tip (no producer: no set-aside).
         x = att.generateposblock(self.stakers[0][0], [])

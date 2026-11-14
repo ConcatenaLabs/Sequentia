@@ -18,10 +18,12 @@ counted from that decline, must release T on time:
            (getbestblockhash) and holds back every later one, on a tick that
            has later ones to make (Bitcoin has just moved).
   window   a second Bitcoin reorganization arrives just before the backstop
-           is due, with the gap between the disconnect and the fill of the
-           record widened (-posdebugheldfillms): the release falls inside that
-           gap. T is released on time, the record then takes what the second
-           reorganization disconnected, and its respend is refused.
+           is due, with the record's file written only later
+           (-posdebugheldfillms). The record holds T2, what it disconnected,
+           from the disconnect itself: T2's respend is refused before the
+           backstop and before the file is written. The backstop's clock runs
+           on through a disconnect, so it releases T and T2 together, on
+           time.
   stops    node 0 is stopped and started again and again while it holds: just
            after a decline, around the moment the backstop releases, and
            before its start has finished. It must exit cleanly every time,
@@ -48,7 +50,9 @@ BACKSTOP_S = 2 * (12 * ROUND_MS + WINDOW_MS) / 1000.0
 # What a release may add to the backstop: the maintenance thread's period and this test's sampling.
 SLACK_S = 1.5
 RPC_TIMEOUT_S = int(os.environ.get("CR4_RPC_TIMEOUT", "10"))
-FILL_MS = 4000
+FILL_MS = 8000
+# How long before the backstop the window case's second reorganization lands.
+LEAD_S = 5.0
 CASES = os.environ.get("CR4_HANG", "hung,partial,window,stops,stopped").split(",")
 
 
@@ -298,27 +302,39 @@ class HeldTransactionsParentHangTest(HeldTransactionsRpcLivenessTest):
         att.sendrawtransaction(r1_hex)
         size0 = os.path.getsize(m.debug_log_path)
         t0 = self.offer_r("window", t1_id, r1_id)
-        # The second reorganization, timed so that the backstop is due inside the fill window.
-        time.sleep(max(0, BACKSTOP_S - FILL_MS / 2000.0 - (time.time() - t0)))
+        # The second reorganization, LEAD_S before the backstop is due.
+        time.sleep(max(0, BACKSTOP_S - LEAD_S - (time.time() - t0)))
         b.invalidateblock(q)
         self.btc_mine(2)
-        elapsed, rel = self.wait_release("window", t1_id, t0, size0, timeout=60)
-        self.wait_until(lambda: t2_id in m.getheldtxs()["txids"], timeout=60)
-        detect = self.lines(size0, "Parent chain reorganization detected")
-        fill = self.lines(size0, "Held transactions: holding ")
-        self.record("window: order in node 0's log", [x.split(" ", 1)[0][11:] + " " + x.split("] ", 3)[-1][:70] for x in (detect[:1] + rel[:1] + fill[:1])])
-        self.check_release(elapsed, rel)
-        assert detect and fill and detect[0] < rel[0] < fill[0], "the release did not fall inside the fill window"
-        inf = m.getheldtxs()
-        assert_equal(inf["txids"], [t2_id])
-        assert_equal(inf["held_for_ms"], -1)
-        self.record("window: after the fill", "node 0 holds T2 only (%s), no clock running" % t2_id)
-        # The record taken after the window protects T2 like any other.
-        self.sync_blocks()
+        while t2_id not in m.getheldtxs()["txids"]:
+            assert time.time() - t0 < BACKSTOP_S, "T2 not held before the backstop"
+            time.sleep(0.05)
+        t_held2 = time.time() - t0
+        # Never signs over the departure: R2 refused at once, before the backstop and the file's write.
+        self.wait_until(lambda: m.getbestblockhash() == att.getbestblockhash(), timeout=10)
         att.prioritisetransaction(txid=t2_id, fee_delta=-100000000)
         att.sendrawtransaction(r2_hex)
-        self.offer_r("window T2", t2_id, r2_id)
-        assert m.getheldtxs()["held_for_ms"] >= 0
+        # A block carrying R2 and not R1, so the refusal can only be T2's.
+        att.prioritisetransaction(txid=r1_id, fee_delta=-100000000)
+        d = self.template(att)
+        att.prioritisetransaction(txid=r1_id, fee_delta=100000000)
+        assert t1_id in m.getheldtxs()["txids"] and t2_id in m.getheldtxs()["txids"], "released before the probe"
+        self.refused("window: R2 before the backstop", "held-conflict: transaction %s respends an input of held transaction %s" % (r2_id, t2_id),
+                     lambda: self.musig(m, d, "window2", d["block"]))
+        t_refused2 = time.time() - t0
+        self.record("window: T2", "held %.2fs and R2 refused %.2fs after the first decline (backstop %.2fs)" % (t_held2, t_refused2, BACKSTOP_S))
+        assert t_refused2 < BACKSTOP_S, "R2 was refused only after the backstop"
+        elapsed, rel = self.wait_release("window", t1_id, t0, size0, timeout=60)
+        detect = self.lines(size0, "Parent chain reorganization detected")
+        # The first line that holds something: InvalidateBlock records each block it takes off in its own
+        # iteration, so the empty certified block above T2's comes first, holding nothing.
+        fill = [x for x in self.lines(size0, "Held transactions: holding ") if "holding 0 " not in x]
+        self.record("window: order in node 0's log", [x.split(" ", 1)[0][11:] + " " + x.split("] ", 3)[-1][:70] for x in (detect[:1] + fill[:1] + rel[:1])])
+        self.check_release(elapsed, rel)
+        assert detect and fill and detect[0] < fill[0] < rel[0], "T2 was not recorded before the backstop"
+        inf = m.getheldtxs()
+        assert_equal(inf["txids"], [])
+        self.record("window: after the backstop", "node 0 holds nothing: the backstop's clock ran on through the disconnect")
         self.settle()
 
     def case_stops(self, vout):
@@ -412,7 +428,7 @@ class HeldTransactionsParentHangTest(HeldTransactionsRpcLivenessTest):
             self.log.info("(partial) Bitcoin Core answers the first call of a tick and no later one")
             self.case_partial(v[1])
         if "window" in CASES:
-            self.log.info("(window) the backstop falls between a disconnect and the fill of the record")
+            self.log.info("(window) a departure just before the backstop is due")
             self.case_window(v[2], v[3])
         if "stops" in CASES:
             self.log.info("(stops) node 0 stopped and started while it holds")

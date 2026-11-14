@@ -83,7 +83,7 @@ EXTENDED_SCRIPTS = [
     'feature_pos_held_transactions.py',
     'feature_pos_held_transactions_musig.py',
     'feature_pos_held_transactions_rpc_liveness.py',
-    'feature_pos_held_transactions_fill_probe.py',
+    'feature_pos_held_transactions_departure_probe.py',
     'feature_pos_held_transactions_flips.py',
     'feature_pos_held_transactions_parent_hang.py',
     # Longest test should go first, to favor running tests in parallel
