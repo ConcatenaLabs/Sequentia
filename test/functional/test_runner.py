@@ -282,6 +282,7 @@ BASE_SCRIPTS = [
     'feature_pos_parent_outage_no_permanent_invalid.py',
     'feature_pos_parent_outage_connect_time_stall.py',
     'feature_pos_autonomous_escaping_stall.py',
+    'feature_pos_ancestry_lock_certified_parent.py',
     'feature_pos_escaping_stall_contested_parent.py',
     'feature_pos_parent_reorg_recovery.py',
     'feature_pos_finalized_anchor_reorg.py',

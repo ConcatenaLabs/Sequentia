@@ -183,7 +183,8 @@ the node backs the next candidate. Only validated blocks are ever signed.
 a rival at that height until the round has ended, it has asked its peers for a
 certificate on X (`getposcert`), and one further `ROUND_MS` has passed in
 silence. It also does not sign or lead at the next height on a parent that is a
-rival of X until the escaping-stall evidence holds for that parent. The
+rival of X until that parent is final on this node, or the escaping-stall
+evidence holds for it. The
 arithmetic that makes this safe, and what it cannot bind, are in
 [`../04-proof-of-stake.md`](../04-proof-of-stake.md) §9.
 
