@@ -24,6 +24,7 @@
 #include <primitives/transaction.h>
 #include <uint256.h>
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -61,29 +62,30 @@ bool HeldTxsActive();
 //! startup, before the producer and the anchor watcher start.
 void HeldTxsInit();
 
-//! The record of a departure. The anchor watcher opens it in the same
-//! cs_main hold as any change it makes that lets fork choice leave the active
-//! chain (a block invalidated, a failure mark cleared), and closes it once the
-//! activation that follows has run. While it is open, every block that leaves
-//! the active chain, on any thread (the watcher's own activation, a peer's
-//! block, a peer's getblocks, an RPC), is noted, and a member signs nothing.
-//! Closing it holds the transactions of the noted blocks that are off the
-//! active chain then, as a disconnect of their branch: every transaction of
-//! every block at or below the highest of them that carried its parent's
-//! quorum. So whichever thread moves the node first, what left is recorded
-//! before any member signs again. cs_main held; the record must be closed.
-void HeldTxsOpenRecord();
-//! DisconnectTip took `pindex` off the active chain. cs_main held.
-void HeldTxsNoteDisconnected(const CBlockIndex* pindex);
-//! Record what the noted blocks carried, write the record, and let members
-//! sign again. No lock held.
-void HeldTxsCloseRecord(ChainstateManager& chainman);
-
-//! The record is open (HeldTxsOpenRecord): a member signs nothing meanwhile.
-//! A signer reads it with cs_main held, in the hold in which it checks the
-//! block against the record, so that it sees either no departure begun or
-//! the record holding what left.
-bool HeldTxsFilling();
+//! DisconnectTip took `pindex` off the active chain; `block` is the block it
+//! read to do so. Kept until HeldTxsRecordDeparted, in the same cs_main hold:
+//! nothing is read or written here, so the disconnect is not slowed.
+//! cs_main held.
+void HeldTxsNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block);
+//! Record what the blocks DisconnectTip took off carried, for every block
+//! not on the chain that ends at `tip` (the active tip, or the coins tip while
+//! a disconnect is being flushed): every transaction of every block at or below one that
+//! carried its parent's quorum on its branch, whatever thread and whatever
+//! cause took it off (an anchor invalidation, a reconsideration, a peer's
+//! block, an RPC). Every caller of DisconnectTip calls it before it releases
+//! cs_main, on every exit, so no other thread and no signer ever sees a
+//! departure the record does not hold. The record is written to disk later,
+//! with no lock held (HeldTxsFlush), and before any flush of the chainstate
+//! that has the departure in it (HeldTxsFlush from FlushStateToDisk).
+//! cs_main held.
+void HeldTxsRecordDeparted(const CBlockIndex* tip);
+//! At the start of an activation: nothing an earlier one disconnected may be
+//! left unrecorded. Records and logs anything that is. cs_main held.
+void HeldTxsCheckNoneCarried(const CBlockIndex* tip);
+//! Write the record if it changed. Takes no lock that a caller of
+//! HeldTxsRecordDeparted holds except cs_main, which it never takes. `force`:
+//! FlushStateToDisk, which must not persist a departure the file lacks.
+void HeldTxsFlush(bool force = false);
 
 //! The held transaction `tx` conflicts with: one that spends an outpoint `tx`
 //! spends, when `tx` is not that transaction.

@@ -5085,6 +5085,16 @@ bool CChainState::FlushStateToDisk(
         fDoFullFlush = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
         // Write blocks and block index to disk.
         if (fDoFullFlush || fPeriodicWrite) {
+            // Held transactions (pos_heldtxs.h): what left the active chain is
+            // in the record on disk before the chainstate without it is, so a
+            // crash leaves either the blocks connected (they leave again at
+            // the next start, and are recorded then) or the record holding
+            // them. Judged against the coins tip, which a disconnect being
+            // flushed has already moved.
+            if (this == &m_chainman.ActiveChainstate()) {
+                HeldTxsRecordDeparted(m_blockman.LookupBlockIndex(CoinsTip().GetBestBlock()));
+                HeldTxsFlush(/*force=*/true);
+            }
             // Ensure we can write block index
             if (!CheckDiskSpace(gArgs.GetBlocksDirPath())) {
                 return AbortNode(state, "Disk space is too low!", _("Disk space is too low!"));
@@ -5713,6 +5723,10 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
         assert(flushed);
     }
     LogPrint(BCLog::BENCH, "- Disconnect block: %.2fms\n", (GetTimeMicros() - nStart) * MILLI);
+    // Held transactions (pos_heldtxs.h): the block left; its caller records
+    // what it carried before it releases cs_main. Noted before the flush
+    // below, which writes the record first if it persists this disconnect.
+    if (this == &m_chainman.ActiveChainstate()) HeldTxsNoteDisconnected(pindexDelete, pblock);
     // Write the chain state to disk, if necessary.
     if (!FlushStateToDisk(state, FlushStateMode::IF_NEEDED)) {
         return false;
@@ -5735,9 +5749,6 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
 
     UpdateTip(pindexDelete->pprev);
 
-    // Held transactions (pos_heldtxs.h): while the anchor watcher's record is
-    // open, whatever leaves the active chain is noted for it, on any thread.
-    HeldTxsNoteDisconnected(pindexDelete);
 
     // SEQUENTIA PoS: exact inverse of the ConnectTip stake mirroring. A
     // missed update would silently desync the consensus-feeding registry
@@ -6275,11 +6286,15 @@ bool CChainState::ActivateBestChainStep(BlockValidationState& state, CBlockIndex
     const CBlockIndex* pindexOldTip = m_chain.Tip();
     const CBlockIndex* pindexFork = m_chain.FindFork(pindexMostWork);
 
+    // Held transactions (pos_heldtxs.h): every disconnect below is recorded
+    // before this hold of cs_main ends, on every exit.
+    HeldTxsCheckNoneCarried(m_chain.Tip());
     // Disconnect active blocks which are no longer in the best chain.
     bool fBlocksDisconnected = false;
     DisconnectedBlockTransactions disconnectpool;
     while (m_chain.Tip() && m_chain.Tip() != pindexFork) {
         if (!DisconnectTip(state, &disconnectpool)) {
+            HeldTxsRecordDeparted(m_chain.Tip());
             // This is likely a fatal error, but keep the mempool consistent,
             // just in case. Only remove from the mempool in this case.
             MaybeUpdateMempoolForReorg(disconnectpool, false);
@@ -6292,6 +6307,7 @@ bool CChainState::ActivateBestChainStep(BlockValidationState& state, CBlockIndex
         }
         fBlocksDisconnected = true;
     }
+    HeldTxsRecordDeparted(m_chain.Tip());
 
     // Build list of new blocks to connect (in descending height order).
     std::vector<CBlockIndex*> vpindexToConnect;
@@ -6613,7 +6629,10 @@ bool CChainState::InvalidateBlock(BlockValidationState& state, CBlockIndex* pind
         // ActivateBestChain considers blocks already in m_chain
         // unconditionally valid already, so force disconnect away from it.
         DisconnectedBlockTransactions disconnectpool;
+        HeldTxsCheckNoneCarried(m_chain.Tip());
         bool ret = DisconnectTip(state, &disconnectpool);
+        // Held transactions (pos_heldtxs.h): recorded in this hold of cs_main.
+        HeldTxsRecordDeparted(m_chain.Tip());
         // DisconnectTip will add transactions to disconnectpool.
         // Adjust the mempool to be consistent with the new tip, adding
         // transactions back to the mempool if disconnecting was successful,
@@ -6818,7 +6837,11 @@ bool CChainState::SetAsideBlock(BlockValidationState& state, CBlockIndex* pindex
         if (!m_chain.Contains(pindex)) break;
         CBlockIndex* walk_tip = m_chain.Tip();
         DisconnectedBlockTransactions disconnectpool;
+        HeldTxsCheckNoneCarried(m_chain.Tip());
         const bool ret = DisconnectTip(state, &disconnectpool);
+        // Nothing is held for a block the rule set aside, but nothing is left
+        // noted either (pos_heldtxs.h).
+        HeldTxsRecordDeparted(m_chain.Tip());
         MaybeUpdateMempoolForReorg(disconnectpool, /*fAddToMempool=*/ret);
         if (!ret) return false;
         setBlockIndexCandidates.insert(walk_tip->pprev);

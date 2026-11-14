@@ -1810,13 +1810,11 @@ static RPCHelpMan musigpartialsign()
     std::vector<std::vector<unsigned char>> pubnonces = ParseHexArray(request.params[3], "pubnonce");
     std::vector<unsigned char> msg = ParseHexV(request.params[4], "msg");
     if (msg.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg must be 32 bytes");
-    // The record's state and the check against it are read in one hold
-    // (HeldTxsFilling): a departure that began after an unlocked read could
-    // otherwise be signed over before the record holds it.
+    // Checked against the record with cs_main held: every departure is in the
+    // record before the hold that made it ends (pos_heldtxs.h).
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     {
         LOCK(cs_main);
-        if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
         if (HeldTxsActive() && !HeldTxsGetInfo().txids.empty()) {
             if (request.params[5].isNull()) {
                 throw JSONRPCError(RPC_MISC_ERROR, "held-conflict: this node holds disconnected certified transactions; pass the block to sign");
@@ -2155,7 +2153,6 @@ static RPCHelpMan getposblocktemplate()
         unsigned int extra_nonce = 0;
         IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
         // Held transactions (pos_heldtxs.h): no template that respends one.
-        if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
         if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
             HeldTxsNoteDecline();
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
@@ -2230,7 +2227,6 @@ static RPCHelpMan submitposblock()
         // Held transactions (pos_heldtxs.h): the leader signs here, so the rule binds it.
         ChainstateManager& cm = EnsureAnyChainman(request.context);
         LOCK(cs_main);
-        if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
         if (auto why = HeldTxsBlockConflict(block, cm.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
             HeldTxsNoteDecline();
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));

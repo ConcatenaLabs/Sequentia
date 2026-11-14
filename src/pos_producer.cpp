@@ -129,13 +129,6 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
                                               const CChainParams& chainparams, const CKey& leader_key,
                                               int& out_height)
 {
-    // Held transactions (pos_heldtxs.h): while the anchor watcher is between a
-    // disconnect and recording what it took off the chain, the leader neither
-    // builds nor signs a proposal, as members sign no share (DriveRound).
-    if (HeldTxsFilling()) {
-        LogPrint(BCLog::VALIDATION, "PoS gossip: not proposing while the held record is being filled\n");
-        return nullptr;
-    }
     const CPubKey pubkey = leader_key.GetPubKey();
     CBlockIndex* tip;
     {
@@ -173,7 +166,6 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
     if (!tmpl) return nullptr;
     {
         LOCK(cs_main);
-        if (HeldTxsFilling()) return nullptr;
         if (auto why = HeldTxsBlockConflict(tmpl->block, chainman.m_blockman.LookupBlockIndex(tmpl->block.hashPrevBlock))) {
             LogPrintf("PoS gossip: not proposing at height %d: %s\n", tip->nHeight + 1, *why);
             HeldTxsNoteDecline();
@@ -419,11 +411,6 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         IncrementExtraNonce(&block, chainman.ActiveChain().Tip(), extra_nonce);
         // Held transactions (pos_heldtxs.h): the keys here sign as committee
         // members too, so the rule binds this path as it binds the gossip round.
-        if (HeldTxsFilling()) {
-            error = "held-filling: the anchor watcher is recording a disconnect; try again";
-            err_kind = PosProduceError::INTERNAL;
-            return false;
-        }
         if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
             HeldTxsNoteDecline();
             error = strprintf("held-conflict: %s", *why);
@@ -1313,8 +1300,6 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     // proof solution, which is excluded from the hash — so any node that later
     // gathers a quorum of shares can assemble the certificate without us.
     const uint256 hash = block->GetHash();
-    // A disconnect may have begun since the block was built: sign nothing then.
-    if (HeldTxsFilling()) return;
     std::vector<unsigned char> leader_sig;
     if (!leader_key.Sign(hash, leader_sig)) {
         LogPrint(BCLog::VALIDATION, "PoS gossip: failed to sign proposal\n");
@@ -1571,9 +1556,6 @@ int64_t PosProducer::DriveRound()
         }
         if (need_query) SendCertQueryOnce(locked);
     }
-    // Held transactions: while the anchor watcher is between a disconnect and
-    // recording what it took off the chain, sign nothing (pos_heldtxs.h).
-    if (want_sign && HeldTxsFilling()) return 150;
     if (want_sign && !m_byzantine_equivocate) {
         // Lazy validation (paper P6 step 10): validate the backed block only now,
         // when we are about to sign it — not every proposal on the message thread.
@@ -1583,9 +1565,6 @@ int64_t PosProducer::DriveRound()
         bool held_conflict = false;
         {
             LOCK(cs_main);
-            // Read again in this hold (HeldTxsFilling): a departure that began
-            // since the read above may not be in the record yet.
-            if (HeldTxsFilling()) return 150;
             CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
             if (tip2 && backed->hashPrevBlock == tip2->GetBlockHash()) {
                 BlockValidationState state;
