@@ -61,16 +61,28 @@ bool HeldTxsActive();
 //! startup, before the producer and the anchor watcher start.
 void HeldTxsInit();
 
-//! The anchor watcher disconnected `disconnected` (the old active chain from
-//! the invalidated block up to the old tip, lowest first). Holds every
-//! transaction of every block at or below the highest of them that carried its
-//! parent's quorum. Called after the disconnect, never on its path.
-void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<const CBlockIndex*>& disconnected);
+//! The record of a departure. The anchor watcher opens it in the same
+//! cs_main hold as any change it makes that lets fork choice leave the active
+//! chain (a block invalidated, a failure mark cleared), and closes it once the
+//! activation that follows has run. While it is open, every block that leaves
+//! the active chain, on any thread (the watcher's own activation, a peer's
+//! block, a peer's getblocks, an RPC), is noted, and a member signs nothing.
+//! Closing it holds the transactions of the noted blocks that are off the
+//! active chain then, as a disconnect of their branch: every transaction of
+//! every block at or below the highest of them that carried its parent's
+//! quorum. So whichever thread moves the node first, what left is recorded
+//! before any member signs again. cs_main held; the record must be closed.
+void HeldTxsOpenRecord();
+//! DisconnectTip took `pindex` off the active chain. cs_main held.
+void HeldTxsNoteDisconnected(const CBlockIndex* pindex);
+//! Record what the noted blocks carried, write the record, and let members
+//! sign again. No lock held.
+void HeldTxsCloseRecord(ChainstateManager& chainman);
 
-//! The anchor watcher is disconnecting blocks whose transactions the record
-//! has not taken yet: a member signs nothing meanwhile (the window between the
-//! disconnect and the fill, which follows it).
-void HeldTxsSetFilling(bool filling);
+//! The record is open (HeldTxsOpenRecord): a member signs nothing meanwhile.
+//! A signer reads it with cs_main held, in the hold in which it checks the
+//! block against the record, so that it sees either no departure begun or
+//! the record holding what left.
 bool HeldTxsFilling();
 
 //! The held transaction `tx` conflicts with: one that spends an outpoint `tx`

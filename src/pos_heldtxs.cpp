@@ -34,6 +34,7 @@
 #include <optional>
 #include <set>
 #include <thread>
+#include <utility>
 
 using node::ReadBlockFromDisk;
 
@@ -53,7 +54,10 @@ struct AsideBlock {
 };
 
 std::atomic<bool> g_held_active{false};
+//! The record is open (HeldTxsOpenRecord); written under cs_main.
 std::atomic<bool> g_held_filling{false};
+//! The blocks that left the active chain while the record was open.
+std::vector<const CBlockIndex*> g_departed GUARDED_BY(::cs_main);
 //! How many blocks are set aside, read without the lock by the certification hook.
 std::atomic<size_t> g_aside_count{0};
 
@@ -307,8 +311,21 @@ void ReleaseAllLocked(const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(g_held_mu
 } // namespace
 
 bool HeldTxsActive() { return g_held_active; }
-void HeldTxsSetFilling(bool filling) { g_held_filling = filling && g_held_active; }
 bool HeldTxsFilling() { return g_held_filling; }
+
+void HeldTxsOpenRecord()
+{
+    AssertLockHeld(cs_main);
+    if (!g_held_active) return;
+    g_departed.clear();
+    g_held_filling = true;
+}
+
+void HeldTxsNoteDisconnected(const CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+    if (g_held_filling) g_departed.push_back(pindex);
+}
 
 int64_t HeldTxsBoundMs()
 {
@@ -809,10 +826,59 @@ static bool Maintain(ChainstateManager& chainman, CTxMemPool& mempool, bool park
     return false;
 }
 
-void HeldTxsRecordDisconnect(ChainstateManager& chainman, const std::vector<const CBlockIndex*>& disconnected)
+void HeldTxsCloseRecord(ChainstateManager& chainman)
 {
-    RecordDisconnect(chainman, disconnected);
-    FlushRecord();
+    if (!g_held_active) return;
+    bool widened = false;
+    while (true) {
+        // What left and has not come back, as branches, each from its fork
+        // with the active chain up to the highest block of it that left. A
+        // block noted is off the chain only if every block above it on its
+        // branch left too, so each branch is whole. A branch the rule set
+        // aside itself (its lowest block is set aside) is the maintenance
+        // pass's, not a departure.
+        std::vector<std::vector<const CBlockIndex*>> branches;
+        {
+            LOCK(cs_main);
+            std::vector<const CBlockIndex*> departed;
+            departed.swap(g_departed);
+            const CChain& active = chainman.ActiveChain();
+            std::set<const CBlockIndex*> off;
+            for (const CBlockIndex* p : departed) {
+                if (!active.Contains(p)) off.insert(p);
+            }
+            if (off.empty()) {
+                // Closed in the hold that found nothing left to record: a
+                // block that leaves after this is not the departure's.
+                g_held_filling = false;
+                return;
+            }
+            std::set<const CBlockIndex*> below;
+            for (const CBlockIndex* p : off) below.insert(p->pprev);
+            for (const CBlockIndex* top : off) {
+                if (below.count(top)) continue;
+                std::vector<const CBlockIndex*> branch;
+                for (const CBlockIndex* p = top; p && !active.Contains(p); p = p->pprev) branch.push_back(p);
+                std::reverse(branch.begin(), branch.end());
+                if (WITH_LOCK(g_held_mutex, return g_aside.count(branch.front()->GetBlockHash()) > 0)) continue;
+                branches.push_back(std::move(branch));
+            }
+        }
+        // Test only (-posdebugheldfillms): widen the window before the record holds it.
+        if (!branches.empty() && !std::exchange(widened, true)) {
+            if (const int64_t fill_ms = gArgs.GetIntArg("-posdebugheldfillms", 0); fill_ms > 0) {
+                UninterruptibleSleep(std::chrono::milliseconds{fill_ms});
+            }
+        }
+        for (const auto& branch : branches) {
+            LogPrintf("Held transactions: %u block(s) above height %d left the active chain while the record was open\n",
+                      (unsigned)branch.size(), branch.front()->nHeight - 1);
+            RecordDisconnect(chainman, branch);
+        }
+        FlushRecord();
+        // Then look again: a block that left while this was written is noted
+        // too, and the record closes only in a hold that finds none.
+    }
 }
 
 void HeldTxsRelease(const uint256& txid, const std::string& why)

@@ -1189,8 +1189,8 @@ so that it can put it back in the mempool, together with the outpoints it
 spends. Two kinds are left out because they can never be mined on the new
 chain: a transaction that spends the coinbase of a disconnected block, and one
 that spends the output of such a transaction. The record is filled after the
-disconnect, never on its path, and only the held transactions are written to
-`heldtxs.dat`. A member that restarts still refuses their respends. Nothing
+disconnect and the activation that follows it, never on their path, and only
+the held transactions are written to `heldtxs.dat`. A member that restarts still refuses their respends. Nothing
 about any block is written there or anywhere else.
 
 **Mined from the record, whatever its fee.** A held transaction stays held
@@ -1250,8 +1250,12 @@ does so. In the gossip round the check sits beside the lazy
 
 The same check guards a member's own proposal, `generateposblock`,
 `getposblocktemplate`, `submitposblock` and `musigpartialsign`. While the node
-holds anything, `musigpartialsign` needs the block whose hash it signs. Between
-a disconnect and the fill that follows it, none of these signs anything.
+holds anything, `musigpartialsign` needs the block whose hash it signs. While
+the record is open (from the watcher's change that lets a block leave the active
+chain until the record holds what left, below), none of these signs anything.
+Each reads that state with the validation lock held, in the same hold in which
+it checks the block against the record, so it sees either no departure begun or
+the record holding what left.
 
 One signature escapes these checks. An autonomous leader checks its proposal
 when it builds it, and signs it a moment later without holding a lock across
@@ -1489,13 +1493,26 @@ for orphaned anchors runs before it reconsiders anything, so the blocks
 anchored on the branch Bitcoin has just left are disconnected by the walk's
 own invalidation, and their transactions are held as described above. Only
 then does it reconsider the returning branch, and fork choice moves the node
-onto it in the same pass. Whatever that reconsideration's activation still
-takes off the active chain is recorded too, with members signing nothing
-until the record holds it: a branch that loses fork choice to the returning
-one, or one whose anchor Bitcoin dropped while the pass ran. Either way the
-departure is Bitcoin's doing, and its certified transactions are held. It
-makes no difference whether the returning branch is higher than the current
-one, as high, or lower.
+onto it in the same pass. Whatever still leaves the active chain then is
+recorded too: a branch that loses fork choice to the returning one, or one
+whose anchor Bitcoin dropped while the pass ran. Either way the departure is
+Bitcoin's doing, and its certified transactions are held. It makes no
+difference whether the returning branch is higher than the current one, as
+high, or lower.
+
+The record is opened in the same step as the watcher's change, under the
+validation lock: before it clears a returning branch's failure marks, and
+before it invalidates a block. From then until the record holds what left,
+members sign nothing, and every block that leaves the active chain is noted,
+whichever thread moves the node: the watcher's own activation, a block from a
+peer, a peer's request for blocks, an RPC. The watcher closes it after its
+own activation has run, so what that activation takes off below an
+invalidated block, when another branch outweighs what is left, is recorded
+too. The record holds the noted blocks that are off the active chain when it
+closes, each branch from its fork with the active chain up; a block set aside
+by the rule's second arm is not a departure. The watcher activates after each
+reconsideration, before it asks Bitcoin about the next entry of its recovery
+set, so members wait for one activation and never for the Bitcoin daemon.
 
 The reconsideration revives only blocks whose anchors Bitcoin has again. A
 block above the reconsidered one whose own anchor is still off Bitcoin's best
@@ -1513,11 +1530,11 @@ Bitcoin's doing but happen outside the watcher's pass:
   outweighs the current one within one poll interval (`-anchorpollinterval`),
   and it cannot cross a finalized block: only the newest certified block, still
   in its observation window, can leave this way;
-- a node that stops in the middle of the watcher's disconnect: the record is
+- a node killed in the middle of the watcher's disconnect: the record is
   filled after the disconnect, so a node killed between the two restarts
-  without those transactions held, and a stop that interrupts a deep
-  disconnect has the watcher undo it for the next start to redo, from the
-  chain the node restarts on.
+  without those transactions held. A stop that interrupts a deep disconnect
+  records what it took off and has the watcher undo the rest, for the next
+  start to redo from the chain the node restarts on.
 
 **Why a set-aside does not end when the sibling loses its anchor.** It can
 happen that Bitcoin reorganizes again while a member keeps the respend block X
@@ -1571,8 +1588,9 @@ in `feature_pos_held_transactions_musig.py`; a member that signs only through
 the RPCs, held past the backstop, in `feature_pos_held_transactions_rpc_liveness.py`;
 the autonomous leader during the record's fill in
 `feature_pos_held_transactions_fill_probe.py`; Bitcoin flipping between two
-branches it has already shown, also across a restart of the member, in
-`feature_pos_held_transactions_flips.py`; and a Bitcoin Core that stops
+branches it has already shown, also across a restart of the member, and
+returning to one of them while a peer keeps the member's network thread
+activating, in `feature_pos_held_transactions_flips.py`; and a Bitcoin Core that stops
 answering, a release that falls between a disconnect and the fill of the
 record, and a member stopped while it holds, in
 `feature_pos_held_transactions_parent_hang.py`. In each, a real `bitcoind` is
