@@ -1345,9 +1345,15 @@ held nothing.
   say. It ends the hold at `POS_HELD_BACKSTOP_BOUNDS` (2) bounds: 24.0 s for a
   cap of 7 and 240.3 s at the cap of 250.
 
-A disconnect restarts the bound's clock: what the member holds now has had no
-round yet, so the bound runs again from its next honest proposal or share
-after a decline. The backstop's clock runs on through it.
+A departure restarts the bound's clock, whether or not anything certified
+left: what the member holds now has had no round on this chain yet, so the
+bound runs again from its next honest proposal or share after a decline. A
+block the record refuses is the exception: one that respends a held
+transaction, one built on such a block, and one the rule set aside leave
+without restarting anything, since their leaving is what the rule asks for
+(an operator's `invalidateblock` of the respend does on a member that signs
+only through the RPCs what a set-aside does on a producer). The backstop's
+clock runs on through every departure.
 
 The bound is fixed at startup from the gossip timings (`-posroundms` and
 `-poswindowms`, or the formulas), on each member, whether or not it runs the
