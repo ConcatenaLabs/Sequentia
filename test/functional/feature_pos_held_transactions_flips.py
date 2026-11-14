@@ -56,6 +56,9 @@ FLOOD_DECOYS = int(os.environ.get("CR6_FLOOD_DECOYS", "2"))
 # between clearing the returning branch's marks and its own activation and the flood's activation moves node 0
 # first; 0 leaves the race to chance (the watcher then mostly wins it).
 FLOOD_DELAY_MS = int(os.environ.get("CR6_FLOOD_DELAY_MS", "300"))
+# The peer-before-watcher case and the crash case: how many tries each.
+PEER_TRIES = int(os.environ.get("CR6_PEER_TRIES", "3"))
+CRASH_TRIES = int(os.environ.get("CR6_CRASH_TRIES", "3"))
 
 
 class GetblocksFlooder(P2PInterface):
@@ -402,20 +405,143 @@ class HeldTransactionsFlipsTest(HeldTransactionsRpcLivenessTest):
                                                                 "declined" if declined else "SIGNED"))
         return held and declined
 
+    def spend_pair(self, vout):
+        m, att = self.nodes
+
+        def spend(to, fee):
+            r = att.createrawtransaction([{"txid": self.fund_txid, "vout": vout, "sequence": 0xfffffffd}],
+                                         [{to: Decimal("100") - fee}, {"fee": fee}])
+            return att.signrawtransactionwithwallet(r)["hex"]
+        t_hex, r_hex = spend(m.getnewaddress(), Decimal("0.0001")), spend(att.getnewaddress(), Decimal("0.001"))
+        return t_hex, r_hex, tx_from_hex(t_hex).rehash(), tx_from_hex(r_hex).rehash()
+
+    def restart_member(self, extra=(), drop=()):
+        m = self.nodes[0]
+        args = [a for a in self.node_args(0) if not any(a.startswith(d) for d in drop)] + list(extra)
+        self.restart_node(0, extra_args=args)
+        m.loadwallet("w")
+        self.connect_nodes(0, 1)
+        self.sync_blocks()
+
+    def first_mover(self, since):
+        with open(self.nodes[0].debug_log_path, encoding="utf-8", errors="replace") as f:
+            f.seek(since)
+            moves = [x for x in f if "UpdateTip: new best=" in x]
+        return moves[0].split("[", 2)[1].split("]")[0] if moves and "[" in moves[0] else "?"
+
+    def peer_first(self, case, vout):
+        """KR17's departure: node 0 polls Bitcoin every 15 s; Bitcoin replaces B, on which CB carries the certified T;
+        the attacker's watcher (1 s) leaves CB and it certifies a heavier CA' on the new Bitcoin branch, which reaches
+        node 0 from the peer before node 0's watcher runs. True when node 0 held T and declined R."""
+        m, att = self.nodes
+        b = self.btc()
+        t_hex, r_hex, t_id, r_id = self.spend_pair(vout)
+        self.btc_mine(1)
+        self.wait_until(lambda: self.certified_block(m) and self.anchored_at_tip(m), timeout=60)
+        h0 = b.getblockcount()
+        self.sync_blocks()
+        fork = m.getbestblockhash()
+        b_blk = self.btc_mine(1)[0]
+        m.sendrawtransaction(t_hex)
+        cb = self.anchored_blocks(m, 2, h0)
+        self.sync_blocks()
+        assert any(t_id in m.getblock(x)["tx"] for x in cb)
+        size0 = os.path.getsize(m.debug_log_path)
+        b.invalidateblock(b_blk)
+        self.btc_mine(2)
+        t_back = time.time()
+        self.wait_until(lambda: att.getblockheader(att.getbestblockhash())["height"] <= m.getblockheader(fork)["height"], timeout=30)
+        # The attacker's branch leaves T out (its disconnect put T back in its mempool).
+        att.prioritisetransaction(txid=t_id, fee_delta=-100000000)
+        ca = self.anchored_blocks(att, 3, h0)
+        self.wait_until(lambda: m.getbestblockhash() == ca[-1], timeout=60)
+        follow_s = time.time() - t_back
+        mover = self.first_mover(size0)
+        held = t_id in m.getheldtxs()["txids"]
+        assert all(t_id not in att.getblock(x)["tx"] for x in ca)
+        att.sendrawtransaction(r_hex)
+        declined = self.offer_r(case, t_id, r_id)
+        self.record(case + ": result", "node 0 (poll 15 s) on CA's top %.2fs after Bitcoin's move, first moved by [%s]; T %s; R %s" %
+                    (follow_s, mover, "held" if held else "NOT held", "declined" if declined else "SIGNED"))
+        return mover, held and declined
+
+    def crash(self, case, vout):
+        """Node 0 is killed after its walk disconnected T's certified block and a chainstate flush
+        (gettxoutsetinfo) persisted the disconnect, with the record's own write held back
+        (-posdebugheldfillms). After the restart either T's block is on the chain again, to leave
+        again, or the record holds T; in the end T is held and R declined. True when both hold."""
+        m, att = self.nodes
+        b = self.btc()
+        t_hex, r_hex, t_id, r_id = self.spend_pair(vout)
+        self.btc_mine(1)
+        self.wait_until(lambda: self.certified_block(m) and self.anchored_at_tip(m), timeout=60)
+        h0 = b.getblockcount()
+        self.sync_blocks()
+        b_blk = self.btc_mine(1)[0]
+        m.sendrawtransaction(t_hex)
+        cb = self.anchored_blocks(m, 2, h0)
+        b_t = [x for x in cb if t_id in m.getblock(x)["tx"]][0]
+        self.sync_blocks()
+        size0 = os.path.getsize(m.debug_log_path)
+        b.invalidateblock(b_blk)
+        self.btc_mine(2)
+
+        def disconnected():
+            with open(m.debug_log_path, encoding="utf-8", errors="replace") as f:
+                f.seek(size0)
+                return any("Parent chain reorganization detected" in x for x in f)
+        self.wait_until(disconnected, timeout=30)
+        self.wait_until(lambda: m.getblockheader(b_t)["confirmations"] == -1, timeout=30)
+        m.gettxoutsetinfo()
+        m.process.kill()
+        m.process.wait(timeout=60)
+        m.running = False
+        m.process = None
+        m.rpc_connected = False
+        m.rpc = None
+        self.start_node(0, extra_args=[a for a in self.node_args(0) if not a.startswith(("-posdebugheldfillms", "-anchorpollinterval"))] +
+                        ["-posdebugheldfillms=600000", "-anchorpollinterval=600"])
+        m.loadwallet("w")
+        on_chain = m.getblockheader(b_t)["confirmations"] >= 0
+        held_at_start = t_id in m.getheldtxs()["txids"]
+        self.restart_member(extra=["-posdebugheldfillms=600000"], drop=["-posdebugheldfillms"])
+        if not (on_chain or held_at_start):
+            # The chainstate has the disconnect and the record lacks it: nothing will hold T again.
+            self.both_on(m.getbestblockhash())
+            att.prioritisetransaction(txid=t_id, fee_delta=-100000000)
+            att.sendrawtransaction(r_hex)
+            declined = self.offer_r(case, t_id, r_id)
+            self.record(case + ": result", "at the restart, before the watcher: T's block off the chain and T NOT held; R %s" %
+                        ("declined" if declined else "SIGNED"))
+            return False
+        self.wait_until(lambda: t_id in m.getheldtxs()["txids"] or m.getblockheader(b_t)["confirmations"] >= 0, timeout=60)
+        self.wait_until(lambda: m.getblockheader(b_t)["confirmations"] == -1, timeout=60)
+        held = t_id in m.getheldtxs()["txids"]
+        self.both_on(m.getbestblockhash())
+        att.prioritisetransaction(txid=t_id, fee_delta=-100000000)
+        att.sendrawtransaction(r_hex)
+        declined = self.offer_r(case, t_id, r_id)
+        ok_start = on_chain or held_at_start
+        self.record(case + ": result", "at the restart, before the watcher: T's block %s, T %s; then T %s, R %s" %
+                    ("on the chain" if on_chain else "off the chain", "held" if held_at_start else "NOT held",
+                     "held" if held else "NOT held", "declined" if declined else "SIGNED"))
+        return ok_start and held and declined
+
     def body(self):
         m, att = self.nodes
+        NVOUT = 4 + FLOOD_TRIES + PEER_TRIES + CRASH_TRIES
         g = m.getblock(m.getblockhash(0), 2)
         coin = [(tx["txid"], vo["n"], Decimal(vo["value"])) for tx in g["tx"] for vo in tx["vout"]
                 if vo["scriptPubKey"]["hex"] == "51" and vo.get("value", 0) > 0][0]
         raw = m.createrawtransaction([{"txid": coin[0], "vout": coin[1]}],
-                                     [{att.getnewaddress(): Decimal("100")} for _ in range(4 + FLOOD_TRIES)] +
-                                     [{att.getnewaddress(): coin[2] - Decimal(100 * (4 + FLOOD_TRIES)) - Decimal("0.001")},
+                                     [{att.getnewaddress(): Decimal("100")} for _ in range(NVOUT)] +
+                                     [{att.getnewaddress(): coin[2] - Decimal(100 * NVOUT) - Decimal("0.001")},
                                       {"fee": Decimal("0.001")}])
         self.fund_txid = m.sendrawtransaction(raw)
         self.certified_block(m)
         self.sync_blocks()
         vouts = [o["n"] for o in m.getrawtransaction(self.fund_txid, 1)["vout"] if o.get("value") == Decimal("100")]
-        cases = os.environ.get("CR4_FLIPS", "flips,restart,return,return_equal,return_flood").split(",")
+        cases = os.environ.get("CR4_FLIPS", "flips,restart,return,return_equal,return_flood,peer_first,crash").split(",")
         if "flips" in cases:
             self.log.info("(flips) the backstop while Bitcoin flips between two branches already seen: %.2fs", BACKSTOP_S)
             self.flips("flips", vouts[0], restart=False)
@@ -438,6 +564,25 @@ class HeldTransactionsFlipsTest(HeldTransactionsRpcLivenessTest):
             bad = [k for k in range(FLOOD_TRIES) if not self.returning_flood("return_flood%d" % k, vouts[4 + k])]
             self.record("return_flood: summary", "%d of %d tries left CB without T held and R declined" % (len(bad), FLOOD_TRIES))
             assert not bad, "tries %s left CB without T held and R declined" % bad
+        base = 4 + FLOOD_TRIES
+        if "peer_first" in cases:
+            self.log.info("(peer_first) a peer's heavier branch moves node 0 off the certified block before its watcher runs")
+            self.restart_member(extra=["-anchorpollinterval=15"], drop=["-anchorpollinterval", "-posdebugreconsideractivatems"])
+            runs = [self.peer_first("peer_first%d" % k, vouts[base + k]) for k in range(PEER_TRIES)]
+            peer = [ok for mover, ok in runs if mover == "msghand"]
+            self.record("peer_first: summary", "%d of %d tries moved by the peer first; %d of them left T unheld or R signed; %d tries failed in all" %
+                        (len(peer), PEER_TRIES, peer.count(False), [ok for _, ok in runs].count(False)))
+            assert all(ok for _, ok in runs), "a member moved by a peer did not hold T and decline R"
+            self.restart_member()
+        base += PEER_TRIES
+        if "crash" in cases:
+            self.log.info("(crash) node 0 killed after a flushed disconnect, before the record's own write")
+            self.restart_member(extra=["-posdebugheldfillms=600000"], drop=["-posdebugheldfillms"])
+            bad = [k for k in range(CRASH_TRIES) if not self.crash("crash%d" % k, vouts[base + k])]
+            self.record("crash: summary", "%d of %d tries ended without T on the chain or in the record at the restart, or without T held and R declined" %
+                        (len(bad), CRASH_TRIES))
+            assert not bad, "crash tries %s" % bad
+            self.restart_member()
 
 
 if __name__ == '__main__':
