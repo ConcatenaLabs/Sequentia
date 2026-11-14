@@ -162,7 +162,12 @@ One round state per height being worked, discarded when the tip advances.
 ```
 
 **Backing.** Candidates are ordered by Bitcoin anchor height, fresher first,
-and then by the election key: the exponential-race score from
+counted only up to the Bitcoin height the member knows (#286): a claimed anchor
+above it, one the member has not seen yet or one that does not exist, ranks
+like an anchor at that height, so claiming a higher one buys nothing. A
+proposal whose anchor cannot be verified yet (`anchor-unknown`, `-stale`,
+`-unverifiable`) is left aside rather than excluding its leader, and is tried
+again once the member's view of Bitcoin moves. Then by the election key: the exponential-race score from
 `pos_exprace_height`, the raw leader VRF output below it. Round *r* backs the
 (r+1)-th candidate in that order. Every eligible staker proposes, not only
 committee members, so the order is complete and the same on every node that has

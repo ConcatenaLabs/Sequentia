@@ -319,6 +319,10 @@ private:
     //! consensus-invalid block (two coinbases), to test that lazy validation
     //! excludes the leader and the committee routes to the next valid one.
     bool m_byzantine_invalid{false};
+    //! SEQUENTIA TEST ONLY (-posbyzantinefakeanchor): when elected, flood a
+    //! proposal whose anchor claims this many parent-chain blocks above the
+    //! real one, at a hash the parent chain does not have. 0 = off.
+    int m_byzantine_fake_anchor{0};
     //! Regtest only (-posdebugroundskewms): offset added to this node's round
     //! scheduler clock, to study how inter-node clock skew affects round
     //! agreement. Always 0 on a real node.
@@ -347,6 +351,16 @@ private:
     int m_round_height{0};                             //!< height we are running rounds for
     std::map<CPubKey, RoundCandidate> m_candidates;    //!< leader -> its validated proposal this round
     std::set<CPubKey> m_excluded;                      //!< leaders excluded this height (equivocated, or proposed an invalid block)
+    //! Leaders whose proposal this height could not be validated YET because
+    //! its anchor is not (yet) on this node's view of the parent chain
+    //! (anchor-unknown, -stale, -unverifiable), mapped to the parent-chain
+    //! height this node knew then. Left out of the ranking, not excluded:
+    //! they come back as soon as that view moves (#286).
+    std::map<CPubKey, int> m_anchor_deferred;
+    //! The parent-chain height this node knows (-1: unknown, or anchors not
+    //! validated here). Caps the anchor height a candidate ranks by, so a
+    //! proposal claiming an anchor nobody has seen gains nothing (#286).
+    int m_parent_tip_seen{-1};
     std::map<CPubKey, PosShare> m_collected;           //!< shares for the currently-backed proposal
     uint256 m_backed_hash;                             //!< hash of the proposal we are signing/collecting for
     int m_signed_round{-1};                            //!< highest round index we have signed for

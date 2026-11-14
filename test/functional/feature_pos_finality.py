@@ -92,8 +92,13 @@ class PosFinalityTest(BitcoinTestFramework):
             b = res_b['hash']
             if hash_order(b) < hash_order(a):
                 break
+            # The rebuilt block must carry a new time, or it is the same block,
+            # now invalid. B may be stamped at the earliest time consensus
+            # allows, ahead of the clock, so wait until the clock passes it.
+            stamp = n1.getblockheader(b)['time']
             n1.invalidateblock(b)
-            time.sleep(1.1)
+            while int(time.time()) <= stamp:
+                time.sleep(0.2)
         else:
             raise AssertionError("B never had the lower hash")
         assert_equal(res_b['countersignatures'], 3)

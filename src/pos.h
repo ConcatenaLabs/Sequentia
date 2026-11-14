@@ -905,6 +905,10 @@ int64_t PosProposalStartMs(int64_t parent_time, int64_t earliest_sec, int64_t pa
  *  member shares, unless that lies more than POS_PARENT_AHEAD_SLACK_SECONDS
  *  after the receipt, in which case the receipt plus that slack. */
 int64_t PosRoundOriginMs(int64_t stamp, int64_t received_ms);
+/** Whether a block rejected for `reason` may become valid once this node's
+ *  view of the parent chain catches up: its anchor is not known yet, not on
+ *  the parent chain's best chain now, or the parent chain cannot be asked. */
+bool PosAnchorRejectIsProvisional(const std::string& reason);
 
 /** Consensus::Params::pos_records_v2_height, mirrored like the one above.
  *  0 = never. */

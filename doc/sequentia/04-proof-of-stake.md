@@ -570,7 +570,8 @@ boundary itself, with a peer validating every block across it).
 the *secondary* key of the committee's candidate ordering. `BackedForRound`
 still ranks proposals by Bitcoin anchor height first, freshest winning, and the
 exponential-race score decides only among candidates carrying the *identical*
-anchor height, where the legacy rule used the raw, unweighted `beta` (§7) - the
+anchor height (anchor heights counted only up to the Bitcoin height the member
+knows, since #286), where the legacy rule used the raw, unweighted `beta` (§7) - the
 second of the two keys that produced the Sybil edge above. No anchoring code
 is touched. The same-height fork-choice tiebreak of §6 is also unchanged and
 remains the top 64 bits of the leader's raw `beta`: that key must be computable

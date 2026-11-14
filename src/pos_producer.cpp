@@ -19,6 +19,7 @@
 #include <pos.h>
 #include <primitives/block.h>
 #include <protocol.h>
+#include <random.h>
 #include <script/generic.hpp>
 #include <script/sign.h>
 #include <timedata.h>
@@ -588,6 +589,7 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
 {
     m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
+    m_byzantine_fake_anchor = std::clamp<int>(gArgs.GetIntArg("-posbyzantinefakeanchor", 0), 0, 1000000);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
     m_debug_share_delay_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posdebugsharedelayms", 0), 0, 10000);
     m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
@@ -729,6 +731,7 @@ int64_t PosProducer::Step()
                 m_candidates.clear();
                 m_collected.clear();
                 m_excluded.clear();
+                m_anchor_deferred.clear();
                 m_backed_hash.SetNull();
                 m_signed_round = -1;
             }
@@ -1135,6 +1138,7 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
         m_round_height = height;
         m_candidates.clear();
         m_excluded.clear();
+        m_anchor_deferred.clear();
         m_collected.clear();
         m_backed_hash.SetNull();
         m_signed_round = -1;
@@ -1168,25 +1172,40 @@ std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
     // A collection can run more rounds than it has candidates (see
     // RoundsExhaustedAtMs); the order then starts over, giving each candidate
     // another round rather than leaving the extra rounds idle.
+    //
+    // Anchor freshness counts only up to the parent-chain height this node
+    // knows (#286). A claimed anchor above it is either one this node has not
+    // seen yet or one that does not exist; either way it ranks like an anchor
+    // at that height, so claiming a higher one buys nothing, and the claim is
+    // judged when the block is validated. A proposal whose anchor could not
+    // be validated yet (m_anchor_deferred) is left out until this node's view
+    // of the parent chain moves.
     if (r < 0 || m_candidates.empty()) return nullptr;
-    r %= (int)m_candidates.size();
 
     const bool exprace = PosExpRaceActive(m_chainparams.GetConsensus(), m_round_height);
     const StakeRegistry& registry = StakeRegistry::GetInstance();
     const uint64_t total_weight = exprace ? PosTotalWeight(registry) : 0;
+    const int parent_tip = m_parent_tip_seen;
+    auto ranked_anchor = [parent_tip](const RoundCandidate* c) -> int64_t {
+        const int64_t claimed = c->block->m_anchor_height;
+        return parent_tip >= 0 ? std::min<int64_t>(claimed, parent_tip) : claimed;
+    };
 
     struct Entry { const RoundCandidate* cand; arith_uint256 score; };
     std::vector<Entry> ordered;
     ordered.reserve(m_candidates.size());
     for (const auto& [leader, cand] : m_candidates) {
+        if (m_anchor_deferred.count(leader)) continue;
         arith_uint256 score;
         if (exprace) score = PosVrfScoreExp(cand.beta, registry.GetWeight(leader), total_weight);
         ordered.push_back({&cand, score});
     }
+    if (ordered.empty()) return nullptr;
+    r %= (int)ordered.size();
     std::sort(ordered.begin(), ordered.end(),
-              [exprace](const Entry& a, const Entry& b) {
-                  if (a.cand->block->m_anchor_height != b.cand->block->m_anchor_height)
-                      return a.cand->block->m_anchor_height > b.cand->block->m_anchor_height; // fresher anchor first
+              [exprace, &ranked_anchor](const Entry& a, const Entry& b) {
+                  const int64_t anchor_a = ranked_anchor(a.cand), anchor_b = ranked_anchor(b.cand);
+                  if (anchor_a != anchor_b) return anchor_a > anchor_b; // fresher anchor first
                   if (exprace) return a.score < b.score;   // exp-race: lowest weighted score
                   return a.cand->beta < b.cand->beta;       // legacy: lowest raw VRF
               });
@@ -1247,6 +1266,7 @@ std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
     m_propose_at_ms = ((exhausted.value_or(now) + 999) / 1000) * 1000;
     m_round_height = 0;
     m_candidates.clear();
+    m_anchor_deferred.clear();
     m_collected.clear();
     m_backed_hash.SetNull();
     m_signed_round = -1;
@@ -1327,6 +1347,24 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
             LogPrintf("PoS gossip: BYZANTINE equivocating %s / %s at height %d\n",
                       hash.GetHex(), block_b->GetHash().GetHex(), height);
             FloodProposalSplit(*block, *block_b);
+            return;
+        }
+    }
+
+    if (m_byzantine_fake_anchor > 0) {
+        // Fault injection (#286): claim an anchor far above the real one, at a
+        // hash the parent chain does not have. Cheap checks pass, so it is
+        // recorded as a candidate everywhere; the ranking must not prefer it.
+        auto fake = std::make_shared<CBlock>(*block);
+        fake->m_anchor_height += m_byzantine_fake_anchor;
+        fake->m_anchor_hash = GetRandHash();
+        fake->proof.solution = CScript();
+        std::vector<unsigned char> sig_fake;
+        if (leader_key.Sign(fake->GetHash(), sig_fake)) {
+            fake->proof.solution = CScript() << sig_fake;
+            LogPrintf("PoS gossip: BYZANTINE proposing block %s at height %d with fake anchor %s at height %u\n",
+                      fake->GetHash().GetHex(), height, fake->m_anchor_hash.GetHex(), fake->m_anchor_height);
+            FloodCompactProposal(*fake);
             return;
         }
     }
@@ -1421,6 +1459,22 @@ int64_t PosProducer::DriveRound()
         if (certified_here) {
             TryConnectCertified();
             return 150; // poll while the body is fetched / the tip advances
+        }
+    }
+
+    // This node's view of the parent chain, for ranking anchors (#286). When it
+    // moves, proposals left aside for an anchor not yet verifiable are tried
+    // again.
+    const int parent_tip = (g_con_bitcoin_anchor && g_validate_anchor) ? MainchainKnownHeight() : -1;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (parent_tip != m_parent_tip_seen) {
+            m_parent_tip_seen = parent_tip;
+            if (!m_anchor_deferred.empty()) {
+                LogPrint(BCLog::VALIDATION, "PoS gossip: parent chain now at %d; retrying %u proposal(s) with an anchor not yet verifiable\n",
+                         parent_tip, (unsigned)m_anchor_deferred.size());
+                m_anchor_deferred.clear();
+            }
         }
     }
 
@@ -1539,6 +1593,7 @@ int64_t PosProducer::DriveRound()
         // An invalid block excludes its leader; next pass we back the next-lowest
         // valid candidate.
         bool valid = false;
+        std::string reject_reason;
         {
             LOCK(cs_main);
             CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
@@ -1546,13 +1601,25 @@ int64_t PosProducer::DriveRound()
                 BlockValidationState state;
                 valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *backed, tip2,
                                           /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
+                if (!valid) reject_reason = state.GetRejectReason();
             }
         }
         if (!valid) {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
             if (auto parts = ParsePosBlockChallenge(backed->proof.challenge)) {
-                m_excluded.insert(parts->leader);
-                m_candidates.erase(parts->leader);
+                if (PosAnchorRejectIsProvisional(reject_reason)) {
+                    // Not invalid, only not verifiable on this node's view of
+                    // the parent chain yet: an honest leader that saw a new
+                    // Bitcoin block first lands here too. Leave the proposal
+                    // aside, sign the next one, and try it again once this
+                    // node's view moves (#286).
+                    LogPrintf("PoS gossip: leaving aside proposal %s at height %d for now (%s)\n",
+                              backed->GetHash().GetHex(), height, reject_reason);
+                    m_anchor_deferred[parts->leader] = m_parent_tip_seen;
+                } else {
+                    m_excluded.insert(parts->leader);
+                    m_candidates.erase(parts->leader);
+                }
             }
             return 150; // re-pick the next-lowest valid leader promptly
         }
