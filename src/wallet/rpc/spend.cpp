@@ -544,7 +544,8 @@ int64_t ApproxSecondsPerBlock()
 }
 
 //! Why an immature staking output cannot be withdrawn yet, with when it can:
-//! "unbonding until block 45120 (around 2026-08-06T10:00:00Z)".
+//! "locked until block 45120 (around 2026-08-06T10:00:00Z): the unbonding
+//! delay counts from the block that bonded it".
 std::string DescribeImmaturity(const StakeUtxo& s, int tip_height, int64_t tip_time)
 {
     // Already withdrawn, just not yet confirmed — the stake registry still
@@ -559,9 +560,11 @@ std::string DescribeImmaturity(const StakeUtxo& s, int tip_height, int64_t tip_t
     if (!s.csv_mature) {
         if (s.spendable_height >= 0) {
             const int64_t eta = tip_time + (int64_t)(s.spendable_height - (tip_height + 1)) * ApproxSecondsPerBlock();
-            return strprintf("unbonding until block %d (around %s)", s.spendable_height, FormatISO8601DateTime(eta));
+            return strprintf("locked until block %d (around %s): the unbonding delay counts from the block that bonded it",
+                             s.spendable_height, FormatISO8601DateTime(eta));
         }
-        return strprintf("unbonding until %s", FormatISO8601DateTime(s.spendable_time));
+        return strprintf("locked until %s: the unbonding delay counts from the block that bonded it",
+                         FormatISO8601DateTime(s.spendable_time));
     }
     if (s.parsed.liquid_locktime >= (int64_t)LOCKTIME_THRESHOLD) {
         return strprintf("vesting-locked until %s", FormatISO8601DateTime(s.parsed.liquid_locktime));
@@ -1866,6 +1869,7 @@ struct DelegationUtxo {
     CAmount amount{0};
     bool unconfirmed{false};  //!< the funding transaction is still in the mempool
     bool spending{false};     //!< a reclaim or rotation is sent but not yet confirmed
+    uint256 spender;          //!< that reclaim or rotation, when spending
 };
 
 std::vector<DelegationUtxo> FindWalletDelegationUtxos(CWallet& wallet, const std::optional<CPubKey>& only_controller) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
@@ -1903,6 +1907,7 @@ std::vector<DelegationUtxo> FindWalletDelegationUtxos(CWallet& wallet, const std
                 if (!sp) continue;
                 if (wallet.GetTxDepthInMainChain(*sp) > 0) continue; // confirmed: really gone
                 d.spending = true;
+                d.spender = sp->GetHash();
             }
             d.txout = out;
             d.controller = parsed->first;
@@ -1939,11 +1944,14 @@ std::vector<DelegationUtxo> FindWalletDelegationUtxos(CWallet& wallet, const std
 //! it is re-pointed.
 //! The network fee for spending a delegation record: one bare input, one output
 //! and the explicit fee output, about 250 vB once the worst-case signature is
-//! counted. Every reclaim and every re-pointing pays this out of the record.
+//! counted. Every reclaim and every re-pointing pays this out of the record,
+//! so it is an amount of the record's asset: the fee rate is priced in
+//! reference fee units, and paid unconverted it would be too small to relay
+//! whenever that asset is worth less than the reference unit.
 CAmount DelegationSpendFee(const CWallet& wallet)
 {
     CCoinControl coin_control;
-    return GetMinimumFeeRate(wallet, coin_control, nullptr).GetFee(250);
+    return GetMinimumFeeRate(wallet, coin_control, nullptr).GetFee(250, Params().GetConsensus().pegged_asset);
 }
 
 //! The least a delegation record may hold and still be RECLAIMABLE: the dust
@@ -2003,7 +2011,8 @@ CTransactionRef SpendDelegationRecords(CWallet& wallet, const std::vector<Delega
         CMutableTransaction sizing = mtx;
         for (CTxIn& in : sizing.vin) in.scriptSig = CScript() << std::vector<unsigned char>(73);
         CCoinControl coin_control;
-        fee = GetMinimumFeeRate(wallet, coin_control, nullptr).GetFee(GetVirtualTransactionSize(CTransaction(sizing)));
+        // In the record's own asset, as every staking spend prices its fee.
+        fee = GetMinimumFeeRate(wallet, coin_control, nullptr).GetFee(GetVirtualTransactionSize(CTransaction(sizing)), asset);
     }
     if (total <= fee) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
@@ -2079,12 +2088,21 @@ CTransactionRef SpendDelegationRecords(CWallet& wallet, const std::vector<Delega
     wallet.AddToWallet(tx, TxStateInactive{}, [](CWalletTx& wtx, bool /*new_tx*/) {
         wtx.fTimeReceivedIsTxTime = true;
         wtx.fFromMe = true;
+        // The same change, refused and abandoned before, is built again
+        // byte for byte when nothing about the record has moved since; it
+        // is being sent anew, so it is no longer abandoned.
+        if (wtx.isAbandoned()) wtx.m_state = TxStateInactive{};
         return true;
     });
 
     std::string err_string;
     if (!wallet.chain().broadcastTransaction(tx, wallet.m_default_max_tx_fee, /*relay=*/true, err_string)) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the delegation change: %s", err_string));
+        // This node's own mempool refused it, so it never left this node.
+        // Kept, it would mark the record as being spent by a transaction
+        // that will never confirm, and every later re-pointing or reclaim
+        // would wait for it forever. Abandoning it frees the record.
+        wallet.AbandonTransaction(tx->GetHash());
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("failed to broadcast the delegation change, and nothing was sent: %s", err_string));
     }
     if (fee_out) *fee_out = fee;
     if (rotate_value_out) *rotate_value_out = rotate_to ? out_value : 0;
@@ -2235,8 +2253,9 @@ RPCHelpMan delegatestake()
     for (const DelegationUtxo& d : existing) {
         if (d.spending) {
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
-                "a change to this delegation has already been sent and is waiting to confirm; wait for it "
-                "before re-pointing %s again", HexStr(controller)));
+                "a change to this delegation has already been sent and is waiting to confirm (transaction %s); "
+                "wait for it before re-pointing %s again. If it never confirms, abandontransaction %s frees the record",
+                d.spender.GetHex(), HexStr(controller), d.spender.GetHex()));
         }
         live_record = &d;
     }
@@ -3244,6 +3263,7 @@ RPCHelpMan listdelegations()
                             {RPCResult::Type::STR_AMOUNT, "amount", "SEQ held in the record, reclaimable with undelegatestake"},
                             {RPCResult::Type::BOOL, "confirmed", "whether the record has confirmed; the delegation is not in force until it has"},
                             {RPCResult::Type::BOOL, "changing", "a reclaim or re-pointing has been sent and is waiting to confirm"},
+                            {RPCResult::Type::STR_HEX, "changing_txid", /*optional=*/true, "that reclaim or re-pointing, while changing; abandontransaction frees the record if it never confirms"},
                         }},
                         {RPCResult::Type::OBJ, "policy_in_force", /*optional=*/true, "the payout policy binding the signer right now, if it has committed to one", {
                             {RPCResult::Type::NUM, "activation", "height from which it binds"},
@@ -3333,6 +3353,7 @@ RPCHelpMan listdelegations()
             r.pushKV("amount", ValueFromAmount(rec->amount));
             r.pushKV("confirmed", !rec->unconfirmed);
             r.pushKV("changing", rec->spending);
+            if (rec->spending) r.pushKV("changing_txid", rec->spender.GetHex());
             o.pushKV("record", r);
         }
 

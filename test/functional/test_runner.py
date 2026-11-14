@@ -242,6 +242,7 @@ BASE_SCRIPTS = [
     'feature_pos_stake_vesting.py',
     'feature_pos_delegation.py',
     'feature_pos_pools.py',
+    'feature_pos_delegation_fee_asset.py',
     'feature_pos_reward_convert.py',
     'feature_pos_reward_xchain.py',
     'feature_pos_rewards.py',
