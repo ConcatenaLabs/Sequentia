@@ -48,6 +48,7 @@ class CBlockTreeDB;
 class CChainParams;
 class CTxMemPool;
 class ChainstateManager;
+class StakeRegistry;
 struct ChainTxData;
 struct DisconnectedBlockTransactions;
 struct PrecomputedTransactionData;
@@ -276,6 +277,11 @@ bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& head
  *  `getposcert` is answered with when the producer holds no certificate in
  *  memory, after a restart or on a node without a producer (#387). */
 std::optional<CBlockHeader> PosStoredCertificate(ChainstateManager& chainman, const uint256& hash);
+/** The stake registry as of `block` (#277): a copy of the live one for the
+ *  active tip, a snapshot for a recent block (PosRememberRegistryAfter), or,
+ *  for the tip's parent with no snapshot held, the tip's state with the tip
+ *  undone. nullptr when that state is not available here. */
+std::shared_ptr<const StakeRegistry> PosRegistryAfter(ChainstateManager& chainman, const CBlockIndex* block);
 
 /** SEQUENTIA: bumped by the anchor watcher (anchor.cpp, RefetchDeferredBlocks)
  *  each time peers are to be asked again for blocks left aside because the

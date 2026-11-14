@@ -4600,6 +4600,32 @@ std::optional<CBlockHeader> PosStoredCertificate(ChainstateManager& chainman, co
     return pfull->GetBlockHeader();
 }
 
+std::shared_ptr<const StakeRegistry> PosRegistryAfter(ChainstateManager& chainman, const CBlockIndex* block)
+{
+    if (!block) return nullptr;
+    LOCK(::cs_main);
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    // The live registry is the tip's state; hand out a copy so it cannot move
+    // under the caller.
+    if (block == tip) return StakeRegistry::GetInstance().Clone();
+    if (auto snapshot = PosRegistryAfterSnapshot(block->GetBlockHash())) return snapshot;
+    // After a restart, or a sync, no snapshot is held: the tip's parent is
+    // derived from the tip's state by undoing the tip on a copy, which is the
+    // one other state a sibling certificate usually needs.
+    if (tip && tip->pprev == block && tip->nHeight > 0 && (tip->nStatus & BLOCK_HAVE_UNDO)) {
+        CBlock tip_block;
+        CBlockUndo tip_undo;
+        if (ReadBlockFromDisk(tip_block, tip, Params().GetConsensus()) && UndoReadFromDisk(tip_undo, tip)) {
+            std::shared_ptr<StakeRegistry> registry = StakeRegistry::GetInstance().Clone();
+            PosRevertBlockStake(*registry, tip_block, tip_undo, tip->nHeight);
+            PosRememberRegistryAfter(block->GetBlockHash(), registry);
+            LogPrint(BCLog::VALIDATION, "PoS: stake registry after %s rebuilt by undoing the tip\n", block->GetBlockHash().ToString());
+            return registry;
+        }
+    }
+    return nullptr;
+}
+
 bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& header)
 {
     if (!g_con_pos) return false;
@@ -4626,8 +4652,18 @@ bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& head
     const bool carried = pindex->PosCarriesQuorum();
     pindex->m_pos_countersigs = (uint16_t)members;
     // Judged again against the quorum of the parent's stake state, exactly as
-    // on arrival; PosSetCertified keeps the candidate sets ordered.
-    (void)PosRecordCertified(chainman, pindex, PosQuorumAfter(pindex->pprev));
+    // on arrival; PosSetCertified keeps the candidate sets ordered. A node that
+    // restarted since the parent was connected no longer knows that quorum;
+    // it derives it from the parent's registry, as the certificate was just
+    // verified against it (#277).
+    int parent_quorum = PosQuorumAfter(pindex->pprev);
+    if (parent_quorum < 0 && g_pos_public_committee) {
+        if (std::shared_ptr<const StakeRegistry> parent_registry = PosRegistryAfter(chainman, pindex->pprev)) {
+            parent_quorum = PosSlotQuorumAt(*parent_registry, pindex->nHeight);
+            pindex->pprev->m_pos_child_quorum = parent_quorum;
+        }
+    }
+    (void)PosRecordCertified(chainman, pindex, parent_quorum);
     chainman.m_blockman.MarkBlockIndexDirty(pindex);
 
     const bool carries = pindex->PosCarriesQuorum();
@@ -5015,6 +5051,11 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
     if (g_con_pos && pindexDelete->nHeight > 0) {
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexDelete)) {
+            // The state this block leaves, for certificates of its children
+            // on the branch being left (#277).
+            if (!IsInitialBlockDownload()) {
+                PosRememberRegistryAfter(pindexDelete->GetBlockHash(), StakeRegistry::GetInstance().Clone());
+            }
             PosRevertBlockStake(block, block_undo, pindexDelete->nHeight);
             pindexDelete->pprev->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexDelete->nHeight);
         } else {
@@ -5293,6 +5334,11 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     if (g_con_pos && pindexNew->nHeight > 0) {
         CBlockUndo block_undo;
         if (UndoReadFromDisk(block_undo, pindexNew)) {
+            // The state the parent leaves, for certificates of this block's
+            // siblings once it is the tip (#277).
+            if (!IsInitialBlockDownload()) {
+                PosRememberRegistryAfter(pindexNew->pprev->GetBlockHash(), StakeRegistry::GetInstance().Clone());
+            }
             PosApplyBlockStake(blockConnecting, block_undo, pindexNew->nHeight);
             pindexNew->m_pos_child_quorum = PosSlotQuorumAt(StakeRegistry::GetInstance(), pindexNew->nHeight + 1);
         } else {

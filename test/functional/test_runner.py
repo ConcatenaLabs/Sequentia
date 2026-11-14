@@ -278,6 +278,7 @@ BASE_SCRIPTS = [
     'feature_pos_fast_clock_round_origin.py',
     'feature_pos_fake_anchor.py',
     'feature_pos_cert_upgrade_serve.py',
+    'feature_pos_cert_upgrade_registry.py',
     'feature_pos_min_stake.py',
     'feature_pos_escaping_stall.py',
     'feature_pos_escape_stall_activation_height.py',

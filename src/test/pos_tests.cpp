@@ -895,6 +895,90 @@ BOOST_AUTO_TEST_CASE(pos_apply_revert_is_exact_inverse)
     reg.Clear();
 }
 
+// #277: a certificate is judged against the registry its parent leaves. A
+// snapshot taken before a block is applied, and the live state with the block
+// undone on a copy, are that registry, whether the block removes a member or
+// adds one; the live registry is not, and a copy never touches the original.
+BOOST_AUTO_TEST_CASE(stake_registry_snapshot_at_parent)
+{
+    StakeRegistry& reg = StakeRegistry::GetInstance();
+    CPubKey p = MakeKey();   // leaves the registry in the removal block
+    CPubKey q = MakeKey();   // stays throughout
+    CPubKey r = MakeKey();   // joins in the addition block
+    const CAmount a = 70000;
+
+    reg.Clear();
+    reg.AddUtxoStake(p, a);
+    reg.AddUtxoStake(q, 500);
+
+    // Removal: a block spends p's staking output.
+    CMutableTransaction spend;
+    spend.vin.emplace_back(COutPoint(uint256S("01"), 0));
+    spend.vout.emplace_back(CConfidentialAsset(::policyAsset), CConfidentialValue(a), CScript() << OP_TRUE);
+    CBlock removal;
+    removal.vtx.push_back(MakeTransactionRef(CoinbaseTx()));
+    removal.vtx.push_back(MakeTransactionRef(spend));
+    CBlockUndo removal_undo;
+    CTxUndo spend_undo;
+    spend_undo.vprevout.emplace_back(StakeOut(p, 100, a), /*nHeightIn=*/1, /*fCoinBaseIn=*/false);
+    removal_undo.vtxundo.push_back(spend_undo);
+
+    const std::map<CPubKey, uint64_t> parent_weights = reg.Weights();
+    const uint64_t parent_version = reg.ElectionVersion();
+    std::shared_ptr<const StakeRegistry> at_parent = reg.Clone();
+    BOOST_CHECK(at_parent->Weights() == parent_weights);
+    BOOST_CHECK_EQUAL(at_parent->ElectionVersion(), parent_version);
+
+    PosApplyBlockStake(removal, removal_undo, 100);
+    BOOST_CHECK_EQUAL(reg.GetWeight(p), 0U);
+    // The snapshot still holds the parent's stake, p included.
+    BOOST_CHECK_EQUAL(at_parent->GetWeight(p), (uint64_t)a);
+    // Undoing the block on a copy of the live state gives the same registry,
+    // and leaves the live one alone.
+    std::shared_ptr<StakeRegistry> rebuilt = reg.Clone();
+    PosRevertBlockStake(*rebuilt, removal, removal_undo, 100);
+    BOOST_CHECK(rebuilt->Weights() == parent_weights);
+    BOOST_CHECK_EQUAL(reg.GetWeight(p), 0U);
+
+    // Addition: a block creates r's staking output.
+    CMutableTransaction create;
+    create.vin.emplace_back();
+    create.vout.push_back(StakeOut(r, 100, a));
+    CBlock addition;
+    addition.vtx.push_back(MakeTransactionRef(CoinbaseTx()));
+    addition.vtx.push_back(MakeTransactionRef(create));
+    CBlockUndo addition_undo;
+    addition_undo.vtxundo.emplace_back();
+
+    const std::map<CPubKey, uint64_t> before_addition = reg.Weights();
+    std::shared_ptr<const StakeRegistry> before = reg.Clone();
+    PosApplyBlockStake(addition, addition_undo, 101);
+    BOOST_CHECK_EQUAL(reg.GetWeight(r), (uint64_t)a);
+    BOOST_CHECK_EQUAL(before->GetWeight(r), 0U);
+    std::shared_ptr<StakeRegistry> undone = reg.Clone();
+    PosRevertBlockStake(*undone, addition, addition_undo, 101);
+    BOOST_CHECK(undone->Weights() == before_addition);
+    BOOST_CHECK(before->Weights() == before_addition);
+
+    // The snapshot store keeps the most recent POS_REGISTRY_SNAPSHOTS, keyed by
+    // block; storing a block again replaces its entry.
+    PosClearRegistrySnapshots();
+    std::vector<uint256> hashes;
+    for (size_t i = 0; i <= POS_REGISTRY_SNAPSHOTS; ++i) {
+        hashes.push_back(InsecureRand256());
+        PosRememberRegistryAfter(hashes.back(), i % 2 ? before : at_parent);
+    }
+    BOOST_CHECK(PosRegistryAfterSnapshot(hashes.front()) == nullptr); // evicted
+    for (size_t i = 1; i < hashes.size(); ++i) {
+        BOOST_CHECK(PosRegistryAfterSnapshot(hashes[i]) == (i % 2 ? before : at_parent));
+    }
+    PosRememberRegistryAfter(hashes[1], before);
+    BOOST_CHECK(PosRegistryAfterSnapshot(hashes[1]) == before);
+    BOOST_CHECK(PosRegistryAfterSnapshot(hashes[2]) != nullptr); // nothing else evicted
+    PosClearRegistrySnapshots();
+    reg.Clear();
+}
+
 // Checkpoint payloads round-trip and reject malformed input.
 BOOST_AUTO_TEST_CASE(pos_checkpoint_payload_roundtrip)
 {
