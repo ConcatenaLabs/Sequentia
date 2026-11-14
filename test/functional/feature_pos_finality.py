@@ -77,8 +77,22 @@ class PosFinalityTest(BitcoinTestFramework):
         self.disconnect_nodes(0, 1)
 
         # n0 finalizes A with a 2-member quorum (>= quorum 2 ⇒ final on n0).
-        res_a = n0.generateposblock(leader, [m1])
-        a = res_a['hash']
+        # A is rebuilt until its hash lies in the upper half of the order, so
+        # that each B below has an even chance of ranking first: with A's hash
+        # left to chance, 30 tries of B failed about one run in thirty. A
+        # rejected A is invalidated about a second after it connected, well
+        # inside the three-second window before it could become final.
+        for _ in range(30):
+            res_a = n0.generateposblock(leader, [m1])
+            a = res_a['hash']
+            if hash_order(a)[0] >= 0x80:
+                break
+            stamp = n0.getblockheader(a)['time']
+            n0.invalidateblock(a)
+            while int(time.time()) <= stamp:
+                time.sleep(0.2)
+        else:
+            raise AssertionError("A never had a hash in the upper half")
         assert_equal(res_a['countersignatures'], 2)
         assert_equal(n0.getbestblockhash(), a)
 
