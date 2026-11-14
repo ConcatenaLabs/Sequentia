@@ -3321,9 +3321,28 @@ static bool CheckPosStakeRulesAtAccept(const CBlock& block, BlockValidationState
     return true; // defer to connect time
 }
 
+int PosCertificateMembers(const CBlockHeader& header)
+{
+    std::optional<PosChallengeParts> parts = ParsePosBlockChallenge(header.proof.challenge);
+    if (!parts || !parts->is_bls) return 0;
+    if (g_pos_public_committee) {
+        // Bitfield certificate: the seats it carries, else the signer count.
+        if (auto cert = ParsePosBlsBitfieldSolution(header.proof.solution)) {
+            return cert->seats >= 0 ? cert->seats : PosBitfieldPopcount(cert->bitfield);
+        }
+        return 0;
+    }
+    std::set<CPubKey> distinct;
+    if (auto cert = ParsePosBlsSolution(header.proof.solution)) {
+        for (const PosBlsMember& m : cert->members) distinct.insert(m.pubkey);
+    }
+    return (int)distinct.size();
+}
+
 //! SEQUENTIA: compute and store the PoS fork-choice keys (whitepaper §3.8) on a
 //! freshly accepted block: the countersignature count of the certificate it
-//! arrived with, whether that certificate carries its parent's certification
+//! arrived with (raised later only by a fuller certificate for the same block,
+//! PosUpgradeCertificate), whether that certificate carries its parent's certification
 //! quorum (CBlockIndex::m_pos_certified), and the leader's VRF score over the
 //! slot seed. Called before the block enters setBlockIndexCandidates; the
 //! certified answer may later be settled when the block connects, and is
@@ -3355,18 +3374,8 @@ static void SetPosForkChoiceKeys(ChainstateManager& chainman, CBlockIndex* pinde
         std::set<CPubKey> distinct;
         for (const PosVrfMember& m : members) distinct.insert(m.pubkey);
         count = distinct.size();
-    } else if (parts->is_bls && g_pos_public_committee) {
-        // Bitfield certificate: the signer count is the bitfield popcount.
-        count = 0;
-        if (auto cert = ParsePosBlsBitfieldSolution(block.proof.solution)) {
-            count = cert->seats >= 0 ? (size_t)cert->seats : (size_t)PosBitfieldPopcount(cert->bitfield);
-        }
     } else if (parts->is_bls) {
-        std::set<CPubKey> distinct;
-        if (auto cert = ParsePosBlsSolution(block.proof.solution)) {
-            for (const PosBlsMember& m : cert->members) distinct.insert(m.pubkey);
-        }
-        count = distinct.size();
+        count = (size_t)PosCertificateMembers(block);
     } else {
         count = parts->committee.size();
     }
@@ -4535,6 +4544,117 @@ static void PosNoteActiveQuorumBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     g_pos_quorum_first_active.emplace(pindex->GetBlockHash(), std::make_pair(pindex->nHeight, now));
+}
+
+//! Whether `pindex` may escape a stall (its anchor at least three parent-chain
+//! blocks past its parent's): the one case where whether it is certified is not
+//! in its headers but in the count of the certificate a node holds.
+static bool PosMayEscapeStall(const CBlockIndex* pindex)
+{
+    return g_con_bitcoin_anchor && pindex->pprev &&
+        PosEscapingStallAllowed(pindex->pprev->m_anchor_height, pindex->m_anchor_height);
+}
+
+//! The stored block a fuller certificate can replace: its body is here, its
+//! keys were measured, it has not failed, and it is not known to carry its
+//! parent's quorum. Fork choice and finality never read the count beyond that
+//! answer, so for a block already certified a larger count changes nothing,
+//! and adopting it would only cost a relay and a disk write each time two
+//! members assemble different certificates for one block, which honest
+//! members do. That also leaves out every block whose headers certify it.
+//! nullptr otherwise.
+static CBlockIndex* PosUpgradableBlock(ChainstateManager& chainman, const uint256& hash)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(hash);
+    if (!pindex || !pindex->pprev) return nullptr;
+    if (!(pindex->nStatus & BLOCK_HAVE_DATA) || (pindex->nStatus & BLOCK_FAILED_MASK)) return nullptr;
+    if (pindex->m_pos_countersigs == 0) return nullptr;
+    if (pindex->PosCarriesQuorum()) return nullptr;
+    return pindex;
+}
+
+bool PosCertificateIsFuller(ChainstateManager& chainman, const CBlockHeader& header)
+{
+    if (!g_con_pos) return false;
+    LOCK(::cs_main);
+    const CBlockIndex* pindex = PosUpgradableBlock(chainman, header.GetHash());
+    if (!pindex) return false;
+    return std::min(PosCertificateMembers(header), PosMaxCommitteeMembers()) > (int)pindex->m_pos_countersigs;
+}
+
+bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& header)
+{
+    if (!g_con_pos) return false;
+    LOCK(::cs_main);
+    CBlockIndex* pindex = PosUpgradableBlock(chainman, header.GetHash());
+    if (!pindex) return false;
+    const int members = std::min(PosCertificateMembers(header), PosMaxCommitteeMembers());
+    const int before = pindex->m_pos_countersigs;
+    if (members <= before) return false;
+
+    const bool carried = pindex->PosCarriesQuorum();
+    pindex->m_pos_countersigs = (uint16_t)members;
+    (void)pindex->SetProofSolution(header.proof.solution);
+    // Judged again against the quorum of the parent's stake state, exactly as
+    // on arrival; PosSetCertified keeps the candidate sets ordered.
+    (void)PosRecordCertified(chainman, pindex, PosQuorumAfter(pindex->pprev));
+    chainman.m_blockman.MarkBlockIndexDirty(pindex);
+
+    // Serve the fuller certificate with the body from now on. Only a block
+    // that has never been connected here is moved: its undo data, once
+    // written, is addressed by the block file the body sits in. A connected
+    // block keeps its first body; its count, verdict and index entry still
+    // carry the upgrade, and the certificate itself was relayed on gossip.
+    if (!(pindex->nStatus & BLOCK_HAVE_UNDO)) {
+        CBlock block;
+        if (ReadBlockFromDisk(block, pindex, Params().GetConsensus())) {
+            block.proof.solution = header.proof.solution;
+            const FlatFilePos pos{chainman.m_blockman.SaveBlockToDisk(block, pindex->nHeight, chainman.ActiveChain(), Params(), nullptr)};
+            if (!pos.IsNull()) {
+                pindex->nFile = pos.nFile;
+                pindex->nDataPos = pos.nPos;
+            }
+        }
+    }
+
+    const bool carries = pindex->PosCarriesQuorum();
+    if (carries && !carried) {
+        for (CChainState* chainstate : chainman.GetAll()) {
+            if (chainstate->m_chain.Contains(pindex)) {
+                // Already active: its observation window opens now, the moment
+                // this node learned it is a quorum block.
+                if (!chainstate->IsInitialBlockDownload()) PosNoteActiveQuorumBlock(pindex);
+            } else if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) && pindex->HaveTxsDownloaded() &&
+                       (chainstate->m_chain.Tip() == nullptr ||
+                        chainstate->setBlockIndexCandidates.value_comp()(chainstate->m_chain.Tip(), pindex))) {
+                // A sibling that lost to the tip only because it was not
+                // certified was pruned from the candidates; it may now win.
+                // FindMostWorkChain still refuses it below the finalized point.
+                chainstate->setBlockIndexCandidates.insert(pindex);
+            }
+        }
+    }
+    LogPrintf("PoS: certificate of %s (height %d) upgraded from %d to %d member(s)%s\n",
+              pindex->GetBlockHash().ToString(), pindex->nHeight, before, members,
+              carries && !carried ? ", now certified" : "");
+    if (carries) GetMainSignals().PosCertificateToRelay(header);
+    return true;
+}
+
+//! A node that receives a block that may escape a stall with a certificate
+//! carrying its parent's quorum gossips that certificate (#282): another node
+//! may hold the same block with fewer signatures and, without it, would rank
+//! the block as uncertified for good. A block that cannot escape a stall needs
+//! nothing: its headers already say it is certified.
+static void PosAnnounceStallEscapeCertificate(const CChainState& chainstate, const CBlockIndex* pindex, const CBlockHeader& header)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(::cs_main);
+    if (!g_con_pos || !g_pos_bls || g_pos_committee_size <= 1) return;
+    if (chainstate.IsInitialBlockDownload()) return;
+    if (!PosMayEscapeStall(pindex) || !pindex->PosCarriesQuorum()) return;
+    GetMainSignals().PosCertificateToRelay(header);
 }
 
 // Recompute the immediate-finality point from `tip`: the highest active-chain
@@ -6877,6 +6997,7 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, Block
     } catch (const std::runtime_error& e) {
         return AbortNode(state, std::string("System error: ") + e.what());
     }
+    if (g_con_pos) PosAnnounceStallEscapeCertificate(*this, pindex, block.GetBlockHeader());
 
     FlushStateToDisk(state, FlushStateMode::NONE);
 

@@ -144,6 +144,15 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                      PosProduceResult& result, std::string& error,
                      PosProduceError& err_kind);
 
+/** TEST ONLY (recertifyposblock): give `block`, a child of the active tip on
+ *  the public BLS committee, a new certificate signed by `leader_key` and the
+ *  committee members among `member_keys`. The block hash is unchanged (the
+ *  certificate lies outside it), so one block can be handed to different nodes
+ *  with different certificates, as a member signing twice can. Returns the
+ *  seats the new certificate carries, or -1 with `error` set. */
+int PosRecertifyBlock(ChainstateManager& chainman, CBlock& block, const CKey& leader_key,
+                      const std::vector<CKey>& member_keys, std::string& error);
+
 /** Background thread that produces PoS blocks autonomously from a set of staking
  *  keys, with no external coordinator. Reacts to new tips via the validation
  *  interface and runs the local slot clock; on each round it elects the

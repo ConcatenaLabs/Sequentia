@@ -122,6 +122,9 @@ private:
 public:
     BlockMap m_block_index GUARDED_BY(cs_main);
 
+    /** Queue `pindex` to be written with the next block index flush. */
+    void MarkBlockIndexDirty(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { m_dirty_blockindex.insert(pindex); }
+
     /**
      * All pairs A->B, where A (or one of its ancestors) misses transactions, but B has transactions.
      * Pruned nodes may have entries where B is missing data.

@@ -2181,6 +2181,62 @@ static RPCHelpMan submitposblock()
     };
 }
 
+static RPCHelpMan recertifyposblock()
+{
+    return RPCHelpMan{"recertifyposblock",
+                "\nTEST CHAINS ONLY. Return a block with a new certificate signed by the given leader and "
+                "committee members, without submitting it. The block hash is unchanged, since the "
+                "certificate lies outside it: this is how a member who signs twice hands two nodes the same "
+                "block with different signatures. The block's parent must be the active tip.\n",
+                {
+                    {"blockhex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block, hex-encoded."},
+                    {"leaderkey", RPCArg::Type::STR, RPCArg::Optional::NO, "WIF private key of the block's leader."},
+                    {"committeekeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "WIF private keys of the committee members who sign.",
+                        {
+                            {"", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "WIF private key"},
+                        },
+                    },
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "hex", "the block with the new certificate"},
+                        {RPCResult::Type::STR_HEX, "hash", "its hash, the same as before"},
+                        {RPCResult::Type::NUM, "countersignatures", "the seats the new certificate carries"},
+                    }},
+                RPCExamples{HelpExampleCli("recertifyposblock", "\"<blockhex>\" \"cV...\" '[\"cV...\"]'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!Params().IsTestChain()) {
+        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "recertifyposblock is for test chains only");
+    }
+    if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+    CBlock block;
+    if (!DecodeHexBlk(block, request.params[0].get_str())) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+    }
+    CKey leader = DecodeSecret(request.params[1].get_str());
+    if (!leader.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid leader private key");
+    std::vector<CKey> members;
+    for (const UniValue& wif : request.params[2].get_array().getValues()) {
+        CKey key = DecodeSecret(wif.get_str());
+        if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid committee private key");
+        members.push_back(key);
+    }
+    std::string error;
+    const int seats = PosRecertifyBlock(EnsureAnyChainman(request.context), block, leader, members, error);
+    if (seats < 0) throw JSONRPCError(RPC_MISC_ERROR, error);
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
+    ss << block;
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("hex", HexStr(ss));
+    result.pushKV("hash", block.GetHash().GetHex());
+    result.pushKV("countersignatures", seats);
+    return result;
+},
+    };
+}
+
 static RPCHelpMan getcompactsketch()
 {
     return RPCHelpMan{"getcompactsketch",
@@ -2507,6 +2563,7 @@ static const CRPCCommand commands[] =
 
     { "hidden",              &estimaterawfee,          },
     { "hidden",              &generate,                },
+    { "hidden",              &recertifyposblock,       },
 };
 // clang-format on
     for (const auto& c : commands) {

@@ -254,3 +254,8 @@ void CMainSignals::NewPoWValidBlock(const CBlockIndex *pindex, const std::shared
     LOG_EVENT("%s: block hash=%s", __func__, block->GetHash().ToString());
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NewPoWValidBlock(pindex, block); });
 }
+
+void CMainSignals::PosCertificateToRelay(const CBlockHeader& header) {
+    LOG_EVENT("%s: block hash=%s", __func__, header.GetHash().ToString());
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.PosCertificateToRelay(header); });
+}

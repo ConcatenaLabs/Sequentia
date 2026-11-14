@@ -15,6 +15,7 @@
 extern RecursiveMutex cs_main;
 class BlockValidationState;
 class CBlock;
+class CBlockHeader;
 class CBlockIndex;
 struct CBlockLocator;
 class CConnman;
@@ -173,6 +174,13 @@ protected:
      * Notifies listeners that a block which builds directly on our current tip
      * has been received and connected to the headers tree, though not validated yet */
     virtual void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& block) {};
+    /**
+     * SEQUENTIA PoS (#282): a quorum certificate this node holds for a block
+     * that may escape a stall, either just received with the block or just
+     * adopted as fuller than the one held. Other nodes may hold the same block
+     * with fewer signatures; the listener gossips the certificate (poscert).
+     * Called synchronously, with cs_main held. */
+    virtual void PosCertificateToRelay(const CBlockHeader& header) {};
     friend class CMainSignals;
 };
 
@@ -205,6 +213,7 @@ public:
     void ChainStateFlushed(const CBlockLocator &);
     void BlockChecked(const CBlock&, const BlockValidationState&);
     void NewPoWValidBlock(const CBlockIndex *, const std::shared_ptr<const CBlock>&);
+    void PosCertificateToRelay(const CBlockHeader&);
 };
 
 CMainSignals& GetMainSignals();

@@ -318,6 +318,7 @@ public:
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) override;
     void BlockChecked(const CBlock& block, const BlockValidationState& state) override;
     void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock) override;
+    void PosCertificateToRelay(const CBlockHeader& header) override;
 
     /** Implement NetEventsInterface */
     void InitializeNode(const CNode* pnode) override;
@@ -379,6 +380,11 @@ private:
      * @return                True if the peer was marked for disconnection in this function
      */
     bool MaybeDiscourageAndDisconnect(CNode& pnode, Peer& peer);
+
+    /** SEQUENTIA PoS (#282): run fork choice after a held block adopted a
+     *  fuller certificate, which may make it certified and the winner of its
+     *  height. */
+    void PosActivateAfterCertificateUpgrade();
 
     void ProcessOrphanTx(std::set<uint256>& orphan_work_set) EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_cs_orphans);
     /** Process a single headers message from a peer. */
@@ -1611,6 +1617,25 @@ static std::shared_ptr<const CBlock> most_recent_block GUARDED_BY(cs_most_recent
 static std::shared_ptr<const CBlockHeaderAndShortTxIDs> most_recent_compact_block GUARDED_BY(cs_most_recent_block);
 static uint256 most_recent_block_hash GUARDED_BY(cs_most_recent_block);
 static bool fWitnessesPresentInMostRecentCompactBlock GUARDED_BY(cs_most_recent_block);
+
+void PeerManagerImpl::PosActivateAfterCertificateUpgrade()
+{
+    BlockValidationState state;
+    if (!m_chainman.ActiveChainstate().ActivateBestChain(state)) {
+        LogPrintf("PoS: fork choice after a certificate upgrade failed: %s\n", state.ToString());
+    }
+}
+
+void PeerManagerImpl::PosCertificateToRelay(const CBlockHeader& header)
+{
+    // Ours: an echo of it from a peer is not verified again. (A producer
+    // drops the echo too: the block is held and the count is not larger.
+    // Its gossip lock is not taken here, under cs_main.)
+    (void)PosCertificateSeenBefore(header);
+    m_connman.ForEachNode([&](CNode* pnode) {
+        m_connman.PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::POSCERT, header));
+    });
+}
 
 /**
  * Maintain state about the best-seen block and fast-announce a compact block
@@ -4401,6 +4426,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 Misbehaving(pfrom.GetId(), 10, "invalid poscert");
                 break;
             case PosGossipAction::Relay:
+                // A fuller certificate for a block we hold: adopt it, which
+                // relays it on (PosCertificateToRelay), and choose again.
+                if (PosUpgradeCertificate(m_chainman, header)) {
+                    PosActivateAfterCertificateUpgrade();
+                    break;
+                }
                 if (!PosNoteCompetingCertificate(hash, height)) break; // already known
                 m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(
                     NetMsgType::GETDATA, std::vector<CInv>{CInv(MSG_BLOCK | MSG_WITNESS_FLAG, hash)}));
@@ -4419,6 +4450,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(pfrom.GetId(), 10, "invalid poscert");
             break;
         case PosGossipAction::Relay: {
+            if (PosUpgradeCertificate(m_chainman, header)) {
+                PosActivateAfterCertificateUpgrade();
+                break;
+            }
             const uint256 hash = header.GetHash();
             bool have_body = prod->GetProposalBlock(hash) != nullptr;
             if (!have_body) {
