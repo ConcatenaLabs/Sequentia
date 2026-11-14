@@ -207,7 +207,60 @@ bool PosSeatsActiveAt(int height)
     return g_pos_hardening_height > 0 && height >= g_pos_hardening_height;
 }
 
+namespace {
+//! Results derived from the registry, kept for the election state they were
+//! computed from (StakeRegistry::ElectionVersion, unique across instances) and
+//! for the globals they read. The committee for a height is asked for many
+//! times while the tip stays put: by the producer on every poll, by each
+//! certificate and block check, by RPCs. Computing it is O(n log n) in the
+//! stakers (12 ms at 10,000), so it is computed once per state.
+struct CommitteeCacheKey {
+    uint64_t version;
+    uint256 seed;
+    bool seats_active;
+    int committee_size;
+    uint64_t min_stake;
+    bool operator==(const CommitteeCacheKey& o) const
+    {
+        return version == o.version && seed == o.seed && seats_active == o.seats_active &&
+               committee_size == o.committee_size && min_stake == o.min_stake;
+    }
+};
+Mutex g_committee_cache_mutex;
+//! A few entries: the heights and seeds in play at once (the tip's child, a
+//! sibling's certificate) are few, and the version changes every block.
+std::vector<std::pair<CommitteeCacheKey, PosCommitteeSeats>> g_committee_cache GUARDED_BY(g_committee_cache_mutex);
+constexpr size_t COMMITTEE_CACHE_ENTRIES = 8;
+struct SizeCacheKey {
+    uint64_t version;
+    int committee_size;
+    uint64_t min_stake;
+};
+std::optional<std::pair<SizeCacheKey, int>> g_committee_size_cache GUARDED_BY(g_committee_cache_mutex);
+} // namespace
+
 PosCommitteeSeats PosPublicCommitteeSeats(const StakeRegistry& registry, const uint256& seed, int height)
+{
+    // The version is read before computing and again after: a result is kept
+    // only when the registry did not change in between, so it never stands for
+    // a mix of two states.
+    const CommitteeCacheKey key{registry.ElectionVersion(), seed, PosSeatsActiveAt(height),
+                                g_pos_committee_size, g_pos_min_stake};
+    {
+        LOCK(g_committee_cache_mutex);
+        for (const auto& [k, v] : g_committee_cache) {
+            if (k == key) return v;
+        }
+    }
+    PosCommitteeSeats out = PosPublicCommitteeSeatsUncached(registry, seed, height);
+    if (registry.ElectionVersion() != key.version) return out; // changed meanwhile: do not keep
+    LOCK(g_committee_cache_mutex);
+    if (g_committee_cache.size() >= COMMITTEE_CACHE_ENTRIES) g_committee_cache.erase(g_committee_cache.begin());
+    g_committee_cache.emplace_back(key, out);
+    return out;
+}
+
+PosCommitteeSeats PosPublicCommitteeSeatsUncached(const StakeRegistry& registry, const uint256& seed, int height)
 {
     PosCommitteeSeats out;
     if (!PosSeatsActiveAt(height)) {
@@ -306,6 +359,24 @@ int PosSlotQuorumAt(const StakeRegistry& registry, int height)
 }
 
 int PosPublicCommitteeSize(const StakeRegistry& registry)
+{
+    const SizeCacheKey key{registry.ElectionVersion(), g_pos_committee_size, g_pos_min_stake};
+    {
+        LOCK(g_committee_cache_mutex);
+        if (g_committee_size_cache && g_committee_size_cache->first.version == key.version &&
+            g_committee_size_cache->first.committee_size == key.committee_size &&
+            g_committee_size_cache->first.min_stake == key.min_stake) {
+            return g_committee_size_cache->second;
+        }
+    }
+    const int size = PosPublicCommitteeSizeUncached(registry);
+    if (registry.ElectionVersion() != key.version) return size;
+    LOCK(g_committee_cache_mutex);
+    g_committee_size_cache = std::make_pair(key, size);
+    return size;
+}
+
+int PosPublicCommitteeSizeUncached(const StakeRegistry& registry)
 {
     // Seat count is min(#eligible registered stakers, cap) and does not depend
     // on the seed (the seed only orders/selects WHICH stakers fill the seats).

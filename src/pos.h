@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <atomic>
 #include <optional>
 #include <tuple>
 #include <set>
@@ -302,6 +303,36 @@ private:
     //! reads the claim's own inputs).
     std::map<CPubKey, std::map<COutPoint, PosPotRef>> m_pot_utxo GUARDED_BY(m_mutex);
 
+    //! Effective weight per SIGNER (WeightsLocked), kept until the next change
+    //! to a layer it is derived from. The registry changes once per connected or
+    //! disconnected block and is read many times in between (leader election,
+    //! committee seats, certificate checks, RPCs), and rebuilding the merged,
+    //! delegation-resolved map is O(n): 3.5 ms for one key at 10,000 stakers.
+    mutable std::optional<std::map<CPubKey, uint64_t>> m_weights_cache GUARDED_BY(m_mutex);
+    //! Identifies the election-relevant state (weights, delegations, BLS keys)
+    //! across EVERY registry instance: taken from a process-wide counter at
+    //! construction and at each change, so no two states ever share a value,
+    //! even in two registries that happen to live at the same address one after
+    //! the other. Derived results (the committee seats) are cached against it.
+    uint64_t m_election_version GUARDED_BY(m_mutex){NextElectionVersion()};
+
+    static uint64_t NextElectionVersion()
+    {
+        static std::atomic<uint64_t> counter{0};
+        return ++counter;
+    }
+    //! Every change to weights, delegations or BLS keys calls this.
+    void TouchElectionLocked() EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
+    {
+        m_weights_cache.reset();
+        m_election_version = NextElectionVersion();
+    }
+    const std::map<CPubKey, uint64_t>& CachedWeightsLocked() const EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
+    {
+        if (!m_weights_cache) m_weights_cache = WeightsLocked();
+        return *m_weights_cache;
+    }
+
     //! The signer for a controller (itself when it has delegated nothing).
     CPubKey SignerForLocked(const CPubKey& controller) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex)
     {
@@ -334,6 +365,7 @@ public:
     void Clear()
     {
         LOCK(m_mutex);
+        TouchElectionLocked();
         m_config.clear();
         m_utxo.clear();
         m_bls.clear();
@@ -349,6 +381,7 @@ public:
     void SetStake(const CPubKey& pubkey, uint64_t weight)
     {
         LOCK(m_mutex);
+        TouchElectionLocked();
         m_config[pubkey] = weight;
     }
     //! Register a CONFIG-layer staker's BLS public key (impl spec Option A,
@@ -356,6 +389,7 @@ public:
     void SetBls(const CPubKey& pubkey, const std::vector<unsigned char>& bls_pubkey)
     {
         LOCK(m_mutex);
+        TouchElectionLocked();
         m_bls[pubkey] = bls_pubkey;
     }
     //! A staker's registered BLS public key (config layer preferred, else UTXO
@@ -385,6 +419,7 @@ public:
                       std::map<CPubKey, uint32_t>&& bls_utxo_outputs = {})
     {
         LOCK(m_mutex);
+        TouchElectionLocked();
         m_utxo = std::move(utxo);
         m_bls_utxo = std::move(bls_utxo);
         // A caller that supplies registrations without counting the outputs
@@ -412,6 +447,7 @@ public:
                       const std::vector<unsigned char>& bls_pubkey = {}, int height = 0)
     {
         LOCK(m_mutex);
+        TouchElectionLocked();
         m_utxo[pubkey] += amount;
         m_utxo_tranches[pubkey][height] += amount;
         if (!bls_pubkey.empty()) {
@@ -427,6 +463,7 @@ public:
     void SubUtxoStake(const CPubKey& pubkey, uint64_t amount, int height = 0, bool carried_bls = false)
     {
         LOCK(m_mutex);
+        TouchElectionLocked();
         auto it = m_utxo.find(pubkey);
         if (it == m_utxo.end() || it->second < amount) {
             // Should be unreachable: connect/disconnect are exact inverses
@@ -470,7 +507,7 @@ public:
     size_t Size() const
     {
         LOCK(m_mutex);
-        return WeightsLocked().size();
+        return CachedWeightsLocked().size();
     }
     //! The weight a SIGNER commands: its own, plus every controller's that has
     //! delegated to it. This is the number the leader election, the sortition and
@@ -479,17 +516,28 @@ public:
     uint64_t GetWeight(const CPubKey& pubkey) const
     {
         LOCK(m_mutex);
-        uint64_t weight = 0;
-        for (const auto& e : MergedLocked()) {
-            if (SignerForLocked(e.first) == pubkey) weight += e.second;
-        }
-        return weight;
+        const std::map<CPubKey, uint64_t>& weights = CachedWeightsLocked();
+        auto it = weights.find(pubkey);
+        return it == weights.end() ? 0 : it->second;
     }
     //! Effective weights, keyed by signer (delegation applied).
     std::map<CPubKey, uint64_t> Weights() const
     {
         LOCK(m_mutex);
+        return CachedWeightsLocked();
+    }
+    //! The same as Weights(), computed without the cache (tests compare the two).
+    std::map<CPubKey, uint64_t> WeightsUncached() const
+    {
+        LOCK(m_mutex);
         return WeightsLocked();
+    }
+    //! The election state's identity: equal values mean the same weights,
+    //! delegations and BLS keys (see m_election_version).
+    uint64_t ElectionVersion() const
+    {
+        LOCK(m_mutex);
+        return m_election_version;
     }
     //! Raw weights keyed by controller, before delegation (introspection/tests).
     std::map<CPubKey, uint64_t> ControllerWeights() const
@@ -517,6 +565,7 @@ public:
     void AddUtxoDelegation(const CPubKey& controller, const CPubKey& signer, int height = 0)
     {
         LOCK(m_mutex);
+        TouchElectionLocked();
         m_deleg_utxo[controller] = signer;
         m_deleg_height[controller] = height;
     }
@@ -528,6 +577,7 @@ public:
     void SubUtxoDelegation(const CPubKey& controller, const CPubKey& signer)
     {
         LOCK(m_mutex);
+        TouchElectionLocked();
         auto it = m_deleg_utxo.find(controller);
         if (it != m_deleg_utxo.end() && it->second == signer) {
             m_deleg_utxo.erase(it);
@@ -715,6 +765,8 @@ int PosQuorum(size_t committee_size);
  *  members; from g_pos_hardening_height the committee is counted in SEATS
  *  instead (PosPublicCommitteeSeats). */
 int PosPublicCommitteeSize(const StakeRegistry& registry);
+/** PosPublicCommitteeSize without its cache (tests compare the two). */
+int PosPublicCommitteeSizeUncached(const StakeRegistry& registry);
 
 /** SEQUENTIA: from g_pos_hardening_height (the audit hardening fork) the public
  *  committee holds g_pos_committee_size SEATS, apportioned to stakers in
@@ -742,6 +794,8 @@ struct PosCommitteeSeats {
     int total{0};                    //!< sum of seats
 };
 PosCommitteeSeats PosPublicCommitteeSeats(const StakeRegistry& registry, const uint256& seed, int height);
+/** PosPublicCommitteeSeats without its cache (tests compare the two). */
+PosCommitteeSeats PosPublicCommitteeSeatsUncached(const StakeRegistry& registry, const uint256& seed, int height);
 
 /** Total seats of the public committee for a slot at `height`, which the quorum
  *  is a strict majority of: min(g_pos_committee_size, eligible registered
