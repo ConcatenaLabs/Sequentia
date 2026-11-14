@@ -1175,6 +1175,9 @@ class HeldTransactionsTest(BitcoinTestFramework):
         self.wait_until(lambda: all(self.tip(n)["anchorheight"] <= fork for n in self.nodes), timeout=60)
         self.wait_until(lambda: len(set(ids) & set(n1.getheldtxs()["txids"])) == len(ids), timeout=120)
         h0 = n1.getblockcount()
+        # Everything the member holds counts toward the share, not only the case's own transactions: when
+        # Bitcoin's fork lies lower, the blocks that funded them leave too, and their transactions are held.
+        held_all = set(n1.getheldtxs()["txids"]) | set(ids) | set(parents)
         # The attacker's mempool holds the same transactions, and a block it leads would mine them all from
         # there: take it offline, so that every block measured is one an aware member assembled.
         self.stop_node(ATTACKER)
@@ -1197,8 +1200,8 @@ class HeldTransactionsTest(BitcoinTestFramework):
         worst = 0.0
         for h in range(h0 + 1, n1.getblockcount() + 1):
             b = n1.getblock(n1.getblockhash(h), 2)
-            held_w = sum(t["weight"] for t in b["tx"][1:] if t["txid"] in ids or t["txid"] in parents)
-            n_held = sum(1 for t in b["tx"][1:] if t["txid"] in ids or t["txid"] in parents)
+            held_w = sum(t["weight"] for t in b["tx"][1:] if t["txid"] in held_all)
+            n_held = sum(1 for t in b["tx"][1:] if t["txid"] in held_all)
             n_paid = sum(1 for t in b["tx"][1:] if t["txid"] in paid)
             honest = self.stakers[ATTACKER][1] not in b.get("signblock_challenge", "")
             if n_held or n_paid:
