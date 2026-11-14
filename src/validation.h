@@ -271,6 +271,11 @@ bool PosCertificateIsFuller(ChainstateManager& chainman, const CBlockHeader& hea
  *  ActivateBestChain. A block already at or below the finalized point stays
  *  where it is: finality is never undone. */
 bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& header);
+/** The header of a quorum-certified block this node holds, with the fullest
+ *  certificate it has for it (the block index entry's): what a peer asking
+ *  `getposcert` is answered with when the producer holds no certificate in
+ *  memory, after a restart or on a node without a producer (#387). */
+std::optional<CBlockHeader> PosStoredCertificate(ChainstateManager& chainman, const uint256& hash);
 
 /** SEQUENTIA: bumped by the anchor watcher (anchor.cpp, RefetchDeferredBlocks)
  *  each time peers are to be asked again for blocks left aside because the
