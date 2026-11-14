@@ -5735,6 +5735,10 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
 
     UpdateTip(pindexDelete->pprev);
 
+    // Held transactions (pos_heldtxs.h): while the anchor watcher's record is
+    // open, whatever leaves the active chain is noted for it, on any thread.
+    HeldTxsNoteDisconnected(pindexDelete);
+
     // SEQUENTIA PoS: exact inverse of the ConnectTip stake mirroring. A
     // missed update would silently desync the consensus-feeding registry
     // from peers (different weights ⇒ different sortition results), so a

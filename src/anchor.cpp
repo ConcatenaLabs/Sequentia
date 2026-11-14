@@ -1269,26 +1269,28 @@ static bool InvalidateOrphanedAnchors(ChainstateManager& chainman)
         LogPrintf("Parent chain reorganization detected: invalidating block %s (and descendants) whose anchor is no longer canonical\n",
                   lowest_bad.ToString());
         CBlockIndex* pindex_bad;
-        const CBlockIndex* old_tip{nullptr};
         {
             LOCK(cs_main);
             pindex_bad = chainman.m_blockman.LookupBlockIndex(lowest_bad);
             if (!pindex_bad) return false;
-            old_tip = chainman.ActiveChain().Tip();
             // Until the provenance marker below is set, peers still building on
             // the blocks being disconnected are not misbehaving either
             // (ChainstateManager::IsAnchorOrphaned).
             chainman.m_anchor_invalidating = pindex_bad;
+            // Held transactions (doc 04, "Held transactions"): from before the
+            // invalidation until the record holds what left, members sign
+            // nothing and every block that leaves the active chain is noted, on
+            // whatever thread it leaves: the invalidation's own disconnects,
+            // and what the activation after it takes off below the invalidated
+            // block when another branch outweighs what remains.
+            HeldTxsOpenRecord();
         }
-        // Members sign nothing from here until the record holds what this
-        // disconnect takes off the chain (pos_heldtxs.h).
-        HeldTxsSetFilling(true);
         BlockValidationState state;
         if (!chainman.ActiveChainstate().InvalidateBlock(state, pindex_bad)) {
             LogPrintf("WARNING: failed to invalidate block %s after parent chain reorganization: %s\n",
                       lowest_bad.ToString(), state.ToString());
             WITH_LOCK(cs_main, chainman.m_anchor_invalidating = nullptr);
-            HeldTxsSetFilling(false);
+            HeldTxsCloseRecord(chainman);
             return false;
         }
         {
@@ -1298,13 +1300,21 @@ static bool InvalidateOrphanedAnchors(ChainstateManager& chainman)
             // which no restart or later tick would ever reconsider: the node
             // would sit below the network for good. Undo the partial work
             // instead; the next start re-derives the verdict from scratch.
-            LOCK(cs_main);
-            if (chainman.ActiveChain().Contains(pindex_bad)) {
-                LogPrintf("Anchor watcher: invalidation of %s was interrupted; undoing it so the next start can redo it\n",
-                          lowest_bad.ToString());
-                chainman.ActiveChainstate().ResetBlockFailureFlags(pindex_bad);
-                chainman.m_anchor_invalidating = nullptr;
-                HeldTxsSetFilling(false);
+            // What it took off before it stopped is recorded all the same:
+            // those blocks' anchors are off Bitcoin's best chain too.
+            bool interrupted = false;
+            {
+                LOCK(cs_main);
+                if (chainman.ActiveChain().Contains(pindex_bad)) {
+                    LogPrintf("Anchor watcher: invalidation of %s was interrupted; undoing it so the next start can redo it\n",
+                              lowest_bad.ToString());
+                    chainman.ActiveChainstate().ResetBlockFailureFlags(pindex_bad);
+                    chainman.m_anchor_invalidating = nullptr;
+                    interrupted = true;
+                }
+            }
+            if (interrupted) {
+                HeldTxsCloseRecord(chainman);
                 return false;
             }
         }
@@ -1321,22 +1331,13 @@ static bool InvalidateOrphanedAnchors(ChainstateManager& chainman)
             chainman.ActiveChainstate().MarkAnchorInvalid(pindex_bad);
             chainman.m_anchor_invalidating = nullptr;
         }
-        // Held transactions (doc 04, "Held transactions"): keep what the
-        // certified blocks just disconnected carried. After the disconnect,
-        // never on its path, so following Bitcoin is not delayed.
-        if (HeldTxsActive() && old_tip && old_tip->GetAncestor(pindex_bad->nHeight) == pindex_bad) {
-            // Test only (-posdebugheldfillms): widen the fill window.
-            if (const int64_t fill_ms = gArgs.GetIntArg("-posdebugheldfillms", 0); fill_ms > 0) {
-                UninterruptibleSleep(std::chrono::milliseconds{fill_ms});
-            }
-            std::vector<const CBlockIndex*> disconnected;
-            for (const CBlockIndex* p = old_tip; p && p->nHeight >= pindex_bad->nHeight; p = p->pprev) disconnected.push_back(p);
-            std::reverse(disconnected.begin(), disconnected.end());
-            HeldTxsRecordDisconnect(chainman, disconnected);
-        }
-        HeldTxsSetFilling(false);
         BlockValidationState abc_state;
-        if (!chainman.ActiveChainstate().ActivateBestChain(abc_state)) {
+        const bool activated = chainman.ActiveChainstate().ActivateBestChain(abc_state);
+        // Held transactions: keep what the certified blocks that left carried.
+        // After the activation, never on its path, so following Bitcoin is not
+        // delayed.
+        HeldTxsCloseRecord(chainman);
+        if (!activated) {
             LogPrintf("WARNING: ActivateBestChain failed after anchor invalidation: %s\n", abc_state.ToString());
             return false;
         }
@@ -1647,6 +1648,19 @@ void AnchorWatchTask(ChainstateManager& chainman)
                 }
                 LogPrintf("Anchor %s (height %d) of block %s is canonical again; reconsidering\n",
                           anchor_hash.ToString(), anchor_height, hash.ToString());
+                // Held transactions (doc 04, "Held transactions"): from the
+                // moment the marks clear, the revived branch is a candidate, and
+                // any activation on any thread (this one's below, a peer's
+                // block, a peer's getblocks, an RPC) can take the active branch
+                // off for it. So the record opens in this hold, before the
+                // marks clear: members sign nothing, and whatever leaves the
+                // active chain is noted, until the record holds it. The walk
+                // above has already invalidated every block whose anchor was
+                // orphaned, so what can still leave is a branch that loses
+                // fork choice to the one revived, or one whose anchor Bitcoin
+                // dropped since the walk; either way it leaves because Bitcoin
+                // moved.
+                HeldTxsOpenRecord();
                 // ReconsiderAnchoredBlock clears the BLOCK_FAILED_ANCHOR marker
                 // too, and in the same hold marks failed again the descendants
                 // whose own anchor is still orphaned, so no activation, on this
@@ -1654,6 +1668,19 @@ void AnchorWatchTask(ChainstateManager& chainman)
                 refailed = ReconsiderLocked(chainman, pindex, anchor_ok);
             }
             AddToRecoverySet(refailed);
+            // Test only (-posdebugreconsideractivatems): let another thread's
+            // activation move the node first.
+            if (const int64_t ms = gArgs.GetIntArg("-posdebugreconsideractivatems", 0); ms > 0) {
+                UninterruptibleSleep(std::chrono::milliseconds{ms});
+            }
+            // Activate now, before the next entry's calls to the Bitcoin
+            // daemon, so that the record closes as soon as it can and members
+            // are kept from signing only for the activation.
+            BlockValidationState state;
+            if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
+                LogPrintf("WARNING: ActivateBestChain failed after anchor reconsideration: %s\n", state.ToString());
+            }
+            HeldTxsCloseRecord(chainman);
             // The hint is NOT erased here: it lives until the branch is seen
             // connected (above), so the certified-sibling guard covers the
             // whole un-fail -> reconnect window.
@@ -1661,35 +1688,6 @@ void AnchorWatchTask(ChainstateManager& chainman)
         }
         if (any_reconsidered) {
             reconsidered = true;
-            // Held transactions (doc 04, "Held transactions"): whatever this
-            // activation takes off the active chain is recorded like a
-            // disconnect of section 2. The walk above has already invalidated
-            // every block whose anchor was orphaned, so what can still leave
-            // here is a branch that loses fork choice to the one revived, or
-            // one whose anchor Bitcoin dropped since the walk; either way it
-            // leaves because Bitcoin moved. Members sign nothing until the
-            // record holds it.
-            const CBlockIndex* old_tip = WITH_LOCK(cs_main, return chainman.ActiveChain().Tip());
-            if (HeldTxsActive()) HeldTxsSetFilling(true);
-            BlockValidationState state;
-            if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
-                LogPrintf("WARNING: ActivateBestChain failed after anchor reconsideration: %s\n", state.ToString());
-            }
-            if (HeldTxsActive()) {
-                std::vector<const CBlockIndex*> disconnected;
-                {
-                    LOCK(cs_main);
-                    const CBlockIndex* fork = old_tip ? chainman.ActiveChain().FindFork(old_tip) : nullptr;
-                    for (const CBlockIndex* p = old_tip; p && p != fork; p = p->pprev) disconnected.push_back(p);
-                }
-                std::reverse(disconnected.begin(), disconnected.end());
-                if (!disconnected.empty()) {
-                    LogPrintf("Anchor watcher: the reconsideration took %u block(s) above height %d off the active chain\n",
-                              (unsigned)disconnected.size(), disconnected.front()->nHeight - 1);
-                    HeldTxsRecordDisconnect(chainman, disconnected);
-                }
-                HeldTxsSetFilling(false);
-            }
             // Raise pindexBestHeader onto the recovered branch (once per batch) so
             // a branch known only as headers re-requests its bodies and reconnects,
             // re-finalizing the original blocks rather than minting fresh on top.

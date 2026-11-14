@@ -1810,22 +1810,27 @@ static RPCHelpMan musigpartialsign()
     std::vector<std::vector<unsigned char>> pubnonces = ParseHexArray(request.params[3], "pubnonce");
     std::vector<unsigned char> msg = ParseHexV(request.params[4], "msg");
     if (msg.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg must be 32 bytes");
-    if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
-    if (HeldTxsActive() && !HeldTxsGetInfo().txids.empty()) {
-        if (request.params[5].isNull()) {
-            throw JSONRPCError(RPC_MISC_ERROR, "held-conflict: this node holds disconnected certified transactions; pass the block to sign");
-        }
-        CBlock block;
-        if (!DecodeHexBlk(block, request.params[5].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
-        const uint256 hash = block.GetHash();
-        if (std::vector<unsigned char>(hash.begin(), hash.end()) != msg) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "msg is not the hash of block");
-        }
-        ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    // The record's state and the check against it are read in one hold
+    // (HeldTxsFilling): a departure that began after an unlocked read could
+    // otherwise be signed over before the record holds it.
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    {
         LOCK(cs_main);
-        if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
-            HeldTxsNoteDecline();
-            throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
+        if (HeldTxsFilling()) throw JSONRPCError(RPC_MISC_ERROR, "held-filling: the anchor watcher is recording a disconnect; try again");
+        if (HeldTxsActive() && !HeldTxsGetInfo().txids.empty()) {
+            if (request.params[5].isNull()) {
+                throw JSONRPCError(RPC_MISC_ERROR, "held-conflict: this node holds disconnected certified transactions; pass the block to sign");
+            }
+            CBlock block;
+            if (!DecodeHexBlk(block, request.params[5].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+            const uint256 hash = block.GetHash();
+            if (std::vector<unsigned char>(hash.begin(), hash.end()) != msg) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "msg is not the hash of block");
+            }
+            if (auto why = HeldTxsBlockConflict(block, chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock))) {
+                HeldTxsNoteDecline();
+                throw JSONRPCError(RPC_MISC_ERROR, strprintf("held-conflict: %s", *why));
+            }
         }
     }
     std::string err;

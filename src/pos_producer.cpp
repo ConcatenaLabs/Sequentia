@@ -1583,6 +1583,9 @@ int64_t PosProducer::DriveRound()
         bool held_conflict = false;
         {
             LOCK(cs_main);
+            // Read again in this hold (HeldTxsFilling): a departure that began
+            // since the read above may not be in the record yet.
+            if (HeldTxsFilling()) return 150;
             CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
             if (tip2 && backed->hashPrevBlock == tip2->GetBlockHash()) {
                 BlockValidationState state;
