@@ -190,6 +190,7 @@ class AnyAssetFeePriceServerHostileTest(BitcoinTestFramework):
         assert_equal(self.rates(), list2)
 
         self.log.info("A reply's headers are capped as well as its body")
+
         def rss_kb():
             with open("/proc/%d/status" % node.process.pid, encoding="utf8") as f:
                 return int(next(line for line in f if line.startswith("VmRSS:")).split()[1])

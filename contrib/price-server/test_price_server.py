@@ -724,7 +724,7 @@ class APriceServerWritesToNoNode(unittest.TestCase):
         self.assertFalse(hasattr(ps, "NodeRPC"))
 
     def test_a_publishing_config_polls_and_publishes(self):
-        srv = ps.PriceServer(base_cfg(), dry_run=False)
+        ps.PriceServer(base_cfg(), dry_run=False)  # no node login needed
         rates, _srv = poll_server(base_cfg(), LIVE_PRICES)
         self.assertTrue(rates)
 
