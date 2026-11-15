@@ -370,8 +370,10 @@ Bitcoin **testnet4** endpoint (`src/init.cpp`, `InitParameterInteraction`), so
 a fresh node validates anchors with no configuration; set the `mainchainrpc*`
 options explicitly to use your own testnet4 node instead. The shared endpoint
 ([`contrib/sequentia/testnet-rpc-cache-proxy.py`](../../contrib/sequentia/testnet-rpc-cache-proxy.py))
-keeps, in memory only and for a day, the time each address last called it, and
-answers that only to the machine it runs on; it logs no requests.
+keeps, in memory only, for a day and for a bounded number of addresses, the
+time each address last called it, and answers that only to the machine it
+runs on, with when its record began and whether it was full; it logs no
+requests.
 
 **Reaching an HTTPS Bitcoin endpoint.** The mainchain RPC client speaks plain
 HTTP only and always sends a Basic-auth header. To anchor against an HTTPS
