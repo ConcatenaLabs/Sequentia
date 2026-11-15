@@ -83,6 +83,8 @@ int64_t GetLastPosFinalForkRejectionTime()
 namespace {
 
 Mutex g_anchor_mutex;
+//! The listener for parent tip moves (SetMainchainMoveListener).
+std::function<void(int)> g_mainchain_move_listener GUARDED_BY(g_anchor_mutex);
 //! Checkpoints observed on the parent chain, one entry per COMMITMENT: keyed by
 //! the Sequentia block and height it names and the parent block carrying it.
 //! Keeping only the earliest commitment per Sequentia block let anyone posting
@@ -777,6 +779,12 @@ void PrefetchAnchorVerdicts(const std::vector<std::pair<uint32_t, uint256>>& ref
               (unsigned)done, (unsigned)((done + BATCH - 1) / BATCH));
 }
 
+void SetMainchainMoveListener(std::function<void(int)> listener)
+{
+    LOCK(g_anchor_mutex);
+    g_mainchain_move_listener = std::move(listener);
+}
+
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
 {
     {
@@ -1330,9 +1338,14 @@ void AnchorWatchTask(ChainstateManager& chainman)
         // The RPC is issued with no lock held: this file never calls the parent
         // daemon while holding g_anchor_mutex (or cs_main).
         const int unchanged_height = MainchainUnchangedHeight(old_tip);
-        LOCK(g_anchor_mutex);
-        g_last_mainchain_tip = best;
-        DropAnchorCachesAbove(unchanged_height);
+        std::function<void(int)> listener;
+        {
+            LOCK(g_anchor_mutex);
+            g_last_mainchain_tip = best;
+            DropAnchorCachesAbove(unchanged_height);
+            listener = g_mainchain_move_listener;
+        }
+        if (listener) listener(unchanged_height);
     }
     if (tip_changed || answered_again) {
         // The daemon moved, or answers again: the next check of its sync must

@@ -2,7 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
-// SEQUENTIA: the signing record (possigned.dat).
+// SEQUENTIA: the signing record (possigned.dat) and the signing check.
 //
 // A committee member's knowledge of what it signed must survive any stop. The
 // block index reaches the disk only at a chainstate flush or at the periodic
@@ -11,22 +11,38 @@
 // sign a rival at a height it already signed, which is how one producer holding
 // a quorum certifies two blocks at one height.
 //
-// So every signature a member's keys make on a block (a gossip share, a
-// proposal, a self-certified block, a leader signature, a MuSig2 partial
-// signature) is first written here, as one entry, and the entry is synced to
-// the disk before the signature leaves the process: before the share is
+// So every path by which this node's keys sign a block goes through one gate
+// (PosSigningGate): the gossip share, the gossip proposal, the leader-only
+// producer, generateposblock, submitposblock, musigpartialsign and
+// recertifyposblock. The gate first runs the signing check (the share-lock,
+// below), then the signature is made, then it is written here as one entry and
+// synced to the disk before it leaves the process: before the share is
 // flooded, the proposal sent, the block submitted or the RPC answered. A write
 // that fails means nothing leaves, and the node shuts down: a member that
-// cannot record must not sign.
+// cannot record must not sign. The wallet's signblock does not sign
+// proof-of-stake blocks.
 //
-// At a restart the entries rebuild the share-lock (PosProducer): a member does
-// not sign a rival at a height it signed while that block's Bitcoin anchor
-// stands, and the escape stays the protocol's own (the certificate query and
-// the grace). Bitcoin anchoring is supreme: a signed block whose anchor Bitcoin
-// replaced never blocks a new block at its height.
+// The signing check is the share-lock, kept per height and per signed block,
+// for the record's entries loaded at the start and those made since alike.
+// Before this node signs block B at height H, every other block it signed at H
+// (a share, a certified or led block, or a MuSig2 partial signature whose
+// block it knows) is judged against Bitcoin:
+//  - its anchor is gone from Bitcoin's best chain: it binds nothing (Bitcoin
+//    anchoring is supreme), and any escape it had is void;
+//  - the parent chain's daemon gives no verdict: B is refused until it does;
+//  - its anchor stands: it binds until its escape, which is the protocol's
+//    own: the node asks its peers for that block's certificate and waits one
+//    round; a certificate seen holds the height, silence frees it. The escape
+//    counts only while the anchor stands unbroken: when Bitcoin replaces the
+//    anchor and later returns to it, the block binds again and the next rival
+//    waits for a new query and a new round.
+// The same block again is always free, and blocks signed on two Bitcoin
+// branches never refuse each other: that is following Bitcoin, not a fault.
+// All of this is local signing policy, never a validity rule.
 //
-// The file is append-only, one framed entry per signing event, and is
-// rewritten without the dropped entries once they are more than half of it.
+// The file names its chain (its first entry carries the genesis hash), is
+// append-only, one framed entry per signing event, and is rewritten without
+// the dropped entries once they are more than half of it.
 
 #ifndef BITCOIN_POS_SIGNING_RECORD_H
 #define BITCOIN_POS_SIGNING_RECORD_H
@@ -54,6 +70,8 @@ enum class PosSignKind : uint8_t {
     LEADER = 4,     //!< a leader's signature on a block whose committee signed elsewhere (submitposblock)
     PARTIAL = 5,    //!< a MuSig2 partial signature (musigpartialsign)
     RECERTIFY = 6,  //!< a new certificate for an existing block (recertifyposblock, test chains only)
+    UNREADABLE = 7, //!< stands for a last entry found whole but unreadable at a start (height: the floor of its hold)
+    CHAIN = 8,      //!< the record's first entry: block_hash is the chain's genesis hash
 };
 
 /** One signing event: what was signed, by which keys, and what the block spends. */
@@ -75,47 +93,147 @@ struct PosSigningEntry {
                   obj.time, obj.signers, obj.spends);
     }
 
-    //! Whether this entry holds its height like the share-lock: a share or a
-    //! block this node certified or led. A proposal does not (every member
-    //! proposes at every height), nor does a partial signature or a test
-    //! recertification.
+    //! Whether this entry holds its height like the share-lock: a share, a
+    //! block this node certified, led or recertified, or a MuSig2 partial
+    //! signature whose block it knows. A proposal does not (every member
+    //! proposes at every height; a proposal certifies only with others'
+    //! shares), nor does a partial signature over a bare hash, whose height
+    //! is unknown.
     bool Locks() const;
 };
 
 /** Build an entry for `block` at `height` signed by `signers`. */
 PosSigningEntry PosSigningEntryFor(PosSignKind kind, const CBlock& block, int height, std::vector<CPubKey> signers);
 
-/** Load possigned.dat from the data directory. Returns false, with `error`
- *  set, when the file exists and cannot be read or is corrupt before its last
- *  entry (a torn last entry is a write that never completed, and is dropped). */
-bool PosSigningRecordLoad(std::string& error);
+/** Load possigned.dat from the data directory for the chain whose genesis is
+ *  `genesis`. Returns false, with `error` set to what to do, when the file
+ *  cannot be read, belongs to another chain or names none, was written by a
+ *  newer format, or is damaged before its last entry. A last entry cut short
+ *  is a write that never completed, and is dropped. A last entry whole in
+ *  length but unreadable cannot be told apart from one that rotted after it
+ *  was synced: the node starts, keeps a copy of the file beside it, and holds
+ *  the next height it would sign at (see PosSigningDamagedHold). */
+bool PosSigningRecordLoad(const uint256& genesis, std::string& error);
 
 /** Append `entry` and sync it to the disk. Returns true only once it is
  *  durable; on failure (now or at any earlier write) returns false, and the
  *  node is shutting down (AbortNode, "Failed to write the signing record").
- *  The caller then releases nothing. Takes the record's own lock; call it with
- *  no producer lock held (cs_main may be held). */
+ *  The caller then releases nothing. Signing paths use PosSigningGate, which
+ *  calls this. Takes the record's own lock; call it with no producer lock held
+ *  (cs_main may be held). */
 bool PosSigningRecordAppend(const PosSigningEntry& entry);
 
 /** The error a signing RPC returns when the record cannot be written. */
 extern const char* const POS_SIGNING_RECORD_WRITE_ERROR;
 
-/** A share-lock rebuilt from the record at the start: the latest entry that
- *  locks its height, loaded from the disk (entries appended by this process
- *  are the in-memory share-lock's, PosProducer). */
-struct PosRestoredLock {
-    uint256 block_hash;
-    int height{0};
-    uint32_t anchor_height{0};
-    uint256 anchor_hash;
+/** What the parent chain says of a signed block's Bitcoin anchor. */
+enum class PosAnchorStanding {
+    STANDS,     //!< on Bitcoin's best chain
+    GONE,       //!< replaced: off Bitcoin's best chain (or unknown to a synced daemon)
+    UNDECIDED,  //!< no verdict: the daemon does not answer, or has not synced that far
 };
 
-/** The restored lock at `height`, if any. */
-std::optional<PosRestoredLock> PosSigningRecordRestoredLock(int height);
+/** How the signing check judges anchors, and how it reaches the network.
+ *  Set at the start (init) and cleared at shutdown. The judge answers nothing
+ *  (nullopt) while the node does not watch Bitcoin (-validateanchor=0); with
+ *  no answer on an anchored chain, entries made in this run stand, and entries
+ *  loaded from the disk bind nothing: such a node cannot tell a replaced
+ *  anchor from a standing one. */
+using PosAnchorJudge = std::function<std::optional<PosAnchorStanding>(uint32_t anchor_height, const uint256& anchor_hash)>;
+void PosSigningSetAnchorJudge(PosAnchorJudge judge);
+void PosSigningSetNetwork(std::function<void(const uint256& block_hash)> query_certificate, std::function<int()> peer_count);
 
-/** Forget the restored lock at `height` (its anchor was replaced, or the
- *  in-memory share-lock now holds the height). */
-void PosSigningRecordClearRestoredLock(int height);
+/** The parent chain moved (the anchor watcher): every anchor above
+ *  `unchanged_height` may have changed side (a negative value: any anchor),
+ *  so a block anchored there loses its escape. */
+void PosSigningParentMoved(int unchanged_height);
+
+/** A verified quorum certificate for `block_hash` at `height` reached this node. */
+void PosSigningNoteCertificate(const uint256& block_hash, int height);
+
+/** The answer of the signing check. */
+struct PosSignCheck {
+    bool ok{true};
+    uint256 bound;     //!< the block that holds the height, when refused for one
+    int height{-1};
+    std::string why;   //!< the refusal, in words an RPC can return
+};
+
+/** The gate every signing path passes: it serialises check, signature and
+ *  record across every path, so two callers cannot both pass the check for
+ *  rivals. Construct it before making any signature; sign only if Allowed();
+ *  then Record() before the signature leaves. For an entry whose block is not
+ *  known (a bare hash, height -1), the caller passes the active tip. */
+class PosSigningGate
+{
+public:
+    PosSigningGate(PosSigningEntry entry, int64_t now_ms, int tip_height = -1, const uint256& tip_hash = uint256());
+    ~PosSigningGate();
+    PosSigningGate(const PosSigningGate&) = delete;
+    PosSigningGate& operator=(const PosSigningGate&) = delete;
+    bool Allowed() const { return m_check.ok; }
+    const PosSignCheck& Check() const { return m_check; }
+    PosSigningEntry& Entry() { return m_entry; }
+    //! Append the entry (PosSigningRecordAppend); false: release nothing.
+    bool Record();
+
+private:
+    PosSigningEntry m_entry;
+    PosSignCheck m_check;
+    bool m_locked{false};
+};
+
+/** The signing check alone, with its side effects (a grace started, a query
+ *  sent), for a caller that wants to know before it does costly work. The gate
+ *  runs it again. */
+PosSignCheck PosSigningCheckNow(const PosSigningEntry& entry, int64_t now_ms, int tip_height = -1, const uint256& tip_hash = uint256());
+
+/** A block this node signed at `height`, other than `except`, that binds now
+ *  (anchor standing or undecided, not escaped). Starts its grace and its
+ *  certificate query when they have not started. For the producer's ancestry
+ *  arm. */
+struct PosBoundBlock {
+    uint256 hash;
+    int64_t grace_start_ms{0};
+    bool undecided{false};
+    bool certified{false};
+};
+std::optional<PosBoundBlock> PosSigningBoundAt(int height, const uint256& except, int64_t now_ms);
+
+/** Whether this node signed a block at `height` whose anchor has not been
+ *  replaced (escaped or not): it then never produces alone there. */
+bool PosSigningSignedAt(int height);
+
+/** A gossip collection restarted at `height`: the grace of every block that
+ *  binds there starts again now, so that every locked member's grace ends
+ *  together inside the re-seeded round. Returns the blocks to query again
+ *  (PosSigningSendQueries), since the caller holds its own lock. */
+std::vector<uint256> PosSigningRestartGrace(int height, int64_t now_ms);
+
+/** Ask the peers for these blocks' certificates (outside any producer lock). */
+void PosSigningSendQueries(const std::vector<uint256>& hashes);
+
+/** The round and window the escape and the damaged-entry hold are measured in
+ *  (-posroundms, -poswindowms, or the per-member formula). */
+int64_t PosSigningRoundMs();
+int64_t PosSigningWindowMs();
+
+/** A last entry found whole but unreadable at the start: it may name a block
+ *  whose signature left before the node stopped, and no query can name it. The
+ *  node signs nothing at the first height at or above `floor` it is asked to
+ *  sign at, until that height is decided by the others (a certificate for it
+ *  seen, or a signature asked at a greater height), or until one window and two
+ *  rounds have passed there with a peer connected and no certificate. */
+struct PosSigningDamagedHold {
+    bool active{false};
+    int floor{0};
+    int height{-1};          //!< the height held, -1 until the node is first asked to sign at or above floor
+    int64_t bound_start_ms{0}; //!< when the bound began (a peer connected at that height), 0 if not yet
+    int64_t bound_ms{0};
+    uint64_t bytes{0};       //!< the unreadable entry's size
+    std::string copy;        //!< the copy of the file kept beside the record
+};
+PosSigningDamagedHold PosSigningGetDamagedHold();
 
 /** The block index has just been written (cs_main held): drop every entry whose
  *  block it now carries on the active chain, every entry superseded at its
@@ -133,6 +251,22 @@ static constexpr uint32_t POS_SIGNING_RECORD_WINDOW = 144;
 
 /** For getsigningrecord and the tests: the entries now in the record. */
 std::vector<PosSigningEntry> PosSigningRecordEntries();
+
+/** For getsigningrecord: the genesis hash the record names. */
+uint256 PosSigningRecordChain();
+
+/** For getsigningrecord: each block the check holds, with its state at the
+ *  last judgement ("binds", "escaped", "anchor gone", "undecided", "certified",
+ *  or "not judged" before the first check). */
+struct PosSigningHeld {
+    uint256 hash;
+    int height{0};
+    uint32_t anchor_height{0};
+    uint256 anchor_hash;
+    bool from_disk{false};
+    std::string state;
+};
+std::vector<PosSigningHeld> PosSigningHeldBlocks();
 
 /** Statistics: entries, bytes on disk, and the cost of the last and the slowest append (microseconds). */
 struct PosSigningRecordStats {

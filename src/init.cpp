@@ -38,6 +38,7 @@
 #include <mainchainrpc.h>
 #include <mapport.h>
 #include <net.h>
+#include <netmessagemaker.h>
 #include <net_permissions.h>
 #include <net_processing.h>
 #include <netbase.h>
@@ -250,6 +251,11 @@ void Shutdown(NodeContext& node)
         node.pos_producer->Stop();
         node.pos_producer.reset();
     }
+    // The signing check's links to the network and the parent chain go before
+    // the connection manager does.
+    PosSigningSetNetwork(nullptr, nullptr);
+    PosSigningSetAnchorJudge(nullptr);
+    SetMainchainMoveListener(nullptr);
 
     // Because these depend on each-other, we make sure that neither can be
     // using the other before destroying them.
@@ -1767,7 +1773,39 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // round, and every signature appends to it.
     {
         std::string record_error;
-        if (!PosSigningRecordLoad(record_error)) return InitError(Untranslated(record_error));
+        if (!PosSigningRecordLoad(chainparams.GetConsensus().hashGenesisBlock, record_error)) {
+            return InitError(Untranslated(record_error));
+        }
+        // The signing check judges each signed block's Bitcoin anchor, on a
+        // node that watches Bitcoin (g_validate_anchor can be turned off later
+        // in the start, so it is read at each judgement).
+        PosSigningSetAnchorJudge([](uint32_t anchor_height, const uint256& anchor_hash) -> std::optional<PosAnchorStanding> {
+            if (!g_validate_anchor) return std::nullopt;
+            switch (CheckMainchainAnchor(anchor_height, anchor_hash)) {
+            case AnchorCheckResult::OK: return PosAnchorStanding::STANDS;
+            case AnchorCheckResult::STALE:
+            case AnchorCheckResult::HEIGHT_MISMATCH: return PosAnchorStanding::GONE;
+            case AnchorCheckResult::NOT_FOUND: {
+                // Unknown to a synced daemon: replaced. Unknown to one still
+                // syncing: no verdict yet.
+                const MainchainSyncSnapshot sync = GetMainchainSyncSnapshot();
+                return sync.reachable && !sync.initial_download ? PosAnchorStanding::GONE : PosAnchorStanding::UNDECIDED;
+            }
+            case AnchorCheckResult::NO_CONNECTION: return PosAnchorStanding::UNDECIDED;
+            }
+            return PosAnchorStanding::UNDECIDED;
+        });
+        SetMainchainMoveListener(PosSigningParentMoved);
+        // The certificate query lives with the check, so that every signing
+        // path reaches it, with or without the producer.
+        CConnman* const connman = node.connman.get();
+        PosSigningSetNetwork(
+            [connman](const uint256& hash) {
+                connman->ForEachNode([&](CNode* pnode) {
+                    connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::GETPOSCERT, hash));
+                });
+            },
+            [connman] { return (int)connman->GetNodeCount(ConnectionDirection::Both); });
     }
 
     // ********************************************************* Step 7: load block chain

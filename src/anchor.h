@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -139,6 +140,13 @@ struct MainchainSyncSnapshot {
     int blocks{-1};
 };
 MainchainSyncSnapshot GetMainchainSyncSnapshot();
+
+/** Called by the anchor watcher whenever it sees the parent chain's tip move,
+ *  with the height below which nothing changed (the old tip for a plain
+ *  extension; the fork point for a reorganization; -1 when it could not tell).
+ *  Set once at the start; the signing check (pos_signing_record.h) uses it to
+ *  void the escape of a block whose anchor may have changed side. */
+void SetMainchainMoveListener(std::function<void(int unchanged_height)> listener);
 
 /** The parent chain's height as its daemon reports it once synced, asked again
  *  at most every few seconds; -1 while it is unreachable or still syncing. For

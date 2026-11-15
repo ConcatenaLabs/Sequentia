@@ -66,7 +66,7 @@ namespace wallet {
 RPCHelpMan signblock()
 {
     return RPCHelpMan{"signblock",
-                "\nSigns a block proposal, checking that it would be accepted first. Errors if it cannot sign the block. Note that this call adds the witnessScript to your wallet for signing purposes! This function is intended for QA and testing.\n",
+                "\nSigns a block proposal, checking that it would be accepted first. Errors if it cannot sign the block. Note that this call adds the witnessScript to your wallet for signing purposes! This function is intended for QA and testing. It does not sign proof-of-stake blocks (see generateposblock, submitposblock and musigpartialsign).\n",
                 {
                     {"blockhex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hex-encoded block from getnewblockhex"},
                     {"witnessScript", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED_NAMED_ARG, "The hex-encoded witness script. Required for dynamic federation blocks. Argument is \"\" when the block is P2WPKH."},
@@ -88,6 +88,17 @@ RPCHelpMan signblock()
 {
     if (!g_signed_blocks) {
         throw JSONRPCError(RPC_MISC_ERROR, "Signed blocks are not active for this network.");
+    }
+    // A proof-of-stake block's signatures (its leader's and its committee's)
+    // are made only where the signing check and the signing record see them
+    // first (doc/sequentia/04-proof-of-stake.md, "The signing record"): the
+    // producer, generateposblock, submitposblock and musigpartialsign. A
+    // wallet signature here would bypass both, and a member restarted after it
+    // could sign a rival at the same height.
+    if (g_con_pos) {
+        throw JSONRPCError(RPC_MISC_ERROR, "signblock does not sign proof-of-stake blocks: use the producer (-posproduce), "
+                                           "generateposblock, or submitposblock and the MuSig2 RPCs, which check and record "
+                                           "every signature in the signing record first");
     }
 
     std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
