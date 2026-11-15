@@ -17,7 +17,6 @@ it ends, M proposes there (liveness).
 
 import os
 import re
-import time
 
 from feature_pos_signing_record_anchor import M, PosSigningRecordAnchorTest
 from test_framework.util import p2p_port, rpc_port
