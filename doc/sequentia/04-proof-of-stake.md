@@ -1146,14 +1146,31 @@ Three paths lead to a live network:
 
 ### The share-lock
 
-In the gossip committee a member signs one block per height for as long as that
-block can still be certified. Having share-signed block X at height H, a node
-does not sign a same-height rival until all three of these hold: the round in
-which it signed X has ended; it has asked its peers for a certificate on X
-(`getposcert`); and one further round has passed with no certificate arriving.
-A certificate is a self-verifying object of a few hundred bytes that travels on
-its own (`poscert`), so if X was certified anywhere, proof of it is one
-round-trip away, and the node adopts X instead of backing a rival.
+In the gossip committee a member does not sign a rival of a block it signed at
+the same height until that block has had its chance to be certified. Having
+share-signed block X at height H, a node does not sign a same-height rival Y
+until it has asked its peers for a certificate on X (`getposcert`) and one round
+has passed with no certificate arriving; a certificate that does arrive holds
+the height for X. A certificate is a self-verifying object of a few hundred
+bytes that travels on its own (`poscert`), so if X was certified anywhere, proof
+of it is one round-trip away, and the node adopts X instead of backing a rival.
+The escape is per block: having signed Y, the node again waits a query and a
+round before it signs a third block Z, so in a height that keeps failing a
+member signs about one new block per round.
+
+Bitcoin anchoring decides first. Before X binds anything, the node judges X's
+Bitcoin anchor, and judges it again whenever its view of Bitcoin moves:
+
+- the anchor stands: X binds as above;
+- Bitcoin replaced it: X binds nothing, at once, and any escape X had is void;
+- Bitcoin returns to it later: X binds again, so the next rival waits for a new
+  query and a new round. An escape counts only while the anchor stood unbroken;
+- the parent chain's daemon gives no verdict: the node signs nothing else at H
+  until it does (see "The signing record" for what ends that wait).
+
+A member may hold signatures for X and for Y at one height on two Bitcoin
+branches: that is following Bitcoin, never a fault. The same block again is
+always free.
 
 The quorum arithmetic is what gives the rule its force. For X to be certifiable
 at all, at least a quorum must have signed it. Those members are all locked,
@@ -1192,55 +1209,74 @@ late; it does not sign twice. What the lock cannot bind is a member that
 deliberately signs two blocks at one height, and there is no slashing to deter
 one. Under the public fixed-size committee any two quorums overlap in at least
 two members (§4), so certifying two blocks at one height takes at least two such
-members. The lock state lives in `PosProducer` (`m_lock_hash`,
-`src/pos_producer.{h,cpp}`); the certificate query is exercised in
-`feature_pos_cert_gossip.py`.
+members. The lock is kept per height and per signed block with the signing
+record (`src/pos_signing_record.{h,cpp}`), where every signing path reaches it;
+the certificate query is exercised in `feature_pos_cert_gossip.py`, and the
+anchor's replacement and return in `feature_pos_signing_record_return.py`.
 
 ### The signing record
 
-The share-lock is in memory, and the block index reaches the disk only at a
-chainstate flush or at the periodic write, every few minutes. Without more, a
-member killed, crashed or cut from power shortly after it signed would restart
-as if it never had, and could sign a rival at a height it had already signed. A
-producer that holds a quorum by itself would then certify two blocks at one
-height on its own.
+The block index reaches the disk only at a chainstate flush or at the periodic
+write, every few minutes. Without more, a member killed, crashed or cut from
+power shortly after it signed would restart as if it never had, and could sign
+a rival at a height it had already signed. A producer that holds a quorum by
+itself would then certify two blocks at one height on its own.
 
-So every signature a member's keys make on a block goes first into the signing
-record, `possigned.dat` in the data directory, and is synced to the disk before
-it leaves the process: before a share is flooded or assembled into a
-certificate, before a proposal is sent, before a block the node signed whole
-(`generateposblock`, the leader-only producer) or led (`submitposblock`) is
-submitted, and before `musigpartialsign` answers. One entry names the block,
-its height, parent and Bitcoin anchor, the keys that signed, and what the block
-spends (each input's outpoint and the spending transaction). `musigpartialsign`
-signs a bare hash, so it takes the block as its optional `block` argument to
-fill the entry; without it the entry holds what the node itself knows of that
-hash. If the write fails, nothing leaves: the share is dropped, the RPC fails
-with `cannot write the signing record`, and the node shuts down with "Failed to
-write the signing record", as it does when it cannot write its chainstate. A
-member that cannot record must not sign.
+So every path by which a node's keys sign a block passes one gate. The paths
+are: the gossip share, the gossip proposal, the leader-only producer,
+`generateposblock`, `submitposblock`, `musigpartialsign` and
+`recertifyposblock`. The wallet's `signblock` signs no proof-of-stake block. The
+gate first runs the share-lock's check (above), shared by every path; then the
+signature is made; then it goes into the signing record, `possigned.dat` in the
+data directory, and is synced to the disk before it leaves the process: before
+a share is flooded or assembled into a certificate, before a proposal is sent,
+before a block is submitted, and before an RPC answers. One entry names the
+block, its height, parent and Bitcoin anchor, the keys that signed, and what the
+block spends (each input's outpoint and the spending transaction). If the write
+fails, or the directory holding the file cannot be synced after it is created
+or rewritten, nothing leaves: the share is dropped, the RPC fails with `cannot
+write the signing record`, and the node shuts down with "Failed to write the
+signing record", as it does when it cannot write its chainstate. A member that
+cannot record must not sign.
 
-At a restart the entries rebuild the share-lock. For the next height, and for
-the tip's height when the tip is a rival of what the member signed there, the
-latest entry that locks the height (a share, or a block the node signed whole
-or led; a proposal does not, since every member proposes at every height) holds
-it exactly as the in-memory share-lock does, with the same escape: the
-certificate query and the grace in the gossip round, and no leader-only block of
-the node's own at that height. Bitcoin anchoring decides first. Before the
-entry holds anything, the node asks the parent chain's daemon about the signed
-block's anchor:
+A refusal by the check names the block that holds the height and starts the
+certificate query; the same call succeeds once a round has passed with no
+certificate. These hold a height: a share, a block the node signed whole, led
+or recertified, and a MuSig2 partial signature whose block the node knows. A
+proposal does not, since every member proposes at every height and a proposal
+certifies only with the shares of others. `musigpartialsign` signs a bare hash,
+so it takes the block as its optional `block` argument. A hash the node does not
+know cannot be placed at a height, so it is refused while any block the member
+signed above the active tip (or a rival of the tip) still binds, until it is
+given the block. A host that signed at a height whose anchor stands never
+produces alone there.
 
-- the anchor stands (it is on Bitcoin's best chain): the entry holds the height;
-- Bitcoin replaced it: the entry holds nothing, and the member signs a new
-  block at that height as soon as one is proposed;
-- the daemon has not answered yet, or is still syncing and does not know the
-  anchor: the member signs nothing at that height until it does, for as long
-  as that takes. It loses nothing by waiting, since it cannot verify any
-  proposal's anchor meanwhile either.
+At a restart the record restores the share-lock: every entry that holds a
+height binds again as the share-lock binds, each with a new query and a new
+round, since no escape survives a restart. The anchors are judged as above.
+While the parent chain's daemon gives no verdict on a signed block's anchor
+(it does not answer, or is still syncing and does not know the anchor), the
+member signs nothing else at that height, for as long as that takes. That wait
+ends in every case:
+
+- the daemon answers: the check asks it again at every attempt and never keeps
+  a missing answer, so the first verdict ends the wait (replaced: free at once;
+  standing: the query and the round);
+- the others decide the height: a certificate for it reaches the member, or the
+  chain moves past it, and the member then signs at the next height, where the
+  entry does not apply;
+- the operator: restores the daemon, or moves the record aside once the heights
+  it holds are certified and buried.
+
+The wait never outlasts the daemon's silence, and costs nothing while it lasts:
+a member whose daemon gives no verdict cannot verify any proposal's anchor
+either, so it could not sign at that height anyway. A committee whose members
+all restart in that state resumes as soon as their daemons answer.
 
 A node that does not watch Bitcoin (`-validateanchor=0` on an anchored chain)
-cannot judge an anchor, so there the in-memory share-lock is the only one. On a
-chain without anchors no anchor can be replaced, and the entries always hold.
+cannot judge an anchor: there a block signed in the running process binds as
+the share-lock always has, and an entry loaded at a restart binds nothing. On a
+chain without anchors no anchor can be replaced, and every entry binds.
 
 An entry is dropped once the block index on disk carries its block on the
 active chain (the index then keeps that knowledge), once a quorum-certified
@@ -1249,11 +1285,53 @@ than 144 Bitcoin blocks (a day) below the tip's (on a chain without anchors,
 144 blocks below the tip). The file is append-only and is rewritten without the
 dropped entries whenever they make up more than half of it, so it holds about
 what was signed since the last index write. An entry is about 150 bytes plus 68
-per input the block spends. A torn last entry, left by a write that never
-completed, is dropped at the start, since its signature never left; damage
-anywhere else stops the start, as starting without the record could sign a
-rival. `getsigningrecord` (hidden) lists the entries and what the appends cost.
-Tested in `feature_pos_signing_record.py`.
+per input the block spends.
+
+The file names its chain: its first entry carries the genesis hash, and a
+record of another chain, or one written by a newer format, refuses the start
+and says what to do. At the start:
+
+- a last entry cut short, left by a write that never completed, is dropped,
+  since its signature never left (a signature leaves only after its entry is
+  synced);
+- a last entry whole in length but unreadable cannot be told from one whose
+  size reached the disk before its contents (its signature never left) or from
+  a synced entry that rotted (it may have). The node starts, says so in its log
+  and in `getsigningrecord` (`unreadable`), keeps a copy of the file beside the
+  record (`possigned.dat.unreadable-<time>`) until the operator removes it, and
+  signs nothing at the first height it is asked to sign at from the highest
+  height in the record. That hold ends when a certificate at that height
+  reaches the node, when it is asked to sign at a greater height, or when one
+  window and two rounds have passed there with a peer connected; it survives a
+  restart until then. A known signature binds no longer than the query and a
+  round, so an unknown one binds little longer. If every member of a committee
+  loses power at once and each is left with such an entry, the height after
+  their last costs at most one window and two rounds (25.65 s at the testnet's
+  round lengths of 6.75 s and 9.45 s), once;
+- damage anywhere else stops the start, as starting without the record could
+  sign a rival.
+
+`getsigningrecord` (hidden) lists the entries, the blocks the check holds and
+their state, and what the appends cost. Tested in
+`feature_pos_signing_record*.py`.
+
+#### Restoring a member's data directory
+
+No local file can protect a member from an older copy of itself. A data
+directory restored from a backup carries the record as it was when the backup
+was taken: whatever the member signed after that is forgotten, and its keys
+could sign a rival of a block they already signed, so that two blocks certify
+at one height. Before starting a restored member with its staking keys:
+
+1. Read the network's tip height, T, from another node or the explorer.
+2. Start the restored node without producing (no `-posproducer`, and no RPC
+   signing), and let it sync.
+3. Start it as a member only once its finalized height (`finalized_height` in
+   `getposfinality`; §6) is above T + 1. Every height the old copy could have
+   signed at was T + 1 or below, so none can be signed twice.
+
+The same applies to moving a member to another machine from a copy, or to
+moving `possigned.dat` aside to start past a refusal.
 
 Operating a producer and the surrounding tooling are covered in
 [`05-operating-sequentia.md`](05-operating-sequentia.md); the security model and

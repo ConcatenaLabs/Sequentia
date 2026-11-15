@@ -497,6 +497,35 @@ triple. This manual flow is only needed under the `-posbls=0` fallback; with the
 default autonomous committee the nodes perform the equivalent share exchange and
 aggregation themselves over gossip.
 
+Pass the block to `musigpartialsign` (its optional `block` argument, the
+`block` field of `getposblocktemplate`): the node checks every signature against
+what its keys already signed at that height (the share-lock) and records it
+before answering, and a hash it does not know is refused while one of its
+signatures there may still be certified. A refusal names the block that holds
+the height; the same call succeeds once a round has passed with no certificate.
+
+### The signing record: never restore a member from an old copy
+
+Every signature a member's keys make is synced to `possigned.dat` in its data
+directory before it leaves the node, so that a restart never signs a rival of a
+block it already signed ([`04-proof-of-stake.md`](04-proof-of-stake.md), "The
+signing record"). Keep the file with the data directory. A data directory
+restored from a backup has forgotten whatever the member signed after the
+backup, and its keys could then sign a second block at a height where they
+already signed one. Before starting a restored member with its staking keys:
+
+1. Read the network's tip height, T, from another node or the explorer.
+2. Start the restored node without `-posproducer`, and sign nothing by RPC.
+3. Restart it as a member once `sequentia-cli getposfinality` shows a
+   `finalized_height` above T + 1.
+
+The same holds when a member moves to another machine from a copy, or when
+`possigned.dat` is moved aside to get past a start the node refused. The node
+refuses to start on a record of another chain or of a newer format, and on one
+damaged before its last entry; each refusal says what to do. A last entry it
+cannot read holds one height for a few seconds after the start and leaves a copy
+of the file, `possigned.dat.unreadable-<time>`, for you to remove.
+
 ## 8. Stake lifecycle
 
 Staking is **opt-in and explicit - holding SEQ does nothing on its own.** SEQ
