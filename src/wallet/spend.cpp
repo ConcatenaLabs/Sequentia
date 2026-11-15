@@ -1132,10 +1132,6 @@ static bool CreateTransactionInternal(
         // every asset in turn. Say what is actually missing.
         if (!ExchangeRateMap::GetInstance().HasAcceptedAsset()) {
             const FeeListSource source = GetFeeListSource();
-            if (source.connected && source.via_rpc) {
-                error = _("This node's price server, which writes to it over RPC, has written an empty fee whitelist, so nothing can be sent until it writes one that lists an asset. Receiving is not affected.");
-                return false;
-            }
             if (source.connected) {
                 // Waiting for the price server is not the operator's mistake,
                 // and telling them to write the list would end the connection.
@@ -2384,6 +2380,25 @@ static bool CreateTransactionInternal(
         reservedest[index]->ReturnDestination();
     }
 
+
+    // SEQUENTIA: the fee whitelist can change while the transaction is built
+    // (a connected node reads its price server's list every minute). Checked
+    // again here, before anything is signed: a fee asset that stopped being
+    // accepted, or a fee its rate now values at nothing, is refused rather
+    // than signed into a transaction no node relays.
+    if (g_con_any_asset_fees) {
+        ExchangeRateMap& rates = ExchangeRateMap::GetInstance();
+        if (rates.ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue() <= 0) {
+            error = _("The fee asset stopped being accepted by this node while the transaction was being built (its fee whitelist changed). Nothing was signed; try again, or choose another fee asset.");
+            return false;
+        }
+        if (nFeeRet <= 0 || rates.ConvertAmountToValue(nFeeRet, coin_selection_params.m_fee_asset).GetValue() <= 0) {
+            if (coin_selection_params.m_effective_feerate.GetFeePerK() > 0) {
+                error = _("The fee came to nothing at the fee asset's current rate (its fee whitelist changed while the transaction was being built). Nothing was signed; try again.");
+                return false;
+            }
+        }
+    }
 
     if (sign) {
         if (!wallet.SignTransaction(txNew)) {

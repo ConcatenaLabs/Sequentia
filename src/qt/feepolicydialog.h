@@ -31,9 +31,9 @@ QT_END_NAMESPACE
 /**
  * Operator panel for Sequentia's open fee market. The node accepts a set of assets for fee
  * payment at given rates — that is ONE whitelist (the "fee acceptance policy", via
- * getfeeacceptancepolicy). Entries are set manually by the operator (setfeeexchangerates) or
- * maintained by a price-server sidecar if one is running. No asset is privileged — the policy
- * asset is just one entry.
+ * getfeeacceptancepolicy). It is static when written by hand here (setfeeexchangerates), and
+ * dynamic when the node is connected to a price server and reads its published list
+ * (setfeepriceserver). No asset is privileged — the policy asset is just one entry.
  */
 class FeePolicyDialog : public QDialog
 {
@@ -68,6 +68,7 @@ private:
     QPushButton* m_ps_connect{nullptr};
     QPushButton* m_ps_disconnect{nullptr};
     UniValue m_ps_state;                 // getfeepriceserver, as of the last refresh
+    bool m_ps_busy{false};               // a setfeepriceserver call is in flight
     bool m_remove_selection_connected{false};
 
 
@@ -81,6 +82,8 @@ private:
     bool confirmHandWrite();
     //! The price-server section's text, from m_ps_state.
     void showPriceServerState();
+    //! While a price-server call runs off the GUI thread, nothing else here writes.
+    void setPriceServerBusy(bool busy);
 };
 
 /** SEQUENTIA: running your own price server, from the desktop wallet. To the
@@ -88,13 +91,19 @@ private:
  *  price server publishes its list on this machine and the node connects to
  *  that address, so the price server needs no RPC login to the node. */
 namespace LocalPriceServer {
-//! The port the bundled price server's web UI and API listen on, on loopback.
-static constexpr int UI_PORT = 8089;
+//! The port the bundled price server's web UI and published list listen on,
+//! on loopback, unless -ownpriceserverport says otherwise.
+static constexpr int DEFAULT_PORT = 8089;
+int Port();
 //! The address of its published list.
 QString ListUrl();
-//! Make a config publish its list for this node and write to no node over RPC:
-//! no node RPC login, the JSON API on (the UI binds to loopback only).
+//! Make a config publish its list and write to no node: drop the node RPC
+//! settings an older copy of the wallet wrote, which the price server refuses.
 bool PrepareConfig(const QString& path);
+//! setfeepriceserver url ("" disconnects) off the GUI thread; done(ok, error)
+//! is called on the GUI thread, unless context is gone by then.
+void SetPriceServerAsync(interfaces::Node& node, QObject* context, const std::string& url,
+                         std::function<void(bool, const QString&)> done);
 //! Connect node to it once its first list is published, retrying for up to
 //! 90 s while it starts; done(ok, message) is called once.
 void ConnectWhenPublished(interfaces::Node& node, QObject* context, std::function<void(bool, const QString&)> done);

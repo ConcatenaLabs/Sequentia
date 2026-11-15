@@ -17,11 +17,14 @@ BOOST_FIXTURE_TEST_SUITE(feepriceserver_tests, BasicTestingSetup)
 static const std::string ID_A(64, 'a');
 static const std::string ID_B = std::string(63, '0') + "b";
 
+//! The node's clock in these tests: after every "updated" used below.
+static constexpr int64_t NOW = 1794735700;
+
 static bool Parse(const std::string& body, std::string& error)
 {
     std::map<CAsset, CAmount> rates;
     int64_t published{0};
-    return ParsePriceServerFeeList(body, rates, published, error);
+    return ParsePriceServerFeeList(body, NOW, rates, published, error);
 }
 
 //! A price server's published list is taken as it stands.
@@ -32,7 +35,7 @@ BOOST_AUTO_TEST_CASE(a_published_list_is_taken)
     std::string error;
     const std::string body = "{\"updated\": 1794735668.66, \"quote_currency\": \"USD\", \"rates\": {\"" + ID_A +
                              "\": 17527902, \"" + ID_B + "\": 100000000}, \"decisions\": []}";
-    BOOST_REQUIRE_MESSAGE(ParsePriceServerFeeList(body, rates, published, error), error);
+    BOOST_REQUIRE_MESSAGE(ParsePriceServerFeeList(body, NOW, rates, published, error), error);
     BOOST_CHECK_EQUAL(rates.size(), 2U);
     BOOST_CHECK_EQUAL(rates[CAsset(uint256S(ID_A))], 17527902);
     BOOST_CHECK_EQUAL(rates[CAsset(uint256S(ID_B))], 100000000);
@@ -77,6 +80,21 @@ BOOST_AUTO_TEST_CASE(a_list_is_refused_whole)
     many += "}}";
     BOOST_CHECK(!Parse(many, error));
     BOOST_CHECK(error.find("1001 entries") != std::string::npos);
+}
+
+//! A list's time is bounded by the node's clock, so one answer dated in the
+//! future cannot make every honest list after it read as older; and a time
+//! outside any range is refused before it is converted.
+BOOST_AUTO_TEST_CASE(a_list_dated_ahead_is_refused)
+{
+    std::string error;
+    const std::string rates = ", \"rates\": {\"" + ID_A + "\": 5}}";
+    BOOST_CHECK(Parse(strprintf("{\"updated\": %d", NOW + MAX_FEE_LIST_FUTURE_SECS) + rates, error));
+    BOOST_CHECK(!Parse(strprintf("{\"updated\": %d", NOW + MAX_FEE_LIST_FUTURE_SECS + 1) + rates, error));
+    BOOST_CHECK_MESSAGE(error.find("ahead of this node's clock") != std::string::npos, error);
+    for (const std::string& when : {"9e18", "1e300", "-1", "-1e300"}) {
+        BOOST_CHECK_MESSAGE(!Parse("{\"updated\": " + when + rates, error), when);
+    }
 }
 
 //! The testnet's default is the network's price server; the mainnet has none;

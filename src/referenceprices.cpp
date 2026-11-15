@@ -8,6 +8,7 @@
 
 #include <logging.h>
 #include <scheduler.h>
+#include <shutdown.h>
 #include <sync.h>
 #include <tinyformat.h>
 #include <univalue.h>
@@ -37,7 +38,8 @@ int RefreshReferencePrices()
     if (url.empty()) return 0;
 
     std::string body, err;
-    if (!PlainHttpGet(url, gArgs.GetIntArg("-referencepricestimeout", 15), MAX_REFERENCE_PRICES_BODY, body, err)) {
+    if (!PlainHttpGet(url, gArgs.GetIntArg("-referencepricestimeout", 15), MAX_REFERENCE_PRICES_BODY, body, err,
+                     [] { return ShutdownRequested(); })) {
         LogPrintf("ReferencePrices: fetch from %s failed: %s\n", url, err);
         return -1;
     }
@@ -73,19 +75,33 @@ int RefreshReferencePrices()
     return n;
 }
 
+namespace {
+//! A feed's answer can never stop the node: a task that throws ends the
+//! feeds thread's loop and the node with it (CScheduler rethrows), and a
+//! number out of range makes UniValue's getters throw.
+void GuardedRefreshReferencePrices()
+{
+    try {
+        RefreshReferencePrices();
+    } catch (const std::exception& e) {
+        LogPrintf("ReferencePrices: the answer could not be read: %s\n", e.what());
+    }
+}
+} // namespace
+
 void StartReferencePrices(CScheduler& scheduler)
 {
     const std::string url = gArgs.GetArg("-referencepricesurl", "");
     if (url.empty()) return;
     LogPrintf("ReferencePrices: enabled, source %s\n", url);
 
-    // Initial fetch a few seconds after startup, on the scheduler thread, so it
-    // never blocks init even if the feed is slow or unreachable.
-    scheduler.scheduleFromNow([] { RefreshReferencePrices(); }, std::chrono::seconds{3});
+    // Initial fetch a few seconds after startup, on the feeds' own thread (see
+    // init.cpp), so neither init nor block connection ever waits on the feed.
+    scheduler.scheduleFromNow([] { GuardedRefreshReferencePrices(); }, std::chrono::seconds{3});
 
     const int poll = gArgs.GetIntArg("-referencepricespoll", 120);
     if (poll > 0) {
-        scheduler.scheduleEvery([] { RefreshReferencePrices(); }, std::chrono::seconds{poll});
+        scheduler.scheduleEvery([] { GuardedRefreshReferencePrices(); }, std::chrono::seconds{poll});
     }
 }
 

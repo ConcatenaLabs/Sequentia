@@ -402,9 +402,11 @@ sequentia-cli.exe getfeeexchangerates
 ```
 
 A rate of `100000000` means "1 unit of this asset = 1 reference unit (RFU)".
-SEQ is not the reference: it is listed at `100000000` in the bootstrap
-whitelist like any other asset. A rate of `0` means "refuse this asset for
-fees." Then a fee-in-asset tx
+SEQ is not the reference, and no asset is listed by default: a testnet node
+reads the network's price server's list. Writing the list by hand, as above,
+makes it static and stops that (`setfeepriceserver
+"http://sequentiatestnet.com/feewhitelist"` connects it again). A rate of `0`
+means "refuse this asset for fees." Then a fee-in-asset tx
 you build will be mineable by any producer that also prices it (ask the operator
 to price your test asset across the committee if you want it mined quickly):
 

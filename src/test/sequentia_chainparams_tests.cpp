@@ -353,6 +353,11 @@ BOOST_AUTO_TEST_CASE(fee_whitelist_is_seeded_on_no_public_chain)
         ArgsManager args;
         const auto params = CreateChainParams(args, chain);
         BOOST_CHECK_MESSAGE(!params->SeedFeeWhitelist(), chain);
+        // The pre-listing exists only on a custom chain, by that chain's own
+        // setting: no argument reaches it on a real chain.
+        ArgsManager asking;
+        asking.ForceSetArg("-con_seed_fee_whitelist", "1");
+        BOOST_CHECK_MESSAGE(!CreateChainParams(asking, chain)->SeedFeeWhitelist(), chain);
     }
     {
         ArgsManager args;

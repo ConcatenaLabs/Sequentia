@@ -303,8 +303,8 @@ networking fault rather than a configuration one.
 
 - Any change to `src/policy/`, `src/node/miner.cpp`, `src/exchangerates.cpp`,
   `src/feeassets.cpp`, or the wallet's fee selection.
-- Any change to what `setfeeexchangerates` accepts or how the price server pushes
-  it.
+- Any change to what `setfeeexchangerates` accepts, or to how a node reads its
+  price server's list.
 - Before a release, together with `feature_any_asset_fee_congestion.py`, which
   covers the ordering rules underneath these scenarios.
 

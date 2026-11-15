@@ -127,6 +127,33 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
     }
     wallet.CommitTransaction(tx, std::move(map_value), {} /* orderForm */, blind_details.get());
+    // SEQUENTIA: the fee whitelist can change between building a transaction
+    // and offering it (a connected node reads its price server's list every
+    // minute), so this node may refuse what it just signed for its fee. Such a
+    // transaction was never relayed and never will be at that fee: it is
+    // abandoned, so its coins are spendable at once, and the caller is told
+    // rather than handed a txid that goes nowhere.
+    if (g_con_any_asset_fees && wallet.GetBroadcastTransactions()) {
+        bool in_mempool{false};
+        {
+            LOCK(wallet.cs_wallet);
+            const CWalletTx* wtx = wallet.GetWalletTx(tx->GetHash());
+            in_mempool = wtx && wtx->InMempool();
+        }
+        if (!in_mempool) {
+            const std::optional<interfaces::MempoolRefusal> refusal = wallet.chain().checkMempoolAccept(tx);
+            if (refusal && (refusal->reason == "min relay fee not met" || refusal->reason == "insufficient fee")) {
+                {
+                    LOCK(wallet.cs_wallet);
+                    wallet.AbandonTransaction(tx->GetHash());
+                }
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                    "This node refused the transaction for its fee (%s), so it was not sent and has been abandoned; "
+                    "its coins are spendable again. The fee asset's rate may have changed while it was built: try again.",
+                    refusal->reason));
+            }
+        }
+    }
     if (verbose) {
         UniValue entry(UniValue::VOBJ);
         entry.pushKV("txid", tx->GetHash().GetHex());

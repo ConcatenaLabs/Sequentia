@@ -18,7 +18,6 @@ What must hold for such a node:
     back empty, a configured one comes back configured.
 """
 
-import json
 import os
 import time
 
@@ -73,8 +72,8 @@ class AnyAssetFeeUnseededTest(BitcoinTestFramework):
         assert_equal(seeded.getfeeexchangerates(), {policy: 100000000})
         assert_equal(unseeded.getfeeexchangerates(), {})
         assert_equal(unseeded.getfeeacceptancepolicy(), {})
-        with open(self.whitelist_file(unseeded), encoding="utf8") as f:
-            assert_equal(json.load(f), {})
+        # Startup writes no list: an unconfigured node's data directory holds none.
+        assert not os.path.exists(self.whitelist_file(unseeded))
 
         self.log.info("It says so at startup, on stderr and in the log")
         self.stop_node(1, expected_stderr=STARTUP_NOTICE)

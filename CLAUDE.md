@@ -179,14 +179,15 @@ it is one asset among equals — fees are payable in any accepted asset. A silen
 fallback to the policy asset is a privilege, and privileges are bugs.
 So no asset is listed before a node's fee whitelist is written
 (`m_seed_fee_whitelist = false` on both public chains). A whitelist is static
-when written by hand and dynamic when a price server updates it, and nothing
-goes from a price feed API to the whitelist without a price server. The testnet
-(`test`) runs no price server of its own: it is connected to the network's
-(`-feepriceserver`, `src/feepriceserver.cpp`), so its whitelist is populated as
-it starts. The mainnet (`sequentia`) has no default price server and starts
+when written by hand and dynamic when the node is connected to a price server,
+its operator's own or another operator's, and reads the list that server
+publishes; a price server never writes to a node, and nothing goes from a price
+feed API to the whitelist without a price server. The testnet (`test`) runs no
+price server of its own: it is connected to the network's (`-feepriceserver`,
+`src/feepriceserver.cpp`), so its whitelist is populated as it starts. The mainnet (`sequentia`) has no default price server and starts
 empty and static: it accepts nothing, and its wallet refuses to send, until the
-operator writes the list or connects to a price server. Custom chains start with
-SEQ listed at 1:1 instead; a regtest node reproducing the mainnet needs
+operator writes the list or connects to a price server. Custom chains, and only
+they, start with SEQ listed at 1:1 instead, by their own setting; a regtest node reproducing the mainnet needs
 `-con_seed_fee_whitelist=0`, and one reproducing the testnet adds
 `-con_default_fee_price_server=<address>`.
 

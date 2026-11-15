@@ -185,9 +185,9 @@ included. There is no exception and no implicit entry: the table is the whole
 truth.
 
 The whitelist is **static** when you write it by hand, and **dynamic** when the
-node is connected to a price server, another operator's or your own: by address,
-the node asking for the list the price server publishes, or by RPC, the price
-server writing to the node. There is no third state.
+node is connected to a price server, another operator's or your own, and reads
+the list that server publishes. There is no third state. A price server never
+writes to a node.
 
 **On the testnet the node is connected to the network's price server.** It
 asks for that server's list as it starts, so its whitelist is populated before
@@ -207,7 +207,8 @@ directory before starting), connect to a price server, or run your own; the
 desktop wallet offers all three on first run.
 
 Custom chains start with the policy asset listed at 1:1, so that a regtest node
-needs no setup. `-con_seed_fee_whitelist=0` makes a custom chain start empty as
+needs no setup; that pre-listing exists only on a custom chain, by its own
+setting, and nothing reaches it on the testnet or the mainnet. `-con_seed_fee_whitelist=0` makes a custom chain start empty as
 the public chains do, and `-con_default_fee_price_server=<address>` gives it a
 default price server as the testnet has.
 
@@ -217,52 +218,60 @@ actually uses when valuing mempool transactions and building blocks.
 ### Connecting to a price server
 
 ```
-sequentia-cli getfeepriceserver                                   # connected? to which? last written? last error?
-sequentia-cli setfeepriceserver "http://host:8090/api/whitelist"  # connect (another operator's, or your own)
-sequentia-cli setfeepriceserver ""                                # disconnect: keep the list in force, static
+sequentia-cli getfeepriceserver                                    # connected? to which? decided by what? last error?
+sequentia-cli setfeepriceserver "http://host:8089/feewhitelist"    # connect (another operator's, or your own)
+sequentia-cli setfeepriceserver ""                                 # disconnect: keep the list in force, static
 ```
 
 The address is where a price server publishes its whitelist: its
-`/api/whitelist` (with its public JSON API switched on), or the file it writes
-with `--publish-file` behind a web server. The network's price server for the
-testnet is `http://sequentiatestnet.com/feewhitelist`. The node connects only if
-the answer is a price server's published list, so the address of a price feed
-API, or of the registry, is refused and nothing is written. In a configuration
-file, `feepriceserver=<address>` connects at every start and `nofeepriceserver=1`
-keeps the whitelist static.
+`/feewhitelist`, or the file it writes with `--publish-file` behind a web
+server. The network's price server for the testnet is
+`http://sequentiatestnet.com/feewhitelist`. The node connects only if the answer
+is a price server's published list, so the address of a price feed API, or of
+the registry, is refused and nothing is written.
 
-While connected, that price server is the whitelist's only writer. Any write
-over RPC ends a connection by address for good; the node records it in
-`settings.json`, so a restart keeps it ended. A write by hand, with
-`setfeeexchangerates` or from an edit in the desktop wallet, makes the whitelist
-static, an emptied one included. A price server's write, with
-`setfeeexchangerates` and `persist=false`, connects the node to that price
-server by RPC instead, and the whitelist stays dynamic; that flag is the only
-thing that tells the two apart. To connect by address again, use
-`setfeepriceserver` or Connect in the desktop wallet. An address given on the
-command line is connected at every start whatever `settings.json` says.
+While connected, that price server is the whitelist's only writer. A write by
+hand, with `setfeeexchangerates` or from an edit in the desktop wallet, ends the
+connection and makes the whitelist static, an emptied one included. To connect
+again, use `setfeepriceserver` or Connect in the desktop wallet.
+
+At every start the node decides again, and `getfeepriceserver` says where the
+choice in force came from (`decided_by`):
+
+1. `-feepriceserver=<address>` or `-nofeepriceserver` on the command line;
+2. otherwise your last choice made on the running node (`setfeepriceserver`, a
+   hand write, the desktop wallet), which the node records in `settings.json`,
+   unless you have changed `feepriceserver` in the configuration file since,
+   which makes that the newer choice;
+3. otherwise `feepriceserver=<address>` or `nofeepriceserver=1` in the
+   configuration file;
+4. otherwise the network's price server on the testnet, unless you wrote a list
+   by hand; nothing on the mainnet.
 
 If the price server cannot be reached, the node keeps the list it last took, for
 as long as that lasts, and shows its age and the error. A list it refuses (empty,
-malformed, an invalid entry, older than the one in force, too large) is reported
-the same way and changes nothing. The last list is cached in
-`feepriceserver.json`, so a restart has it at once. The request is plain HTTP and
-not authenticated; connect only to a price server over a path you trust.
+malformed, an invalid entry, dated ahead of the node's clock, older than the one
+in force, too large) is reported the same way and changes nothing. A slow price
+server never slows the node: each request ends after `-feepriceservertimeout`
+seconds in all and runs off the threads that connect blocks, and startup waits
+at most five seconds for it. The last list is cached in `feepriceserver.json`, so
+a restart has it at once. The request is plain HTTP and not authenticated;
+connect only to a price server over a path you trust.
 
-**A testnet data directory from an earlier release** ends where its operator
-would expect:
+**A testnet data directory from another release**, newer or older, ends where
+its operator would expect, since nothing at startup writes `exchangerates.json`:
 
 - `exchangerates.json` holding only the policy asset at 1:1, the seed the
-  testnet once started every node with, is moved aside to
-  `exchangerates.json.old-seed`, and the node connects to the network's price
-  server (checked once, at the first start, and recorded in `settings.json`);
+  testnet once started every node with and older binaries save on their own, or
+  nothing at all, is not a list anyone chose: it is left in place and not
+  loaded, and the node connects to the network's price server. A node that wrote
+  exactly that list by hand records doing so, and keeps it;
 - any other `exchangerates.json`, or one named with
   `-initialexchangeratesjsonfile`, is a static whitelist you wrote: it is kept,
   and the node does not connect until you tell it to;
-- a node your own price server writes to over RPC connects to the network's
-  price server at startup, and your price server's first write connects it to
-  yours instead, by RPC, for good. Put `nofeepriceserver=1` in its configuration
-  to skip that, or connect it to your price server by address.
+- a price server refuses to start while its configuration names a node to write
+  to (`node_rpc`, `node_rpcs`, which older configurations carry): remove those,
+  and connect each node to it by address.
 
 ### Running your own price server
 
@@ -278,41 +287,32 @@ RPC login. By hand:
 
 ```
 cp contrib/price-server/config.example.json config.json
-# edit: node RPC creds, the asset map, and thresholds
-python3 contrib/price-server/price_server.py --config config.json            # poll loop
-python3 contrib/price-server/price_server.py --config config.json --once     # single poll, print, exit
-python3 contrib/price-server/price_server.py --config config.json --dry-run  # decisions only
-python3 contrib/price-server/price_server.py --config config.json --publish-file /srv/feewhitelist.json  # publish as a file for a web server
-python3 contrib/price-server/price_server.py --config config.json --ui-port 8090  # publish at /api/whitelist
-sequentia-cli setfeepriceserver "http://127.0.0.1:8090/api/whitelist"           # connect the node by address
+# edit: the market source and the admission thresholds
+python3 contrib/price-server/price_server.py --config config.json --ui-port 8089  # poll loop; publishes at /feewhitelist
+python3 contrib/price-server/price_server.py --config config.json --once         # single poll, print, exit
+python3 contrib/price-server/price_server.py --config config.json --publish-file /srv/feewhitelist.json  # also as a file for a web server
+sequentia-cli setfeepriceserver "http://127.0.0.1:8089/feewhitelist"            # connect the node to it
 ```
 
-A price server needs no node RPC login for nodes connected to it by address;
-leave `node_rpc` out of its config. With no admin password set its API answers
-this machine; with one, switch its public JSON API on.
+A price server holds no node's login and writes to no node: every node that
+uses it connects to it, so one price server feeds any number of nodes. When it
+stops, each connected node keeps the last list it read until it publishes again.
+Its `/feewhitelist` is served whatever its public JSON API switch says, since
+publishing the list is what it is for; it holds the rates and when they were
+made, nothing of your configuration. On its first round after a start it
+publishes only once every asset can be judged: an admission rule that compares
+with the previous round (`max_change_factor`) has nothing to compare with yet,
+so that round seeds the comparison and publishes nothing, rather than a list
+missing those assets.
 
 A rate is `round(price_in_reference × 1e8 × 10^(8 − precision))`: the
 `10^(8 − d)` factor carries the asset's denomination (`asset-denomination.md`
 §6a), so for an 8-decimal asset it is `round(price × 1e8)`, and one trading at
 exactly one reference unit has rate `100000000`.
 
-A price server can also write to a node by RPC, as the network's price server
-does for the public nodes: give it the node's RPC login (`node_rpc`). It writes
-with `setfeeexchangerates` and `persist=false`, which updates the whitelist in
-memory but does **not** write
-`exchangerates.json` (a running price server re-pushes after a node restart;
-persisting would leave its last rates in force across a restart instead of the
-operator's static whitelist). Two consequences to know:
-
-- The node holds the last-set rates **indefinitely** - there is no built-in
-  staleness or expiry. Keeping rates fresh, and refusing assets when a feed
-  dies (by writing `0` or omitting them), is the price server's job. On clean
-  shutdown it **leaves the last published rates in place**: clearing them would
-  leave every node it writes to accepting no fee asset at all, which stops
-  relay. (`clear_whitelist_on_shutdown` opts back into clearing; it is off by
-  default for that reason.)
-- Writes replace the whole table: a manual `setfeeexchangerates` is overwritten
-  at the price server's next poll.
+The node holds the list it last read **indefinitely**: there is no built-in
+staleness or expiry. Keeping rates fresh, and dropping assets when a feed dies,
+is the price server's job.
 
 Manual kill-switch: `sequentia-cli setfeeexchangerates '{}'` (empties the
 whitelist by hand: it is static and empty, and any connection to a price server
@@ -867,7 +867,7 @@ Two complementary layers (see [`04-proof-of-stake.md`](04-proof-of-stake.md)):
 | [`contrib/sequentia/bootstrap-committee.py`](../../contrib/sequentia/bootstrap-committee.py) | Stand up a small threshold-sortition PoS committee for a single operator on a fresh chain (creates N stakers, registers them, produces a first full-committee block). | `python3 contrib/sequentia/bootstrap-committee.py --founder-wif <WIF> --members 2` |
 | [`contrib/sequentia/run-local-testnet.py`](../../contrib/sequentia/run-local-testnet.py) | Run a small local network for development. | `python3 contrib/sequentia/run-local-testnet.py` |
 | [`contrib/sequentia/swap-demo.py`](../../contrib/sequentia/swap-demo.py) | Self-contained cross-chain BTC<->asset atomic-swap demonstration: spins up two local chains, runs the HTLC swap and the timeout-refund path, then cleans up. | `python3 contrib/sequentia/swap-demo.py` |
-| [`contrib/price-server/`](../../contrib/price-server) | The dynamic-fee price server: polls market-data APIs and publishes qualifying assets' rates via `setfeeexchangerates` (`persist=false`). | `python3 contrib/price-server/price_server.py --config config.json` |
+| [`contrib/price-server/`](../../contrib/price-server) | The price server: polls a market-data API, applies its admission rules and publishes the resulting fee whitelist at `/feewhitelist` (and `--publish-file`) for the nodes connected to it. | `python3 contrib/price-server/price_server.py --config config.json` |
 
 ## 11. Monitoring quick reference
 

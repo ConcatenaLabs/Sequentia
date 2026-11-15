@@ -214,6 +214,7 @@ BASE_SCRIPTS = [
     'feature_any_asset_fee_no_default.py',
     'feature_any_asset_fee_old_seed.py',
     'feature_any_asset_fee_price_server.py',
+    'feature_any_asset_fee_price_server_hostile.py',
     'feature_any_asset_fee_rates.py',
     'feature_any_asset_fee_unseeded.py',
     "feature_any_asset_fee_rbf.py",

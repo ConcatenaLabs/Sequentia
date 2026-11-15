@@ -92,7 +92,7 @@ class AnyAssetFeeCongestionTest(BitcoinTestFramework):
         return txid, tx['fee'][asset]
 
     def set_rates(self):
-        self.node.setfeeexchangerates({'gasset': GASSET_RATE, self.asset: ASSET_RATE}, False)
+        self.node.setfeeexchangerates({'gasset': GASSET_RATE, self.asset: ASSET_RATE})
 
     def drain(self, limit=40):
         """Generate until the queue is empty. With a block this small that takes
@@ -134,10 +134,8 @@ class AnyAssetFeeCongestionTest(BitcoinTestFramework):
         self.restart_node(0, extra_args=self.extra_args[0] + self.small_block_args)
         self.node = self.nodes[0]
         assert_equal(self.node.getrawmempool(), [])
-        # The rates went with the restart, which is what persist=false means: a
-        # price server re-pushes every poll, so its rates deliberately do not
-        # outlive the node. Push them again rather than persisting, so that this
-        # test exercises the same path a price server uses.
+        # The rates are the hand-written list, saved and loaded again at the
+        # restart; written again here so the test does not depend on that.
         self.set_rates()
 
     # -------------------------------------------------------------------- tests
@@ -265,11 +263,11 @@ class AnyAssetFeeCongestionTest(BitcoinTestFramework):
                      2 * base['next_block_min_atoms_per_kvb'])
 
         # An asset this node refuses gets no conversion rather than a zero.
-        self.node.setfeeexchangerates({'gasset': GASSET_RATE}, False)
+        self.node.setfeeexchangerates({'gasset': GASSET_RATE})
         refused = self.node.getmempoolcongestion(self.asset)
         assert_equal(refused['accepted'], False)
         assert 'next_block_min_asset_atoms_per_kvb' not in refused
-        self.node.setfeeexchangerates({'gasset': GASSET_RATE, self.asset: ASSET_RATE}, False)
+        self.node.setfeeexchangerates({'gasset': GASSET_RATE, self.asset: ASSET_RATE})
 
         assert_raises_rpc_error(-5, "Unknown label and invalid asset hex: nope",
                                 self.node.getmempoolcongestion, 'nope')

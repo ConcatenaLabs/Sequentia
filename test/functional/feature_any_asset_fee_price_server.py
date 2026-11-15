@@ -23,16 +23,22 @@ What must hold:
     not a price server;
   * the server unreachable: the last list is kept, and so is its cache across a
     restart;
-  * two states: dynamic is connected to a price server, by address or by RPC (a
-    write with persist=false, how a price server writes); static is written by
-    hand. Any write over RPC ends a connection by address for good, across
-    restarts, and an emptied list stays empty; setfeepriceserver connects again,
-    or disconnects keeping the list;
-  * your own price server, the real one with no login to the node, is connected
-    by address like any other;
-  * upgrades: a data directory holding only the old seed connects; one whose
-    operator wrote a list keeps it, static; an operator's own price server
-    pushing to the node takes over at its first push;
+  * two states: dynamic is connected to a price server, static is written by
+    hand. A price server never writes to a node: setfeeexchangerates with
+    persist=false is refused and changes nothing. A hand write ends the
+    connection; setfeepriceserver connects again, or disconnects keeping the
+    list. Operator writes are serialised: of a connect and a hand write, the
+    later one is in force and recorded;
+  * who decides, at every start: the command line, then the choice recorded in
+    settings.json (unless the configuration file changed since), then the
+    configuration file, then the network's default, which yields to a list
+    written by hand; getfeepriceserver says which (decided_by);
+  * upgrades and downgrades: a file holding only the old seed, or nothing, is
+    not a choice: the default connects over it, and a static node does not load
+    it, unless this node recorded writing exactly that list; startup never
+    writes the file; a deleted settings.json is decided again by the file;
+  * your own price server, the real one, is connected by its /feewhitelist
+    like any other;
   * the display reference-price feed never writes the whitelist.
 """
 
@@ -47,6 +53,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
+    get_rpc_proxy,
 )
 
 WAITING = "is connected to the price server at"
@@ -57,7 +64,8 @@ NOT_A_PRICE_SERVER = "is not a price server"
 
 class StandIn:
     """A stand-in price server, price feed and registry on one port. Each path
-    answers what `routes` holds for it: (status, body)."""
+    answers what `routes` holds for it: (status, body), or (status, body,
+    seconds to wait first)."""
 
     def __init__(self):
         self.routes = {}
@@ -67,7 +75,10 @@ class StandIn:
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 outer.hits[self.path] = outer.hits.get(self.path, 0) + 1
-                status, body = outer.routes.get(self.path, (404, "{}"))
+                route = outer.routes.get(self.path, (404, "{}"))
+                status, body = route[0], route[1]
+                if len(route) > 2:
+                    time.sleep(route[2])
                 data = body.encode() if isinstance(body, str) else body
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -221,7 +232,7 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         many = {"%064x" % (i + 1): 100000000 for i in range(1001)}
         self.serve_and_expect_refusal(json.dumps({"updated": time.time(), "rates": many}), "more than the 1000 accepted")
         self.serve_and_expect_refusal(json.dumps({"updated": 1.0, "rates": {self.policy: 1}}), "is older")
-        self.serve_and_expect_refusal(" " * (1 << 20) + "{}", "larger than")
+        self.serve_and_expect_refusal(" " * (1 << 20) + "{}", "the reply is too large")
 
         self.log.info("A price feed API's answer, or the registry's, is never a whitelist")
         feed = {"SEQ": {"price": 0.17, "market_cap": 4.8e9, "volume_24h": 2.5e8},
@@ -256,38 +267,30 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         self.wait_until(lambda: self.standin.hits.get("/prices", 0) >= 2, timeout=20)
         assert_equal(self.rates(), list2)
 
-        self.log.info("One writer: a price server writing over RPC connects the node to it instead, still dynamic")
+        self.log.info("A price server never writes to a node: persist=false is refused and changes nothing")
         self.standin.publish("/feewhitelist", self.list1)
         self.wait_until(lambda: self.rates() == self.list1, timeout=20)
-        assert_equal(self.n1().getfeepriceserver()["connection"], "address")
         pushed = {self.policy: 70000000}
-        self.n1().setfeeexchangerates(pushed, False)  # persist=false: how a price server writes
+        assert_raises_rpc_error(-8, "persist=false is refused: a price server never writes to a node",
+                                self.n1().setfeeexchangerates, pushed, False)
         state = self.n1().getfeepriceserver()
         assert_equal(state["connected"], True)
-        assert_equal(state["whitelist"], "dynamic")
-        assert_equal(state["connection"], "rpc")
-        assert "url" not in state
-        assert state["list_written"] > 0
-        assert "disconnected_because" not in state  # connected, so nothing to say it is not
-        hits = self.standin.hits.get("/feewhitelist", 0)
-        time.sleep(3)
-        assert_equal(self.standin.hits.get("/feewhitelist", 0), hits)  # the address is no longer asked
-        assert_equal(self.rates(), pushed)
+        assert_equal(state["decided_by"], "default")
+        assert "connection" not in state
+        assert_equal(self.rates(), self.list1)
 
-        self.log.info("A hand write is static, and the connection by address stays ended across a restart")
+        self.log.info("A hand write is static, and stays so across a restart, decided by the recorded choice")
         mine = {self.policy: 80000000}
-        self.n1().setfeeexchangerates(mine)  # persist=true: by hand, kept in exchangerates.json
+        self.n1().setfeeexchangerates(mine)
         state = self.n1().getfeepriceserver()
         assert_equal(state["connected"], False)
         assert_equal(state["whitelist"], "static")
+        assert_equal(state["disconnected_because"], "the fee whitelist was written by hand")
         self.restart1()
-        assert_equal(self.n1().getfeepriceserver()["connected"], False)
+        state = self.n1().getfeepriceserver()
+        assert_equal(state["connected"], False)
+        assert_equal(state["decided_by"], "settings")
         assert_equal(self.rates(), mine)
-
-        self.log.info("A price server writing over RPC after a restart makes it dynamic again")
-        self.n1().setfeeexchangerates(pushed, False)
-        assert_equal(self.n1().getfeepriceserver()["connection"], "rpc")
-        self.n1().setfeeexchangerates(mine)
 
         self.log.info("setfeepriceserver connects it again; its list replaces the operator's")
         self.n1().setfeepriceserver(self.standin.url("/feewhitelist"))
@@ -335,16 +338,51 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         assert_equal(self.n1().getfeepriceserver()["connected"], False)
         assert_equal(self.rates(), {})
 
-        self.log.info("Upgrade: a data directory holding only the old seed connects, and the seed is moved aside")
+        self.log.info("-nofeepriceserver writes nothing at startup, so the default connects next time")
+        assert not os.path.exists(self.rates_file())
         self.stop1(empty=True)
-        self.reset_datadir_fee_state()
-        with open(self.rates_file(), "w", encoding="utf8") as f:
-            json.dump({self.policy: 100000000}, f)
-        with self.n1().assert_debug_log(["held only the old seeded fee list"]):
-            self.start_node(1)
+        self.start_node(1)
         assert_equal(self.n1().getfeepriceserver()["connected"], True)
         assert_equal(self.rates(), self.list1)
-        assert os.path.exists(self.rates_file() + ".old-seed")
+        assert not os.path.exists(self.rates_file())
+
+        self.log.info("Downgrade and upgrade: the old seed an older binary saves is not a choice")
+        self.stop1()
+        self.reset_datadir_fee_state()
+        seed = json.dumps({self.policy: 100000000})
+        with open(self.rates_file(), "w", encoding="utf8") as f:
+            f.write(seed)
+        self.start_node(1)
+        state = self.n1().getfeepriceserver()
+        assert_equal(state["connected"], True)
+        assert_equal(state["decided_by"], "default")
+        assert_equal(self.rates(), self.list1)
+        with open(self.rates_file(), encoding="utf8") as f:
+            assert_equal(f.read(), seed)  # left as it was: startup writes nothing
+
+        self.log.info("...and -nofeepriceserver does not load it: never a one-asset list nobody chose")
+        with self.n1().assert_debug_log(["which no one chose, so it is not loaded"]):
+            self.restart1(["-nofeepriceserver"])
+        assert_equal(self.rates(), {})
+        self.restart1(empty=True)
+
+        self.log.info("The same list written by hand is a choice, kept across a restart")
+        self.n1().setfeeexchangerates({self.policy: 100000000})
+        self.restart1()
+        state = self.n1().getfeepriceserver()
+        assert_equal(state["connected"], False)
+        assert_equal(self.rates(), {self.policy: 100000000})
+        self.restart1(["-nofeepriceserver"])
+        assert_equal(self.rates(), {self.policy: 100000000})
+
+        self.log.info("A deleted settings.json: decided again by what the file holds")
+        self.stop1()
+        os.remove(os.path.join(self.n1().datadir, self.chain, "settings.json"))
+        self.start_node(1)
+        state = self.n1().getfeepriceserver()
+        assert_equal(state["connected"], True)
+        assert_equal(state["decided_by"], "default")
+        assert_equal(self.rates(), self.list1)
 
         self.log.info("Upgrade: a list the operator wrote is kept, static")
         self.stop1()
@@ -355,18 +393,87 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         assert_equal(self.n1().getfeepriceserver()["connected"], False)
         assert_equal(self.rates(), {self.policy: 100000000, self.other: 5})
 
+        state = self.n1().getfeepriceserver()
+        assert_equal(state["decided_by"], "whitelist file")
+
         self.log.info("A URL the operator gives is connected even over a list the operator wrote")
         self.restart1(["-feepriceserver=%s" % self.standin.url("/feewhitelist")])
-        assert_equal(self.n1().getfeepriceserver()["connected"], True)
+        state = self.n1().getfeepriceserver()
+        assert_equal(state["connected"], True)
+        assert_equal(state["decided_by"], "command line")
         assert_equal(self.rates(), self.list1)
+
+        self.log.info("The configuration file against settings.json: the last explicit choice wins")
+        self.configuration_file_against_settings()
+
+        self.log.info("Operator writes are serialised: a hand write during a connect lands after it")
+        self.connect_races_a_hand_write()
 
         self.log.info("Your own price server: the real one, with no login to the node, connected by address")
         self.own_price_server()
 
+    def set_conf(self, line):
+        conf = os.path.join(self.n1().datadir, "elements.conf")
+        with open(conf, encoding="utf8") as f:
+            kept = [l for l in f.read().splitlines() if not l.startswith("feepriceserver=")]
+        if line:
+            kept.insert(0, line)  # before any [section], so it applies to every chain
+        with open(conf, "w", encoding="utf8") as f:
+            f.write("\n".join(kept) + "\n")
+
+    def configuration_file_against_settings(self):
+        self.stop1()
+        self.reset_datadir_fee_state()
+        self.standin.publish("/list2", {self.other: 400000000})
+        self.set_conf("feepriceserver=%s" % self.standin.url("/feewhitelist"))
+        self.start_node(1)
+        state = self.n1().getfeepriceserver()
+        assert_equal((state["connected"], state["decided_by"]), (True, "configuration file"))
+        # A hand write is the later choice: it holds at the next start, and the
+        # status says where it came from.
+        mine = {self.policy: 90000000}
+        self.n1().setfeeexchangerates(mine)
+        self.restart1()
+        state = self.n1().getfeepriceserver()
+        assert_equal((state["connected"], state["decided_by"]), (False, "settings"))
+        assert_equal(self.rates(), mine)
+        # Editing the configuration file afterwards is the later choice again.
+        self.stop1()
+        self.set_conf("feepriceserver=%s" % self.standin.url("/list2"))
+        self.start_node(1)
+        state = self.n1().getfeepriceserver()
+        assert_equal((state["connected"], state["decided_by"], state["url"]),
+                     (True, "configuration file", self.standin.url("/list2")))
+        assert_equal(self.rates(), {self.other: 400000000})
+        self.stop1()
+        self.set_conf(None)
+        self.start_node(1)
+
+    def connect_races_a_hand_write(self):
+        self.standin.routes["/slow"] = (200, json.dumps({"updated": time.time(), "rates": {self.other: 1}}), 3)
+        self.n1().setfeeexchangerates({self.policy: 1})
+        result = {}
+
+        def connect():
+            rpc = get_rpc_proxy(self.n1().url, 1, timeout=60)
+            result["connect"] = rpc.setfeepriceserver(self.standin.url("/slow"))
+        thread = threading.Thread(target=connect)
+        thread.start()
+        time.sleep(1)  # the connect is asking the slow server now
+        hand = {self.policy: 123456789}
+        self.n1().setfeeexchangerates(hand)
+        thread.join()
+        state = self.n1().getfeepriceserver()
+        assert_equal(state["connected"], False)
+        assert_equal(self.rates(), hand)
+        self.restart1()
+        assert_equal(self.n1().getfeepriceserver()["connected"], False)
+        assert_equal(self.rates(), hand)
+
     def own_price_server(self):
         """Run contrib/price-server/price_server.py against the stand-in's feed
         and registry, with no node RPC in its config, and connect the node to
-        its /api/whitelist, as the desktop wallet's "Run my own price server"
+        its /feewhitelist, as the desktop wallet's "Run my own price server"
         and the documented way do."""
         import subprocess
         gold = "33" * 32
@@ -384,13 +491,13 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
             json.dump({"poll_interval_secs": 2, "registry_url": self.standin.url("/registry"),
                        "source": {"url": self.standin.url("/feed"), "quote_currency": "USD", "format": "sequentia"},
                        "feed_aliases": {}, "default_thresholds": {"require": "all"}, "exceptions": {},
-                       "ui": {"public_api": True}}, f)
+                       "ui": {}}, f)
         script = os.path.join(self.config["environment"]["SRCDIR"], "contrib", "price-server", "price_server.py")
         log = open(os.path.join(self.options.tmpdir, "own-price-server.log"), "w", encoding="utf8")
         proc = subprocess.Popen(["python3", "-I", script, "--config", config, "--ui-port", str(port)],
                                 stdout=log, stderr=subprocess.STDOUT)
         try:
-            url = "http://127.0.0.1:%d/api/whitelist" % port
+            url = "http://127.0.0.1:%d/feewhitelist" % port
 
             def connects():
                 try:
@@ -402,7 +509,6 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
             state = self.n1().getfeepriceserver()
             assert_equal(state["connected"], True)
             assert_equal(state["whitelist"], "dynamic")
-            assert_equal(state["connection"], "address")
             assert_equal(state["url"], url)
             assert_equal(self.rates(), {self.policy: 50000000, gold: 300000000000})
         finally:
@@ -414,7 +520,7 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         """Forget every fee-list choice node1 has made, as a fresh data directory
         would: the operator's file, the cache and the recorded setting."""
         chain_dir = os.path.join(self.n1().datadir, self.chain)
-        for name in ("exchangerates.json", "exchangerates.json.old-seed", "feepriceserver.json"):
+        for name in ("exchangerates.json", "feepriceserver.json"):
             path = os.path.join(chain_dir, name)
             if os.path.exists(path):
                 os.remove(path)
@@ -422,8 +528,8 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         if os.path.exists(settings):
             with open(settings, encoding="utf8") as f:
                 data = json.load(f)
-            data.pop("feepriceserver", None)
-            data.pop("feelistseedchecked", None)
+            for key in ("feepriceserver", "feepriceserverconf", "feelisthand"):
+                data.pop(key, None)
             with open(settings, "w", encoding="utf8") as f:
                 json.dump(data, f)
 

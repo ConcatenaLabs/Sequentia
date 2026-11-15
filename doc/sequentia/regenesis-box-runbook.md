@@ -85,8 +85,8 @@ reissuance tokens. Verify mints hit the mempool.
   to edit. It prices the real-world assets and `tBTC` from Yahoo Finance, pins
   USDX and USDC at 1.00 and mocks tSEQ, and dates every ticker with `as_of`.
 - **Price server** (`contrib/sequentia/gen-price-config.py`): there is no asset
-  list to edit any more, the universe is DISCOVERED from the registry, so only
-  node_rpcs matter. Regenerate with
+  list to edit any more, the universe is DISCOVERED from the registry, and it
+  names no node: the nodes connect to the list it publishes. Regenerate with
   `gen-price-config.py --out /root/price-demo/config.json --force` (it refuses to
   overwrite without `--force`, because the config UI persists the admin password
   hash and the tuned thresholds to that same file: copy those back afterwards).

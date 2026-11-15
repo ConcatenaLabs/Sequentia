@@ -113,8 +113,9 @@ mainchainrpcport=8332
 # Prefer cookie auth; or set mainchainrpcuser / mainchainrpcpassword.
 mainchainrpccookiefile=/home/YOU/.bitcoin/.cookie
 
-# Note on fee-asset acceptance: the node keeps ONE fee-asset whitelist
-# (setfeeexchangerates / getfeeexchangerates), optionally kept fresh by the
-# price-server sidecar in contrib/price-server/. The node holds the last-set
-# rates indefinitely; the sidecar owns freshness and clears the whitelist on
-# clean shutdown. See doc/sequentia/02-open-fee-market.md.
+# Note on fee-asset acceptance: the node keeps ONE fee-asset whitelist. It is
+# static when written by hand (setfeeexchangerates, exchangerates.json) and
+# dynamic when the node is connected to a price server and reads its list:
+# feepriceserver=<address of its /feewhitelist> (the testnet connects to the
+# network's by default; nofeepriceserver=1 keeps it static). A price server never
+# writes to a node. See doc/sequentia/02-open-fee-market.md.

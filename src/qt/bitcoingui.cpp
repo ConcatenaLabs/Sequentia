@@ -363,10 +363,10 @@ void BitcoinGUI::createActions()
     feePolicyAction = new QAction(tr("&Fee acceptance…"), this);
     feePolicyAction->setStatusTip(tr("View and edit which assets this node accepts for fee payment"));
 
-    // Sequentia operator tool: launch the bundled price-server sidecar (which keeps the dynamic fee
-    // whitelist updated) and open its configuration page in a browser. Node-level; no wallet needed.
+    // Sequentia operator tool: run your own price server (the bundled one), connect this node to
+    // the list it publishes, and open its configuration page in a browser. Node-level; no wallet needed.
     priceServerAction = new QAction(tr("&Price server…"), this);
-    priceServerAction->setStatusTip(tr("Start the price-server sidecar and open its configuration page"));
+    priceServerAction->setStatusTip(tr("Run your own price server, connect this node to it and open its configuration page"));
     connect(priceServerAction, &QAction::triggered, this, &BitcoinGUI::launchPriceServer);
 
 #ifdef ENABLE_WALLET
@@ -1159,34 +1159,33 @@ UniValue BitcoinGUI::feePriceServerState()
     }
 }
 
-void BitcoinGUI::connectToPriceServer()
+void BitcoinGUI::connectToPriceServer(QString suggestion)
 {
-    const UniValue state = feePriceServerState();
-    QString suggestion = state["network_price_server"].isStr() ? QString::fromStdString(state["network_price_server"].get_str()) : QString();
-    for (;;) {
-        bool ok = false;
-        const QString url = QInputDialog::getText(this, tr("Connect to a price server"),
-            tr("The address of the price server's published whitelist, e.g. http://host:8090/api/whitelist. "
-               "A price feed's address is not a price server and is refused."),
-            QLineEdit::Normal, suggestion, &ok).trimmed();
-        if (!ok || url.isEmpty()) return;
-        UniValue params(UniValue::VARR);
-        params.push_back(url.toStdString());
-        try {
-            m_node.executeRpc("setfeepriceserver", params, std::string());
+    if (suggestion.isEmpty()) {
+        const UniValue state = feePriceServerState();
+        if (state["network_price_server"].isStr()) suggestion = QString::fromStdString(state["network_price_server"].get_str());
+    }
+    bool ok = false;
+    const QString url = QInputDialog::getText(this, tr("Connect to a price server"),
+        tr("The address of the price server's published whitelist, e.g. http://host:8089/feewhitelist. "
+           "A price feed's address is not a price server and is refused."),
+        QLineEdit::Normal, suggestion, &ok).trimmed();
+    if (!ok || url.isEmpty()) return;
+    if (statusBar()) statusBar()->showMessage(tr("Asking the price server at %1…").arg(url));
+    // Asked off the GUI thread (a slow price server must not freeze the window);
+    // the answer comes back here.
+    LocalPriceServer::SetPriceServerAsync(m_node, this, url.toStdString(), [this, url](bool connected, const QString& why) {
+        if (statusBar()) statusBar()->clearMessage();
+        if (connected) {
             QMessageBox::information(this, tr("Connected to a price server"),
                 tr("This node is connected to the price server at %1, and its whitelist is that server's.").arg(url));
             return;
-        } catch (const UniValue& e) {
-            const QString why = e.isObject() && e.exists("message") ? QString::fromStdString(e["message"].get_str()) : QString::fromStdString(e.write());
-            if (QMessageBox::warning(this, tr("Connect to a price server"), why,
-                                     QMessageBox::Retry | QMessageBox::Cancel) != QMessageBox::Retry) return;
-            suggestion = url;
-        } catch (const std::exception& e) {
-            QMessageBox::warning(this, tr("Connect to a price server"), QString::fromStdString(e.what()));
-            return;
         }
-    }
+        if (QMessageBox::warning(this, tr("Connect to a price server"), why,
+                                 QMessageBox::Retry | QMessageBox::Cancel) == QMessageBox::Retry) {
+            connectToPriceServer(url);
+        }
+    });
 }
 
 void BitcoinGUI::launchPriceServer()
@@ -1264,7 +1263,7 @@ void BitcoinGUI::launchPriceServer()
         return;
     }
 
-    const int uiPort = LocalPriceServer::UI_PORT;
+    const int uiPort = LocalPriceServer::Port();
     const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
 
     // Already running (from an earlier click)? Just reopen the page — never spawn a
@@ -1273,11 +1272,32 @@ void BitcoinGUI::launchPriceServer()
         QDesktopServices::openUrl(QUrl(url));
         return;
     }
+    // Something else holds the port, perhaps a price server started another
+    // way: the probe below would take it for ours. Say so, and offer the two
+    // ways on: connect to whatever serves there, or use another port.
+    {
+        QTcpSocket probe;
+        probe.connectToHost(QStringLiteral("127.0.0.1"), static_cast<quint16>(uiPort));
+        const bool taken = probe.waitForConnected(300);
+        probe.abort();
+        if (taken) {
+            QMessageBox box(QMessageBox::Warning, tr("Price server"),
+                tr("Port %1 on this machine is already in use, perhaps by a price server you already run, "
+                   "so your own cannot start there.\n\nIf a price server listens there, connect this node "
+                   "to its list at %2. Otherwise start the wallet with -ownpriceserverport set to a free port.")
+                    .arg(uiPort).arg(LocalPriceServer::ListUrl()),
+                QMessageBox::Cancel, this);
+            QPushButton* connect_to = box.addButton(tr("Connect to it"), QMessageBox::AcceptRole);
+            box.exec();
+            if (box.clickedButton() == connect_to) connectToPriceServer(LocalPriceServer::ListUrl());
+            return;
+        }
+    }
 
     // Launch as a TRACKED child bound to LOOPBACK ONLY (never 0.0.0.0), so it cannot
-    // outlive the GUI: stopPriceServer() (called from the destructor) terminates it,
-    // which triggers the sidecar's own clean shutdown (clearing the dynamic fee
-    // whitelist). This replaces the old startDetached(), which orphaned the process.
+    // outlive the GUI: stopPriceServer() (called from the destructor) terminates it.
+    // The node keeps the last list it read, and its cache, until it is
+    // connected elsewhere or the whitelist is written by hand.
     if (m_price_server) { m_price_server->deleteLater(); m_price_server = nullptr; }
     m_price_server = new QProcess(this);
     m_price_server->setWorkingDirectory(sdir);
@@ -1367,8 +1387,8 @@ void BitcoinGUI::stopPriceServer()
 {
     if (!m_price_server) return;
     if (m_price_server->state() != QProcess::NotRunning) {
-        // SIGTERM lets the sidecar run its own clean shutdown (it clears the dynamic
-        // fee whitelist on the node); fall back to kill() if it doesn't exit promptly.
+        // SIGTERM lets the price server stop cleanly; fall back to kill() if it
+        // doesn't exit promptly. The node keeps the last list it read.
         m_price_server->terminate();
         if (!m_price_server->waitForFinished(3000)) {
             m_price_server->kill();

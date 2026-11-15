@@ -367,7 +367,7 @@ public Q_SLOTS:
     /** Launch the bundled price-server sidecar and open its configuration page */
     void launchPriceServer();
     /** Ask for a price server's address and connect this node to it. */
-    void connectToPriceServer();
+    void connectToPriceServer(QString suggestion = QString());
     /** Terminate the price-server sidecar if running (called on GUI teardown). */
     void stopPriceServer();
     /** Switch to send coins page */

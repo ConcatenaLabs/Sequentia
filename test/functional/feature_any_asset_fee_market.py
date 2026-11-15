@@ -124,12 +124,11 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
         return self.nodes[1]
 
     def rates_a(self, extra=None):
-        """Producer A's price list. Rebuilt and re-pushed rather than persisted,
-        because that is what a price server does: setfeeexchangerates REPLACES the
-        map every poll, and rates deliberately do not outlive a restart."""
+        """Producer A's price list, written whole each time: setfeeexchangerates
+        REPLACES the map, as a price server's list does on a connected node."""
         rates = {GASSET: RATE_ONE, self.listed: RATE_ONE // 2, self.split: RATE_ONE // 4}
         rates.update(extra or {})
-        self.a.setfeeexchangerates(rates, False)
+        self.a.setfeeexchangerates(rates)
 
     def rates_b(self, extra=None):
         # B prices `split` at eight times A's valuation, and is the only one that
@@ -137,7 +136,7 @@ class AnyAssetFeeMarketTest(BitcoinTestFramework):
         rates = {GASSET: RATE_ONE, self.listed: RATE_ONE // 2,
                  self.split: RATE_ONE * 2, self.solo: RATE_ONE}
         rates.update(extra or {})
-        self.b.setfeeexchangerates(rates, False)
+        self.b.setfeeexchangerates(rates)
 
     def plain_change(self, node):
         """An explicit change destination the wallet still recognises as change.

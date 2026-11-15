@@ -255,17 +255,30 @@ void UpdateFeeListSource(const std::function<void(FeeListSource&)>& fn)
     fn(g_fee_list_source);
 }
 
-bool ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
-                          int64_t published, int64_t now)
+FeeListApply ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
+                                     int64_t published, int64_t now)
 {
     LOCK(g_fee_list_source_mutex);
-    if (!g_fee_list_source.connected || g_fee_list_source.via_rpc || g_fee_list_source.url != url) return false;
+    if (!g_fee_list_source.connected || g_fee_list_source.url != url) return FeeListApply::NOT_CONNECTED;
+    if (g_fee_list_source.have_list && published < g_fee_list_source.list_published) return FeeListApply::OLDER;
     ExchangeRateMap::GetInstance().SetRates(rates);
     g_fee_list_source.have_list = true;
     g_fee_list_source.last_written = now;
     g_fee_list_source.list_published = published;
     g_fee_list_source.last_error.clear();
-    return true;
+    return FeeListApply::TAKEN;
+}
+
+bool WriteHandFeeList(const std::map<CAsset, CAmount>& rates, const std::string& why)
+{
+    LOCK(g_fee_list_source_mutex);
+    const bool was_connected = g_fee_list_source.connected;
+    if (was_connected) {
+        g_fee_list_source.connected = false;
+        g_fee_list_source.ended = why;
+    }
+    ExchangeRateMap::GetInstance().SetRates(rates);
+    return was_connected;
 }
 
 bool DisconnectFeePriceServer(const std::string& why)

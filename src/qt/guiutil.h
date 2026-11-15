@@ -329,7 +329,7 @@ namespace GUIUtil
 
     /* SEQUENTIA: how many whole units of `to` one whole unit of `from` buys, at feed prices.
        0.0 when either asset is unpriced. Display-only, like every price-feed helper here:
-       the node converts fees by its own feed at validation time. */
+       the node values fees by its fee whitelist, never by this feed. */
     double assetExchangeRate(const CAsset& from, const CAsset& to);
 
     /* SEQUENTIA: convert an atom amount of `from` into the equivalent atom amount of `to`

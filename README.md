@@ -181,10 +181,10 @@ Full platform build docs are the inherited Elements/Bitcoin ones:
 
 Added by this fork (each gated on the relevant chain feature):
 
-- **Open fee market:** `getfeeexchangerates` / `setfeeexchangerates`
-  (with `persist=false` for automated price-server pushes) /
-  `getfeeacceptancepolicy`;
-  option `-con_any_asset_fees`; the price-server sidecar in
+- **Open fee market:** `getfeeexchangerates` / `setfeeexchangerates` (the hand
+  write) / `getfeeacceptancepolicy`; `getfeepriceserver` / `setfeepriceserver`
+  and `-feepriceserver` (connect to a price server and read its list);
+  option `-con_any_asset_fees`; the price server in
   [`contrib/price-server/`](contrib/price-server/) (this is the canonical
   price-server location; the node holds a single fee-asset whitelist that the
   sidecar keeps fresh).

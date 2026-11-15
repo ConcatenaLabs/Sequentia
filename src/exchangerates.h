@@ -28,14 +28,11 @@ public:
  * per `exchange_rate_scale` reference fee atoms), read by the mempool/miner/wallet
  * when valuing any-asset fees.
  *
- * SEQUENTIA: there is exactly ONE whitelist — the node does not distinguish a
- * "static" operator layer from a "dynamic" price-server layer. Whether the
- * whitelist is effectively static or dynamic is determined entirely OUTSIDE the
- * node, by whether a price-server sidecar is running and pushing changes. The
- * node just holds whatever was last set, by an operator (exchangerates.json /
- * setfeeexchangerates) or by a sidecar (which uses the same setter); it does not
- * track provenance or freshness. The sidecar is responsible for the admission
- * thresholds and for adding/removing assets.
+ * SEQUENTIA: there is exactly ONE whitelist, with no layers. It is static
+ * when written by hand and dynamic when the node is connected to a price
+ * server and reads that server's published list (FeeListSource below): the
+ * node holds whatever its one writer set last. The price server is
+ * responsible for the admission thresholds and for adding and removing assets.
  */
 class ExchangeRateMap : public std::map<CAsset, CAssetExchangeRate>
 {
@@ -62,7 +59,7 @@ public:
      * special case for the policy asset: an unlisted asset is unlisted,
      * whichever asset it is. The reference unit stays an abstract factor and is
      * never itself a token; the seed merely states an opening price for one
-     * asset, which an operator or price-server sidecar is free to change, set
+     * asset, which an operator or a price server is free to change, set
      * to 0 (refuse), or drop entirely by replacing the whitelist.
      *
      * A chain whose CChainParams::SeedFeeWhitelist() is false (the mainnet
@@ -130,8 +127,8 @@ public:
     //! whitelist, so a caller can validate before it commits to the write.
     static bool ParseJSON(const std::map<std::string, UniValue>& json, std::map<CAsset, CAmount>& rates_out, std::vector<std::string>& errors);
 
-    /** Replace the whole whitelist. Used by both an operator and a price-server
-     *  sidecar — the node treats them identically. */
+    /** Replace the whole whitelist: the hand write, or the list of the price
+     *  server the node is connected to (see FeeListSource). */
     void SetRates(const std::map<CAsset, CAmount>& rates);
 
     /** Whether at least one asset is accepted, i.e. listed at a positive rate.
@@ -148,35 +145,30 @@ public:
  * SEQUENTIA: who writes the fee whitelist.
  *
  * A whitelist is static when it is written by hand (exchangerates.json,
- * setfeeexchangerates, the desktop wallet), and dynamic when a price server
- * updates it. A price server turns what a price feed API reports into a
- * whitelist under its own admission rules; nothing ever goes from a price feed
- * API to the whitelist without one. A node gets a dynamic whitelist in one of
- * two ways: it is connected to a price server (-feepriceserver), its own or
- * another operator's, and takes the list that server publishes; or a price
- * server of its operator's pushes to it over RPC, which to the node is a write
- * like any other.
- *
- * There are two states. Static: written by hand. Dynamic: connected to a price
- * server, which is the whitelist's only writer, in either of two ways: by
- * address (the node asks for the server's published list), or by RPC (the
- * server writes to the node with setfeeexchangerates and persist=false, which
- * is how a price server writes; a write with persist=true, the default the
- * desktop wallet and hand use, is a hand write). A hand write ends either kind
- * of connection (see feepriceserver.h). The display reference-price feed
- * (-referencepricesurl) never writes the whitelist.
+ * setfeeexchangerates, the desktop wallet), and dynamic when the node is
+ * connected to a price server, its operator's own or another operator's, and
+ * reads the list that server publishes (-feepriceserver, setfeepriceserver).
+ * There is no third state. A price server turns what a price feed API reports
+ * into a whitelist under its own admission rules and publishes it; it never
+ * writes to a node, and nothing ever goes from a price feed API to the
+ * whitelist without one. A hand write ends a connection (see feepriceserver.h).
+ * The display reference-price feed (-referencepricesurl) never writes the
+ * whitelist.
  */
 struct FeeListSource {
-    //! Connected to a price server, which is the whitelist's only writer:
+    //! Connected to a price server, which is then the whitelist's only writer:
     //! the whitelist is dynamic. Not connected: static, written by hand.
     bool connected{false};
-    //! Connected by RPC: a price server writes to this node, and the node knows
-    //! no address for it. Otherwise, when connected, by address (url).
-    bool via_rpc{false};
     //! The address of the price server's published list (when connected).
     std::string url;
     //! The address came from the chain's default rather than from the operator.
     bool by_default{false};
+    //! Where the choice in force was made: "command line", "configuration
+    //! file", "settings" (the operator's last setfeepriceserver, hand write or
+    //! desktop-wallet choice, recorded in settings.json), "default" (the
+    //! network's price server), "whitelist file" (a list written by hand,
+    //! which the network's default yields to) or "none".
+    std::string decided_by{"none"};
     //! A list from that server is in force (taken this run, or its cache).
     bool have_list{false};
     //! Unix time the list in force was taken from the server; 0 = never.
@@ -198,12 +190,20 @@ void SetFeeListSource(const FeeListSource& source);
 //! Change it in place, under its lock.
 void UpdateFeeListSource(const std::function<void(FeeListSource&)>& fn);
 
+enum class FeeListApply { TAKEN, OLDER, NOT_CONNECTED };
+
 /** Write a price server's list into the whitelist, if and only if the node is
- *  still connected to that same address. Checked and written under one lock,
- *  so a list that was in flight when the operator took over is discarded
- *  rather than written over the operator's list. */
-bool ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
-                             int64_t published, int64_t now);
+ *  still connected to that same address and the list is not older than the
+ *  one in force. Checked and written under one lock, so a list that was in
+ *  flight when the operator took over is discarded rather than written over
+ *  the operator's list. */
+FeeListApply ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
+                                     int64_t published, int64_t now);
+
+/** Write the whitelist by hand: disconnect from the price server, if
+ *  connected, and write rates, under the same lock as ApplyPriceServerFeeList.
+ *  @return true if the node was connected. */
+bool WriteHandFeeList(const std::map<CAsset, CAmount>& rates, const std::string& why);
 
 /** Disconnect from the price server, recording why.
  *  @return true if the node was connected. */

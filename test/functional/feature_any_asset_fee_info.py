@@ -84,7 +84,7 @@ class AnyAssetFeeInfoTest(BitcoinTestFramework):
         is a policy someone wrote down, the other an asset nobody configured. The
         wallet says different things about them, so the RPC must not merge them
         the way a bare 'is it usable' boolean would."""
-        self.node.setfeeexchangerates({'gasset': 100000000, self.asset: 0}, False)
+        self.node.setfeeexchangerates({'gasset': 100000000, self.asset: 0})
 
         listed = self.node.getfeeassetinfo(self.asset)[self.asset]
         assert_equal(listed['listed'], True)     # someone wrote this down
@@ -100,7 +100,7 @@ class AnyAssetFeeInfoTest(BitcoinTestFramework):
         """Dropping the policy asset from the whitelist must report it refused like
         any other asset. An exception for it here would be the silent fallback the
         open fee market exists to remove."""
-        self.node.setfeeexchangerates({self.asset: 50000000}, False)
+        self.node.setfeeexchangerates({self.asset: 50000000})
         info = self.node.getfeeassetinfo()
         assert_equal(info[GASSET]['listed'], False)
         assert_equal(info[GASSET]['accepted'], False)
@@ -110,7 +110,7 @@ class AnyAssetFeeInfoTest(BitcoinTestFramework):
     def test_estimatesmartfee_fee_asset(self):
         """fee_asset converts the estimate and reports acceptance. Acceptance does
         not depend on there being an estimate, and must be answered either way."""
-        self.node.setfeeexchangerates({'gasset': 100000000, self.asset: 50000000}, False)
+        self.node.setfeeexchangerates({'gasset': 100000000, self.asset: 50000000})
 
         # Omitting the argument must leave the answer exactly as it always was.
         plain = self.node.estimatesmartfee(6)
