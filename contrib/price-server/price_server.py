@@ -4,8 +4,9 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Sequentia price server.
 
-A locally run sidecar that maintains a Sequentia node's *dynamic* fee-asset
-whitelist (see doc/sequentia/02-open-fee-market.md). Each round it:
+A service that publishes a fee-asset whitelist; a Sequentia node connected to it
+reads that list, which makes the node's whitelist *dynamic* (see
+doc/sequentia/02-open-fee-market.md). Each round it:
 
   1. DISCOVERS the asset universe from the node's Asset Registry (the same
      registry the node and explorer use): ticker -> (asset id, issuer domain).

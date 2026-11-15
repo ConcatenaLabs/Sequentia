@@ -336,7 +336,7 @@ The testnet has no default fee asset: every transaction must name the asset its
 fee is paid in (`fee_asset=` on `issueasset`, `reissueasset` and `sendmany`,
 `fee_asset_label=` on `sendtoaddress`), and one that stays silent is refused.
 The examples below pay in your tSEQ, whose wallet label is `bitcoin` (§4);
-once you have priced your own asset (§7.2) you can name that instead.
+any other asset on your node's fee list (§7.2) can be named instead.
 
 Issue an asset (here 1,000,000 units, with a reissuance token so you can mint
 more later; `blind=false` = unblinded, which is the testnet default):
@@ -392,27 +392,47 @@ sequentia-cli.exe -rpcwallet=main -named sendmany ^
   fee_asset=bitcoin
 ```
 
-**7.2 Pay a fee in a different asset.** For a producer to mine a fee paid in your
-asset, the producer must *price* that asset. On your own node you set the price
-(this controls what *you* accept when you produce a block):
+**7.2 Pay a fee in a different asset.** A producer mines a fee paid in an asset
+only if its node's fee whitelist prices that asset. A testnet node reads the
+network's price server's list, so every asset on that list is accepted already.
+See which, and at what rate:
 
 ```
-sequentia-cli.exe setfeeexchangerates "{\"<asset-id>\":100000000}"
 sequentia-cli.exe getfeeexchangerates
+sequentia-cli.exe getfeepriceserver
 ```
 
-A rate of `100000000` means "1 unit of this asset = 1 reference unit (RFU)".
-SEQ is not the reference, and no asset is listed by default: a testnet node
-reads the network's price server's list. Writing the list by hand, as above,
-makes it static and stops that (`setfeepriceserver
-"http://sequentiatestnet.com/feewhitelist"` connects it again). A rate of `0`
-means "refuse this asset for fees." Then a fee-in-asset tx
-you build will be mineable by any producer that also prices it (ask the operator
-to price your test asset across the committee if you want it mined quickly):
+`getfeepriceserver` says `dynamic` while the node reads a price server. A rate
+of `100000000` means "1 unit of this asset = 1 reference unit (RFU)"; SEQ is not
+the reference, and no asset is listed by default. Pay a fee in any asset on the
+list:
 
 ```
 sequentia-cli.exe -rpcwallet=main -named sendtoaddress ^
   address=<dest> amount=5 assetlabel=<asset-id> fee_asset_label=<asset-id>
+```
+
+Your node's list decides only what *you* accept when you produce a block. For a
+fee in an asset the network's price server does not list to be mined quickly,
+ask the operator to list it there; every committee node reads that list.
+
+To accept such an asset on your own node, write the list by hand. A hand write
+replaces the whole list and makes it static: the node stops reading the price
+server, and every asset left out of what you write stops being accepted at once,
+including the one you paid a fee in under 7.1. So write the list as it is now
+with your asset added, never your asset alone: copy each `"<asset-id>": <rate>`
+pair `getfeeexchangerates` printed, add yours, and write them all on one line
+(a rate of `0` refuses an asset):
+
+```
+sequentia-cli.exe setfeeexchangerates "{\"<listed-asset-id>\":<its rate>,\"<other-listed-asset-id>\":<its rate>,\"<your-asset-id>\":100000000}"
+```
+
+The list then stays as you wrote it while the network's prices move. To read
+the network's price server's list again (it replaces yours as soon as the node reads it):
+
+```
+sequentia-cli.exe setfeepriceserver "http://sequentiatestnet.com/feewhitelist"
 ```
 
 **7.3 Replace-by-fee (RBF), including a fee-asset swap.** Send a replaceable
