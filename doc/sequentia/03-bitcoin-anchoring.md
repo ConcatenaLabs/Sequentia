@@ -220,6 +220,207 @@ as Bitcoin does not reorganize a referenced block, no Sequentia reorg is
 possible: committee certification gives immediate finality (see
 [`04-proof-of-stake.md`](04-proof-of-stake.md)).
 
+### Transactions of a lost block
+
+When the watcher disconnects a certified block because Bitcoin replaced an
+anchor on its branch, the block's transactions do not go back to an open
+mempool where whoever leads next may respend their coins. They are carried
+into the chain that replaces it. This is what keeps a swap against on-chain
+bitcoin whole across a Bitcoin reorganization: the seller's lock, certified
+before the buyer paid, is mined again before anything that conflicts with it,
+whoever leads.
+
+The rule has two layers.
+
+1. **Records and bindings are validity.** Every node checks them, from the
+   chain alone, for ever.
+2. **The carry-over is a duty of the nodes that hold the lost block.** They do
+   not produce, sign, or take as their tip a block that skips it. They do not
+   resist a chain that a quorum has certified past them.
+
+#### Definitions
+
+- A *lost block* L is a block off the active chain that carries its parent's
+  full certification quorum, or is an ancestor of such a block on the same
+  branch. Its branch includes a block whose anchor is not on Bitcoin's best
+  chain.
+- The branch leaves the active chain at its *fork point* F. a_L is L's anchor
+  height.
+- The *window* W is 6 Bitcoin blocks (`-poslostwindow`, a consensus value).
+- A node *holds* L when it connected L and saw it leave, or when it was shown
+  L (P2P `poslost`, or `submitlostblock`) and judged it lost and certified.
+  It writes L to `lostblocks.dat` and syncs that file before the disconnect
+  releases the chain lock, so before it signs anything afterwards. It reads
+  the file back before it connects a block or meets a peer.
+
+#### The duty of a holder
+
+A holder judges a candidate block B that extends its active tip, has no
+certified descendant it knows of, and arrives outside initial block download.
+The duty applies when B is built on a chain containing F and anchored at most
+a_L + W.
+
+The pending lost transactions are the non-coinbase transactions of every lost
+block whose fork point is in B's chain, in lost order: the loss they belong to
+(an earlier loss first), then height, then position. Each is classified
+against B's parent, with the lost block's own witnesses:
+
+- **due**: valid there (inputs, amounts, scripts, record rules, payment
+  proofs). Each due transaction is judged after the ones before it.
+- **later**: valid only later as it is. This covers an `nLockTime` or a
+  relative lock that the shift made non-final, a coinbase spend not yet
+  mature, an unbonding output not yet unlocked, and the child of a later one.
+- **failing**: not valid as it is. This covers a payment proof that names a
+  stale Bitcoin block, an anchor floor not reached, a record rule bound to a
+  height (a payout announced without its notice at the new height, a pot
+  claim, a conflicting delegation or payout record), a peg-in, and the child
+  of a failing one.
+- **gone**: an input is spent on B's chain, because the transaction is already
+  mined there or something it conflicts with is.
+
+The holder refuses B (`bad-lost-replay`) unless B begins, right after its
+coinbase, with the due transactions in lost order. Exactly as many are
+required as fit in the block's weight less 8,000, the signature reservation,
+and (when B owes a record) 100,000 for the record. When they do not all fit,
+B carries nothing else.
+
+It refuses B (`bad-txns-lost-respend`) if any other transaction in B spends an
+outpoint that a pending lost transaction spends. Which of two conflicting lost
+transactions stands is decided by lost order alone.
+
+It refuses B (`bad-lost-unrecorded`) when B is the first block on the branch
+anchored at or above the lowest stale anchor of the lost branch and does not
+record a failing transaction that is not yet recorded on B's chain and can be
+recorded.
+
+A later transaction is protected by the same refusal until it falls due, and
+needs no record: it becomes valid as it is, and the duty mines it then.
+
+The refusal is soft. No peer is punished, no mark that a restart keeps is
+written, and the refused block is judged again whenever the holder's evidence
+changes. The refusal lapses when the holder's Bitcoin daemon's best height
+passes a_L + W. The holder then drops L and judges every block it refused by
+validity alone.
+
+A producer that holds L builds exactly what the duty asks. The due
+transactions go first, whatever its own fee list and floor say, and the
+records go in the coinbase. Its mempool refuses a spend that conflicts with a
+pending lost transaction (`txn-lost-conflict`).
+
+#### Records and bindings
+
+A record is a coinbase output `OP_RETURN 'SQLR' <record>`, value 0. The record
+contains:
+
+- a version;
+- the Bitcoin headers, parents first, that make a stale anchor of the branch
+  known to a daemon that never saw it;
+- the lost branch's headers from F's child, each with its certificate;
+- one entry per recorded transaction: the index of its lost block, its
+  position, the merkle branch to that block's merkle root, and the transaction
+  without its witness.
+
+A block carries at most 25,000 record bytes. The records count toward block
+weight like any coinbase output. The coinbase is under the block's merkle
+root, so the record needs no commitment of its own and the block format is
+unchanged.
+
+A record is valid in a block B when all of the following hold. Otherwise B is
+invalid (`bad-lost-record`), or it is left aside when the Bitcoin daemon cannot
+answer (`lost-record-unverifiable`).
+
+- Its first header's parent is the block of B's chain at that height, and the
+  headers link one to the next at consecutive heights, with anchors that obey
+  R2 from F.
+- For each entry:
+  - the merkle branch leads from the transaction id to its block's merkle
+    root, at a non-zero position;
+  - B is anchored at most W above that block's anchor;
+  - a header of the branch at or below it has an anchor that the Bitcoin
+    daemon knows and that is not the best chain's block at that height (at or
+    below B's anchor);
+  - its block's certificate carries a full quorum under the stake registry at
+    B's parent.
+
+Once a record is in a chain, a later block of that chain, or B itself, is
+invalid (`bad-txns-recorded-respend`) if it is anchored at most a_L + W and
+spends an input of a recorded transaction through any other transaction. The
+same transaction id with another witness is that transaction. A record binds
+only coins still unspent: a spent coin cannot be spent again.
+
+#### What this guarantees, and to whom
+
+- **With an honest quorum, a lost transaction stays protected even when the
+  seller leads every height.** It comes back at the height it falls due, at
+  the latest when the lost blocks' heights are rebuilt (about ten minutes per
+  stale Bitcoin block). It is then in the chain for good, not for W. A failing
+  transaction is bound for W from the first block above the stale anchor. A
+  payment-proof claim is the usual one, and it keeps its id when it is proven
+  again: the proof is in the peg-in witness slot. When its payment is mined
+  again, anyone can attach a fresh proof and mine it. When the payment is gone
+  for good, the lock is released at a_L + W and its refund path is open again.
+- **A block that skips the duty cannot be certified unless at least two of
+  the lost block's own signers sign against what they hold on disk.** Any two
+  quorums share at least two members.
+- **A dishonest quorum can certify a block that skips the duty.** The holders
+  refuse it until the lapse. If the quorum stops certifying that chain, the
+  holders' chain wins by reconciliation (§6 of
+  [`04-proof-of-stake.md`](04-proof-of-stake.md)). If it goes on, the holders
+  take its chain at the lapse. A quorum that releases such a block together
+  with a certified child is accepted by holders at once. Against a dishonest
+  quorum the rule protects nothing and splits nothing for longer than W. That
+  is master's behaviour.
+- **A node that never held L judges only records.** A late node, or one
+  syncing from nothing, agrees with the nodes that were there on every block
+  of the chain they certified.
+- **Bitcoin stays supreme.** Nothing here keeps a block whose anchor Bitcoin
+  replaced, delays the watcher, or undoes an accepted block. Evidence shown
+  late never touches history. It binds only candidates for the tip, and only
+  coins still unspent.
+
+#### Costs
+
+- **The fee market.** A proposer's fee list is its own choice everywhere
+  except here: a due lost transaction is mined whatever asset and rate it
+  pays. This is required for safety. If a proposer could skip a lock whose
+  fee asset it does not list, a seller whose own producer alone lists that
+  asset would get back the gap after W. No consensus rule judges a fee asset
+  or rate, so a carried transaction is never invalid for its fee.
+- **Honest conflicts wait.** A holder's own replacement of a pending lost
+  transaction (a fee bump, a refund) waits until it is due, or for W.
+- **Throughput while replaying.** The lost transactions take back the space
+  they had. A deep reorganization replays its blocks at their heights. While
+  it does, a block full of due transactions carries nothing else.
+- **Stake changes in the lost branch.** A lost block whose certificate does
+  not verify under the registry at B's parent cannot be recorded, because
+  stake changed in its branch before it. Its failing transactions are then
+  protected only by the holders' refusal until the lapse.
+- **A deeper fork point.** A lost branch whose transactions' window has
+  passed is not carried.
+
+#### For a buyer's wallet
+
+The lock a buyer pays against must be certified and final. It must have stood
+the observation window (§6 of [`04-proof-of-stake.md`](04-proof-of-stake.md))
+with no competing certificate at its height (`getposfinality`). Bitcoin's tip
+must also be uncontested in the buyer's Bitcoin view: no other branch within
+the contest window (§5), as `getchaintips` shows it. Both answers are instant
+except during a live Bitcoin fork, which this waits out. They close the one
+case the duty cannot: two blocks certified at one height on two live Bitcoin
+branches, neither set of signers knowing of the other.
+
+#### Activation
+
+The rule is active from genesis on a fresh chain. On a running chain it
+starts at a height bound to the chain's genesis hash
+([`CONTRIBUTING.md`](../../CONTRIBUTING.md)), with every committee member
+upgraded. A node on the old rules reads a record as an ordinary `OP_RETURN`
+output and follows the upgraded committee's chain. It parts from it only if
+a quorum certifies a block that breaks a binding.
+
+Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_replay.py` and,
+together with the payment proof, `feature_pos_lost_swap.py`.
+
 ### What the watcher costs the Bitcoin daemon
 
 The watcher re-examines the **whole** Sequentia chain on every tick, down to
