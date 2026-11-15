@@ -102,7 +102,9 @@ class LostBlocksTest(BitcoinTestFramework):
         if i not in self.base_nodes:
             a.append("-poslostwindow=%d" % W)
         if i == SELLER:
-            a += ["-posdebugignorelost=1", "-minrelaytxfee=0", "-blockmintxfee=0"]
+            a += ["-minrelaytxfee=0", "-blockmintxfee=0"]
+            if i not in self.base_nodes:
+                a.append("-posdebugignorelost=1")
         a += getattr(self, "extra", {}).get(i, [])
         return a
 

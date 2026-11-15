@@ -420,7 +420,12 @@ only coins still unspent: a spent coin cannot be spent again.
   s × 10 blocks of its own transactions per stale Bitcoin block, at 60-second
   blocks. It cannot cause a stale Bitcoin block without mining Bitcoin.
 - **Honest conflicts wait.** A holder's own replacement of a pending lost
-  transaction (a fee bump, a refund) waits until it is due, or for W.
+  transaction (a fee bump, a refund) waits until it is due, or for W. The
+  holder's mempool refuses it (`txn-lost-conflict`). A wallet's `bumpfee`
+  still records the replacement and returns its id: the wallet shows it
+  unconfirmed and in conflict with the lost transaction until that is mined
+  again, in the first block of the replay when it is due, and the bump is
+  then a conflicted transaction that never confirms.
 - **Throughput while replaying.** The lost transactions take back the space
   they had. A deep reorganization replays its blocks at their heights. While
   it does, a block full of due transactions carries nothing else.
@@ -443,7 +448,10 @@ only coins still unspent: a spent coin cannot be spent again.
   about 0.2 ms per pending transaction, almost all of it reading the coins its
   inputs spend: about 1 second with one stale Bitcoin block of full blocks
   pending (4,800 transactions) and about 3 seconds with three (14,400). It is
-  paid in the first round at each height of the replay.
+  paid in the first round at each height of the replay. At the testnet's
+  round lengths (9.45 s rounds, a 6.75 s collection window) the autonomous
+  committee replays three stale Bitcoin blocks of full blocks with every
+  height certified in its first round, 7 to 17 seconds apart.
 - **A deeper fork point.** A lost branch whose transactions' window has
   passed is not carried.
 
@@ -458,10 +466,13 @@ outpoint one of its transactions spends (`bad-txns-signed-respend`), and its
 mempool refuses such a spend. It owes no replay and no record, and it relays
 nothing. It narrows the case of two blocks certified at one height on two
 live Bitcoin branches: honest members that signed one side do not sign a
-conflicting other. Its cost is a pause: when the members that signed the
-lost candidate are at least as many as the committee less the quorum, a
-block that carries a conflicting transaction cannot be certified, and the
-height waits for a leader whose block does not carry it.
+conflicting other. Its cost is a pause. A block that carries a conflicting
+transaction cannot be certified while the members that signed the lost
+candidate are at least as many as the committee less the quorum, and the
+height waits for a leader whose block does not carry it. A member whose every
+candidate at a height is refused or set aside for a stale anchor proposes
+again only once Bitcoin's tip moves, so with fewer signers the height can
+also wait for the next Bitcoin block, and in some runs for the whole window.
 
 #### For a buyer's wallet
 
@@ -483,7 +494,9 @@ upgraded. A node on the old rules reads a record as an ordinary `OP_RETURN`
 output and follows the upgraded committee's chain. It parts from it only if
 a quorum certifies a block that breaks a binding.
 
-Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_replay.py` (the
+Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_autonomous.py`
+(the autonomous committee at the testnet's round lengths: the gap, a deep
+replay, the member's switch), `feature_pos_lost_replay.py` (the
 due run and its floor, the producer's opt-out, a producer's own-asset block,
 a fork point too deep, kill -9 during a replay, full lost blocks) and,
 together with the payment proof, `feature_pos_lost_swap.py`.

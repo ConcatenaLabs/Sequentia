@@ -96,7 +96,9 @@ class LostSwapTest(LostBlocksTest):
         lock_addr = program_to_witness(1, tap.scriptPubKey[2:])
         a = self.nodes[SELLER]
         raw = a.createrawtransaction([], [{lock_addr: Decimal("10")}])
-        funded = a.fundrawtransaction(raw, {"fee_asset": "bitcoin", "replaceable": True})["hex"]
+        # The change stays a segwit v0 output. Paying a taproot output, the wallet would otherwise make its change
+        # taproot too, and the next lock funded from it would carry an invalid signature (Sequentia #349).
+        funded = a.fundrawtransaction(raw, {"fee_asset": "bitcoin", "replaceable": True, "change_type": "bech32"})["hex"]
         t_hex = a.signrawtransactionwithwallet(funded)["hex"]
         t = tx_from_hex(t_hex)
         txid = t.rehash()
