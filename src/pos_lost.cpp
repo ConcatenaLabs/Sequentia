@@ -105,11 +105,40 @@ uint64_t g_last_scan_gen{0};
 bool g_refused_scanned{false};
 uint64_t g_epoch GUARDED_BY(g_lost_mutex){0};
 uint256 g_last_noted_prev GUARDED_BY(g_lost_mutex);
+//! C2 (-poslostbindsigned, off by default): blocks this member signed, held
+//! until their anchor is past the window. One whose anchor went stale and that
+//! never certified binds, on this member only, the outpoints its transactions
+//! spend: conflict-only, no replay duty, no record, never relayed.
+struct SignedBlk {
+    std::shared_ptr<const CBlock> block;
+    int height{0};
+};
+bool g_bind_signed{false};
+std::map<uint256, SignedBlk> g_signed GUARDED_BY(g_lost_mutex);
+std::map<COutPoint, std::vector<LostSpend>> g_signed_spends GUARDED_BY(g_lost_mutex);
 //! Bitcoin's best height, as the last maintenance pass read it.
 std::atomic<int> g_btc_h{-1};
 int64_t g_last_replay{0};
 
 fs::path LostPath() { return gArgs.GetDataDirNet() / "lostblocks.dat"; }
+fs::path SignedPath() { return gArgs.GetDataDirNet() / "lostsigned.dat"; }
+
+void WriteSignedFile() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    const fs::path tmp = gArgs.GetDataDirNet() / "lostsigned.dat.new";
+    FILE* f = fsbridge::fopen(tmp, "wb");
+    if (!f) return;
+    CAutoFile file(f, SER_DISK, PROTOCOL_VERSION);
+    try {
+        file << (uint32_t)1 << (uint64_t)g_signed.size();
+        for (const auto& [h, b] : g_signed) file << *b.block << b.height;
+        if (!FileCommit(file.Get())) return;
+        file.fclose();
+        (void)RenameOver(tmp, SignedPath());
+    } catch (const std::exception& e) {
+        LogPrintf("Lost blocks: cannot write %s: %s\n", fs::PathToString(SignedPath()), e.what());
+    }
+}
 
 LostBlk MakeBlk(const std::shared_ptr<const CBlock>& block, int height)
 {
@@ -249,6 +278,26 @@ std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockInde
     return std::nullopt;
 }
 
+std::optional<std::string> SignedViolationLocked(const CBlock& block, const CBlockIndex* prev) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    if (!g_bind_signed || g_signed_spends.empty()) return std::nullopt;
+    for (size_t i = 1; i < block.vtx.size(); ++i) {
+        const CTransaction& tx = *block.vtx[i];
+        const uint256 txid = tx.GetHash();
+        for (const CTxIn& in : tx.vin) {
+            if (in.m_is_pegin) continue;
+            auto it = g_signed_spends.find(in.prevout);
+            if (it == g_signed_spends.end()) continue;
+            for (const LostSpend& sp : it->second) {
+                if (sp.txid == txid || !Binds(sp, block.m_anchor_height, prev)) continue;
+                return strprintf("tx %s spends %s:%u, which tx %s of block %s (signed here, anchor %u, never certified) spends",
+                                 txid.ToString(), in.prevout.hash.ToString(), in.prevout.n, sp.txid.ToString(), sp.block.ToString(), sp.anchor_h);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 bool LostActive()
@@ -262,7 +311,26 @@ void LostInit()
 {
     g_ignore = gArgs.GetBoolArg("-posdebugignorelost", false);
     g_window = (uint32_t)std::max<int64_t>(1, gArgs.GetIntArg("-poslostwindow", DEFAULT_POS_LOST_WINDOW));
+    g_bind_signed = gArgs.GetBoolArg("-poslostbindsigned", false);
     LOCK(g_lost_mutex);
+    if (g_bind_signed) {
+        if (FILE* sf = fsbridge::fopen(SignedPath(), "rb")) {
+            CAutoFile file(sf, SER_DISK, PROTOCOL_VERSION);
+            try {
+                uint32_t version;
+                uint64_t n;
+                file >> version >> n;
+                for (uint64_t i = 0; i < n && i < POS_LOST_MAX_BLOCKS; ++i) {
+                    auto block = std::make_shared<CBlock>();
+                    int height;
+                    file >> *block >> height;
+                    g_signed.emplace(block->GetHash(), SignedBlk{block, height});
+                }
+            } catch (const std::exception& e) {
+                LogPrintf("Lost blocks: cannot read %s: %s\n", fs::PathToString(SignedPath()), e.what());
+            }
+        }
+    }
     FILE* f = fsbridge::fopen(LostPath(), "rb");
     if (!f) return;
     CAutoFile file(f, SER_DISK, PROTOCOL_VERSION);
@@ -316,6 +384,17 @@ void LostShutdown()
 {
     LOCK(g_lost_mutex);
     WriteFile();
+}
+
+void LostNoteSigned(const CBlock& block, int height)
+{
+    if (!g_bind_signed || !LostActive()) return;
+    LOCK(g_lost_mutex);
+    const uint256 h = block.GetHash();
+    if (g_signed.count(h)) return;
+    g_signed.emplace(h, SignedBlk{std::make_shared<const CBlock>(block), height});
+    // On disk before the signature leaves this node.
+    WriteSignedFile();
 }
 
 void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block)
@@ -821,7 +900,8 @@ std::vector<std::optional<LostRecord>> LostParseRecords(const CBlock& block)
 
 bool LostIsRefusal(const std::string& reason)
 {
-    return reason == "bad-txns-lost-respend" || reason == "bad-lost-replay" || reason == "bad-lost-unrecorded";
+    return reason == "bad-txns-lost-respend" || reason == "bad-lost-replay" || reason == "bad-lost-unrecorded" ||
+           reason == "bad-txns-signed-respend";
 }
 
 bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool just_check, BlockValidationState& state)
@@ -894,6 +974,8 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
     std::string reason;
     if ((why = ViolationLocked(block, pindexPrev))) {
         reason = "bad-txns-lost-respend";
+    } else if ((why = SignedViolationLocked(block, pindexPrev))) {
+        reason = "bad-txns-signed-respend";
     } else if (!g_spends.empty()) {
         // The duty: the due lost transactions first, and the records owed.
         Plan plan = PlanLocked(pindexPrev, block.m_anchor_height, view, /*build=*/false);
@@ -944,6 +1026,12 @@ std::optional<uint256> LostConflict(const CTransaction& tx, uint32_t tip_anchor_
         auto it = g_spends.find(in.prevout);
         if (it == g_spends.end()) continue;
         for (const LostSpend& s : it->second) {
+            if (s.txid != txid && tip_anchor_height <= s.anchor_h + g_window) return s.txid;
+        }
+        if (!g_bind_signed) continue;
+        auto st = g_signed_spends.find(in.prevout);
+        if (st == g_signed_spends.end()) continue;
+        for (const LostSpend& s : st->second) {
             if (s.txid != txid && tip_anchor_height <= s.anchor_h + g_window) return s.txid;
         }
     }
@@ -1214,6 +1302,45 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             g_dirty_file = true;
         }
     }
+    if (g_bind_signed) {
+        std::vector<std::pair<uint256, std::pair<uint32_t, uint256>>> sanchors;
+        {
+            LOCK(g_lost_mutex);
+            for (const auto& [h, b] : g_signed) sanchors.push_back({h, {b.block->m_anchor_height, b.block->m_anchor_hash}});
+        }
+        std::map<uint256, AnchorState> sv;
+        for (const auto& [h, a] : sanchors) sv[h] = CachedVerdict(a.first, a.second);
+        LOCK2(cs_main, g_lost_mutex);
+        std::map<COutPoint, std::vector<LostSpend>> spends;
+        bool dirty = false;
+        for (auto it = g_signed.begin(); it != g_signed.end();) {
+            const CBlock& blk = *it->second.block;
+            const CBlockIndex* self = chainman.m_blockman.LookupBlockIndex(it->first);
+            const bool active = self && chainman.ActiveChain().Contains(self);
+            const bool expired = btc_h >= 0 && (uint32_t)btc_h > blk.m_anchor_height + g_window;
+            if (active || expired) { it = g_signed.erase(it); dirty = true; continue; }
+            const bool certified = self && self->PosCarriesQuorum();
+            if (!certified && sv[it->first] == AnchorState::STALE) {
+                for (size_t i = 1; i < blk.vtx.size(); ++i) {
+                    for (const CTxIn& in : blk.vtx[i]->vin) {
+                        if (in.m_is_pegin) continue;
+                        spends[in.prevout].push_back(LostSpend{blk.vtx[i]->GetHash(), it->first, blk.m_anchor_height, blk.hashPrevBlock, it->second.height - 1});
+                    }
+                }
+            }
+            ++it;
+        }
+        if (dirty) WriteSignedFile();
+        std::set<std::pair<COutPoint, uint256>> a, b;
+        for (const auto& [o, v] : spends) for (const auto& x : v) a.insert({o, x.txid});
+        for (const auto& [o, v] : g_signed_spends) for (const auto& x : v) b.insert({o, x.txid});
+        if (a != b) {
+            LogPrintf("Lost blocks: %u outpoint(s) bound by blocks this member signed that never certified and whose anchor went stale\n", (unsigned)spends.size());
+            g_signed_spends = std::move(spends);
+            ++g_gen;
+            changed = true;
+        }
+    }
     for (const uint256& h : need_headers) {
         uint256 anchor;
         {
@@ -1238,7 +1365,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
     {
         LOCK(g_lost_mutex);
         gen = g_gen;
-        any = !g_spends.empty() || !g_refused.empty() || !g_refused_scanned;
+        any = !g_spends.empty() || !g_signed_spends.empty() || !g_refused.empty() || !g_refused_scanned;
     }
     if (!any) return;
     // 5) The mempool: drop what conflicts, put lost transactions back, first in
@@ -1359,6 +1486,9 @@ UniValue LostGetInfo()
     }
     out.pushKV("blocks", blocks);
     out.pushKV("boundoutpoints", (int)g_spends.size());
+    out.pushKV("bindsigned", g_bind_signed);
+    out.pushKV("signed", (int)g_signed.size());
+    out.pushKV("signedboundoutpoints", (int)g_signed_spends.size());
     UniValue refused(UniValue::VARR);
     for (const uint256& h : g_refused) refused.push_back(h.GetHex());
     out.pushKV("refused", refused);

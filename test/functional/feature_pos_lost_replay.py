@@ -625,6 +625,104 @@ class LostReplayTest(LostBlocksTest):
         assert_equal(on, HONEST)
         self.realign()
 
+    # ---------------------------------------------------------- deep
+    def rss_kb(self, i):
+        with open("/proc/%d/status" % self.nodes[i].process.pid) as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+        return -1
+
+    def case_deep(self):
+        depth = int(os.environ.get("LOST_DEPTH", "1"))
+        per = int(os.environ.get("LOST_DEEP_TXS", "480"))
+        per_btc = 10
+        case = "deep%d" % depth
+        self.log.info("(%s) %d stale Bitcoin block(s), %d full Sequentia blocks each" % (case, depth, per_btc))
+        a = self.nodes[SELLER]
+        n1 = self.nodes[1]
+        nblocks = depth * per_btc
+        total = nblocks * per
+        # Coins: fan-out transactions of `per` outputs each, mined first.
+        fans = []
+        coins = [self.fund(Decimal("10")) for _ in range(nblocks)]
+        o_coin = self.fund()
+        for coin in coins:
+            addrs = [a.getnewaddress() for _ in range(per)]
+            outs = [{ad: Decimal("0.01")} for ad in addrs]
+            outs.append({a.getnewaddress(): Decimal("10") - Decimal("0.01") * per - Decimal("0.001")})
+            outs.append({"fee": Decimal("0.001")})
+            raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}], outs)
+            fans.append((a.sendrawtransaction(a.signrawtransactionwithwallet(raw)["hex"]), set(addrs)))
+        while any(f in a.getrawmempool() for f, _ in fans):
+            self.produce(SELLER, ALL_KEYS)
+        self.sync_tips(range(N))
+        o_hex = self.spend(o_coin, n1.getnewaddress(), Decimal("0.0001"))
+        o_id = tx_from_hex(o_hex).rehash()
+        dest = n1.getnewaddress()
+        t0 = time.time()
+        batches = []
+        for f, addrs in fans:
+            dec = a.getrawtransaction(f, 1)
+            batch = []
+            for o in dec["vout"]:
+                if o["scriptPubKey"].get("address") in addrs:
+                    r = a.createrawtransaction([{"txid": f, "vout": o["n"]}], [{dest: Decimal("0.0099")}, {"fee": Decimal("0.0001")}])
+                    batch.append(a.signrawtransactionwithwallet(r)["hex"])
+            batches.append(batch)
+        self.log.info("  %d transactions signed in %.0f s", total, time.time() - t0)
+        f_height = n1.getblockcount()
+        Ls = []
+        for d in range(depth):
+            self.btc_mine(1)
+            for k in range(per_btc):
+                ids = [n1.sendrawtransaction(hx) for hx in batches[d * per_btc + k]]
+                Ls.append(self.produce(1, ALL_KEYS, leaders=[1, 2, 3, 4], txs_must=ids[:1]))
+        self.sync_tips(range(N), timeout=300)
+        lost_txids = []
+        weights = []
+        for L in Ls:
+            blk = n1.getblock(L["hash"])
+            lost_txids += blk["tx"][1:]
+            weights.append(blk["weight"])
+        self.record(case, "lost branch", "%d blocks at heights %d..%d, %d transactions, weights %d..%d (limit 400,000)" %
+                    (len(Ls), Ls[0]["height"], Ls[-1]["height"], len(lost_txids), min(weights), max(weights)))
+        rss0 = self.rss_kb(1)
+        since = [self.log_size(i) for i in range(N)]
+        t0 = time.time()
+        self.bitcoin_reorg(depth)
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() <= f_height for i in HONEST), timeout=300)
+        t_leave = time.time() - t0
+        self.wait_lost(Ls[-1]["hash"], HONEST, timeout=300)
+        t_hold = time.time() - t0
+        lb = os.path.getsize(os.path.join(n1.datadir, "elementsregtest", "lostblocks.dat"))
+        self.record(case, "reorg", "Bitcoin %d deep: honest nodes left the branch in %.1f s and held it lost in %.1f s; lostblocks.dat %d bytes; node 1 RSS %d -> %d kB" %
+                    (depth, t_leave, t_hold, lb, rss0, self.rss_kb(1)))
+        n1.sendrawtransaction(o_hex)
+        hs = []
+        left = set(lost_txids)
+        t0 = time.time()
+        while True:
+            tp = time.time()
+            h = self.produce(1, ALL_KEYS, leaders=[1, 2, 3, 4])
+            tp = time.time() - tp
+            txs = self.tx_ids(n1, h["hash"])
+            carried = [t for t in txs[1:] if t in left]
+            left -= set(carried)
+            hs.append((h["height"], len(carried), o_id in txs, round(tp, 1)))
+            if o_id in txs or len(hs) > nblocks + 5:
+                break
+        self.sync_tips(HONEST + [LATE], timeout=300)
+        lines = self.log_has(1, "classified in", since[1])
+        micros = [int(l.split("classified in ")[1].split(" us")[0]) for l in lines]
+        recs = self.log_has(1, "records", since[1])
+        self.record(case, "replay", "%d blocks (height, carried, ordinary tx in it, seconds to produce): %s; left uncarried: %d; ordinary tx waited %d block(s), %.0f s" %
+                    (len(hs), hs, len(left), len(hs) - 1, time.time() - t0))
+        self.record(case, "classifier", "%d classifications on node 1, %d..%d us (median %d); node 1 RSS %d kB; record lines: %d" %
+                    (len(micros), min(micros), max(micros), sorted(micros)[len(micros) // 2], self.rss_kb(1), len(recs)))
+        assert not left
+        self.realign()
+
     # ------------------------------------------------------------ b1, b2
     def b_setup(self, case):
         """T certified in L while node 5 is offline; Bitcoin replaces L's anchor; a dishonest quorum

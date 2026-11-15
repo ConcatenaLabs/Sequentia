@@ -247,6 +247,10 @@ The rule has two layers.
 - The branch leaves the active chain at its *fork point* F. a_L is L's anchor
   height.
 - The *window* W is 6 Bitcoin blocks (`-poslostwindow`, a consensus value).
+- A lost block anchored more than W above its fork point's anchor is not
+  carried: whatever forked that long ago left the window before it was lost.
+  A holder does not take it as evidence (`fork-too-deep`), does not protect
+  it, and a record of it is not valid.
 - A node *holds* L when it connected L and saw it leave, or when it was shown
   L (P2P `poslost`, or `submitlostblock`) and judged it lost and certified.
   It writes L to `lostblocks.dat` and syncs that file before the disconnect
@@ -279,19 +283,29 @@ against B's parent, with the lost block's own witnesses:
   mined there or something it conflicts with is.
 
 The holder refuses B (`bad-lost-replay`) unless B begins, right after its
-coinbase, with the due transactions in lost order. Exactly as many are
-required as fit in the block's weight less 8,000, the signature reservation,
-and (when B owes a record) 100,000 for the record. When they do not all fit,
-B carries nothing else.
+coinbase, with the due transactions in lost order: the longest run of them,
+from the first, that fits the consensus limits. The weight left for them is
+the block's maximum weight less 8,000 (the header and the coinbase), less the
+certificate's maximum size, less 100,000 when B owes a record, and less 640
+for each fee asset the run pays in (one coinbase output at the largest payee
+script). Their signature operations, counted as `ConnectBlock` counts them
+(legacy, P2SH and witness), stay within the block's 80,000 less 4,000. These
+reserves are fixed, so the run is a function of the chain and the lost blocks
+alone: a leader cannot shorten it by padding its own coinbase. When the due
+transactions do not all fit, B carries nothing else; the rest are due in the
+next block, and ordinary transactions follow in the first block whose run
+takes the last of them.
 
 It refuses B (`bad-txns-lost-respend`) if any other transaction in B spends an
 outpoint that a pending lost transaction spends. Which of two conflicting lost
 transactions stands is decided by lost order alone.
 
-It refuses B (`bad-lost-unrecorded`) when B is the first block on the branch
-anchored at or above the lowest stale anchor of the lost branch and does not
-record a failing transaction that is not yet recorded on B's chain and can be
-recorded.
+It refuses B (`bad-lost-unrecorded`) when B does not record the failing
+transactions it owes. A failing transaction can be recorded from the first
+block anchored at or above the lowest stale anchor of its lost branch; until
+it is recorded on B's chain, each such block owes the longest run of the
+failing transactions, in lost order, whose records fit the block's 25,000
+record bytes. The rest are owed by the next block.
 
 A later transaction is protected by the same refusal until it falls due, and
 needs no record: it becomes valid as it is, and the duty mines it then.
@@ -381,11 +395,30 @@ only coins still unspent: a spent coin cannot be spent again.
 #### Costs
 
 - **The fee market.** A proposer's fee list is its own choice everywhere
-  except here: a due lost transaction is mined whatever asset and rate it
-  pays. This is required for safety. If a proposer could skip a lock whose
-  fee asset it does not list, a seller whose own producer alone lists that
-  asset would get back the gap after W. No consensus rule judges a fee asset
-  or rate, so a carried transaction is never invalid for its fee.
+  except here. A due lost transaction is mined whatever asset and rate it
+  pays, so a producer carries transactions whose fee asset or rate it would
+  not accept itself. This is required for safety: if a producer could skip a
+  lock whose fee asset it does not list, a seller whose own producer alone
+  lists that asset would get back the gap after W. No consensus rule judges a
+  fee asset or rate, so a carried transaction is never invalid for its fee.
+  The carried transactions were accepted once by a producer and certified by
+  the committee; the open fee market governs their first inclusion only. A
+  producer claims the fee of a carried transaction as it claims any fee, in
+  whatever asset it is paid. A producer that must not hold an asset it does
+  not list sets `-poslostleaveunlisted`: its coinbase then leaves the fees of
+  carried transactions in unlisted assets unclaimed, the block stays valid
+  (consensus lets a coinbase claim less than the block's fees), and that fee
+  is claimed by nobody. What the producer gives is block space.
+- **What a producer can make the others carry.** A producer that fills its
+  own certified block with its own transactions, paying fees in an asset only
+  it lists, makes the others carry them once if that block is lost: the lost
+  block's space, at the next heights, and never more. Bitcoin going there,
+  back and there again mines each of them once, because a carried transaction
+  already in the chain is spent there and is not due again. A producer that
+  leads a share s of the heights leads about s of the Sequentia blocks one
+  stale Bitcoin block takes with it, so it can make the others carry about
+  s × 10 blocks of its own transactions per stale Bitcoin block, at 60-second
+  blocks. It cannot cause a stale Bitcoin block without mining Bitcoin.
 - **Honest conflicts wait.** A holder's own replacement of a pending lost
   transaction (a fee bump, a refund) waits until it is due, or for W.
 - **Throughput while replaying.** The lost transactions take back the space
@@ -397,6 +430,22 @@ only coins still unspent: a spent coin cannot be spent again.
   protected only by the holders' refusal until the lapse.
 - **A deeper fork point.** A lost branch whose transactions' window has
   passed is not carried.
+
+#### A member that binds what it signed
+
+`-poslostbindsigned` (off by default) is signing behaviour, never part of
+what the rule guarantees. A member running it holds every block it signs on
+disk (`lostsigned.dat`) before its signature leaves. When such a block's
+anchor goes stale and the block never certified, the member refuses, until
+Bitcoin's height passes its anchor plus W, a candidate that spends an
+outpoint one of its transactions spends (`bad-txns-signed-respend`), and its
+mempool refuses such a spend. It owes no replay and no record, and it relays
+nothing. It narrows the case of two blocks certified at one height on two
+live Bitcoin branches: honest members that signed one side do not sign a
+conflicting other. Its cost is a pause: when the members that signed the
+lost candidate are at least as many as the committee less the quorum, a
+block that carries a conflicting transaction cannot be certified, and the
+height waits for a leader whose block does not carry it.
 
 #### For a buyer's wallet
 
