@@ -179,11 +179,15 @@ move.
 
 A proposal in the gossip committee whose anchor is not verifiable is left aside
 in the same way: no member signs it until this node's view of Bitcoin moves.
-When that leaves no proposal at a height that a member can back, as after a
-Bitcoin reorganization that replaced the anchor of every proposal there, the
-collection still runs out on its schedule, timed from the earliest proposal,
-and restarts. The members then propose again on Bitcoin's new branch within a
-few seconds, rather than at Bitcoin's next block.
+Leaving a proposal aside decides only what a member signs, never when its
+rounds run: the collection stays timed from round 0's stamp, counting the
+proposals left aside (see "Rounds and collections" in
+[`04-proof-of-stake.md`](04-proof-of-stake.md)). So members whose views of
+Bitcoin differ for a while keep one schedule, and when no proposal at a height
+can be backed, as after a Bitcoin reorganization that replaced the anchor of
+every proposal there, the collection still runs out on time and restarts. The
+members then propose again on Bitcoin's new branch within a few seconds, rather
+than at Bitcoin's next block.
 
 ### The reorg-following watcher
 

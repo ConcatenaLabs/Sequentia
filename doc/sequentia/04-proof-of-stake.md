@@ -1144,6 +1144,47 @@ Three paths lead to a live network:
   design is in
   [`proposals/autonomous-committee.md`](proposals/autonomous-committee.md).
 
+### Rounds and collections
+
+The gossip committee works a height in collections. Proposals are collected for
+a window, then the collection runs one round per seat: in round r every member
+backs the (r+1)-th proposal in the election order (freshest anchor, then lowest
+election score), starting over once each has had a round. If no round
+certifies, the collection runs out, every member proposes afresh at the next
+whole second, and a new collection begins. The window and round length are
+local timings (`-poswindowms`, `-posroundms`; by default they grow with the
+committee size), not consensus rules.
+
+The rounds are timed from round 0's stamp, which every member reads off the
+same gossiped block, so the members change rounds together and run out
+together. Three things keep that origin common:
+
+- **Proposals left aside count.** A member leaves aside a proposal whose
+  anchor it cannot verify on its view of Bitcoin (§7) and signs the next one,
+  but it keeps timing the collection from round 0's stamp. Views of Bitcoin
+  differ for a while around a reorganization, and a member timing from a
+  different stamp would take a peer's timely re-proposal for a second block
+  from the same leader. A proposal no member can back costs nothing but the
+  check that finds it unverifiable: its round goes to the next proposal.
+- **An excluded leader leaves the schedule.** A leader that proposed two blocks
+  at the height (the evidence is relayed to every member) or an invalid block
+  (invalid everywhere) is dropped, and the schedule moves to the next proposal
+  on every member alike.
+- **A stamp is bounded both ways.** A member backs no proposal stamped before
+  the earliest time consensus allows (its slot, the median time past, the
+  minimum spacing of §4b): such a stamp would start the schedule in the past
+  and run every collection out before anyone signed. A stamp ahead of real
+  time counts only up to a few seconds after the member received the
+  proposal.
+
+A second block from a leader that already has one in the collection is
+equivocation, unless it arrives once the collection has run out (within half a
+round, for clock skew): then it starts the next collection. Tested in
+`feature_pos_gossip_restart.py`, `feature_pos_gossip_anchor_reorg.py` (every
+proposal left aside), `feature_pos_gossip_anchor_split.py` (members with
+different views of Bitcoin, at the harness's and the testnet's round length)
+and `feature_pos_gossip_backdated_stamp.py`.
+
 ### The share-lock
 
 In the gossip committee a member signs one block per height for as long as that
