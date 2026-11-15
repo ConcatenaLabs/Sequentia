@@ -21,6 +21,7 @@
 // view of Bitcoin changes.
 
 #include <primitives/block.h>
+#include <primitives/transaction.h>
 #include <serialize.h>
 #include <uint256.h>
 
@@ -32,6 +33,8 @@
 
 class BlockValidationState;
 class CBlockIndex;
+class CCoinsViewCache;
+class CTxOut;
 class ChainstateManager;
 class CTransaction;
 class CTxMemPool;
@@ -53,6 +56,51 @@ struct LostEvidenceMsg {
     SERIALIZE_METHODS(LostEvidenceMsg, obj) { READWRITE(obj.block, obj.btc_headers); }
 };
 
+//! A record of lost transactions, carried in a coinbase output
+//! `OP_RETURN 'SQLR' <record>` (doc 03, "Transactions of a lost block").
+struct LostRecordEntry {
+    uint32_t k{0};                    //!< index into `lost`
+    uint32_t pos{0};                  //!< position in that block
+    std::vector<uint256> branch;      //!< merkle branch to its merkle root
+    std::vector<unsigned char> tx;    //!< the transaction without its witness
+    SERIALIZE_METHODS(LostRecordEntry, obj) { READWRITE(obj.k, obj.pos, obj.branch, obj.tx); }
+};
+struct LostRecord {
+    uint8_t version{1};
+    //! Bitcoin headers (80 bytes each), parents first, that make a lost
+    //! block's anchor known to a daemon that never saw it.
+    std::vector<std::vector<unsigned char>> btc_headers;
+    //! The lost branch from the fork point's child, each header with its
+    //! certificate.
+    std::vector<std::vector<unsigned char>> lost;
+    std::vector<LostRecordEntry> entries;
+    SERIALIZE_METHODS(LostRecord, obj) { READWRITE(obj.version, obj.btc_headers, obj.lost, obj.entries); }
+};
+//! The most record bytes one block may carry.
+static constexpr size_t LOST_RECORD_MAX_BYTES = 25000;
+
+//! The records a block's coinbase carries (malformed ones as nullopt).
+std::vector<std::optional<LostRecord>> LostParseRecords(const CBlock& block);
+
+//! Chain-alone validity, for every node: the records `block` carries, and
+//! the bindings of the records in its chain (a later block anchored at most
+//! W above a recorded transaction's lost block spends that transaction's
+//! inputs only through it). cs_main held; `pindexPrev` is the active tip.
+bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool just_check, BlockValidationState& state);
+
+//! What a producer holding lost blocks puts first: the due lost transactions
+//! (a prefix of them when they do not all fit, and then nothing else), and the
+//! record outputs for the coinbase. cs_main held.
+struct LostTemplateParts {
+    std::vector<CTransactionRef> prefix;
+    bool cut{false};
+    std::vector<CTxOut> records;
+};
+LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, CCoinsViewCache& view);
+
+//! Whether a refusal reason is one of the holders' duty (soft, re-judged).
+bool LostIsRefusal(const std::string& reason);
+
 //! Whether this node enforces the rule: a PoS chain anchored to Bitcoin, the
 //! anchor validated, and not turned off with the debug-only -posdebugignorelost.
 bool LostActive();
@@ -70,7 +118,8 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
 //! evidence is not applied during initial block download, nor to a block that
 //! `certified_descendant` says has a certified descendant. cs_main held.
 bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
-                    const std::function<bool()>& certified_descendant, BlockValidationState& state);
+                    const std::function<bool()>& certified_descendant, CCoinsViewCache& view,
+                    BlockValidationState& state);
 
 //! A lost transaction `tx` conflicts with, for the mempool, while the next
 //! block (anchored at least at `tip_anchor_height`) is still bound.

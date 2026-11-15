@@ -169,6 +169,10 @@ private:
     //! Outpoints the privately submitted supervision records spend, which no
     //! mempool transaction in the same block may spend again.
     std::set<COutPoint> m_submission_spent;
+    //! SEQUENTIA lost blocks (pos_lost.h): record outputs for the coinbase, and
+    //! whether due lost transactions filled the block.
+    std::vector<CTxOut> m_lost_records;
+    bool m_lost_cut{false};
     //! Build a coinbase-only block: the fallback when a full template fails
     //! TestBlockValidity (CreateNewBlock).
     bool m_coinbase_only{false};
@@ -216,6 +220,7 @@ private:
      *  (src/supervision_submit.h). Before the mempool, so a freeze cannot lose
      *  its place to fee pressure and hand its target another block to escape in. */
     void addSupervisionSubmissions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void addLostReplay(const CBlockIndex* pindexPrev) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void addPackageTxs(int& nPackagesSelected, int& nDescendantsUpdated, std::chrono::seconds required_wait = std::chrono::seconds(0)) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
 
     // helper functions for addPackageTxs()

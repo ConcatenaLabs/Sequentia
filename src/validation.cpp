@@ -2944,6 +2944,98 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
     return CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/false, /*cacheFullScriptStore=*/false, txdata);
 }
 
+std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector<CTransactionRef>& txs,
+                                                               CCoinsViewCache& base, const CBlockIndex* prev,
+                                                               const Consensus::Params& params)
+{
+    AssertLockHeld(cs_main);
+    std::vector<std::pair<LostTxCat, std::string>> out;
+    out.reserve(txs.size());
+    CCoinsViewCache view(&base);
+    // The block being judged, as far as these rules read it: its height, its
+    // parent (median time past), and the parent's anchor as a floor for its own.
+    CBlockIndex next;
+    next.pprev = const_cast<CBlockIndex*>(prev);
+    next.nHeight = prev->nHeight + 1;
+    next.m_anchor_height = prev->m_anchor_height;
+    next.m_anchor_hash = prev->m_anchor_hash;
+    const int height = next.nHeight;
+    const int64_t cutoff = prev->GetMedianTimePast();
+    int lock_flags = 0;
+    if (DeploymentActiveAt(next, params, Consensus::DEPLOYMENT_CSV)) lock_flags |= LOCKTIME_VERIFY_SEQUENCE;
+    const unsigned int flags = GetBlockScriptFlags(&next, params);
+    const auto& fedpegscripts = GetValidFedpegScripts(prev, params, true);
+    PosRecordState records;
+    std::set<uint256> later, fails;
+    for (const CTransactionRef& ref : txs) {
+        const CTransaction& tx = *ref;
+        const auto put = [&](LostTxCat c, const std::string& why) {
+            if (c == LostTxCat::LATER) later.insert(tx.GetHash());
+            if (c == LostTxCat::FAILS) fails.insert(tx.GetHash());
+            out.emplace_back(c, why);
+        };
+        if (tx.IsCoinBase()) { put(LostTxCat::GONE, "coinbase"); continue; }
+        // Inputs: present, or created by a lost transaction not yet due, or gone.
+        std::optional<LostTxCat> missing;
+        bool pegin = false;
+        for (const CTxIn& in : tx.vin) {
+            if (in.m_is_pegin) { pegin = true; continue; }
+            if (view.HaveCoin(in.prevout)) continue;
+            if (fails.count(in.prevout.hash)) { missing = LostTxCat::FAILS; break; }
+            if (later.count(in.prevout.hash)) { missing = LostTxCat::LATER; continue; }
+            missing = LostTxCat::GONE;
+            break;
+        }
+        if (missing) { put(*missing, *missing == LostTxCat::GONE ? "input spent on this chain" : "child of a lost transaction that is not due"); continue; }
+        if (pegin) { put(LostTxCat::FAILS, "peg-in"); continue; }
+        if (!IsFinalTx(tx, height, cutoff)) { put(LostTxCat::LATER, "non-final (nLockTime)"); continue; }
+        TxValidationState tx_state;
+        CAmountMap fee_map;
+        std::set<std::pair<uint256, COutPoint>> pegins_spent;
+        if (!Consensus::CheckTxInputs(tx, tx_state, view, height, fee_map, pegins_spent, nullptr, false, true, fedpegscripts)) {
+            const std::string r = tx_state.GetRejectReason();
+            put(r.find("premature") != std::string::npos ? LostTxCat::LATER : LostTxCat::FAILS, r);
+            continue;
+        }
+        std::vector<int> prevheights(tx.vin.size());
+        std::vector<Coin> spent;
+        for (size_t j = 0; j < tx.vin.size(); ++j) {
+            const Coin& coin = view.AccessCoin(tx.vin[j].prevout);
+            prevheights[j] = coin.nHeight;
+            spent.push_back(coin);
+        }
+        if (!SequenceLocks(tx, lock_flags, prevheights, next)) { put(LostTxCat::LATER, "non-final (relative lock)"); continue; }
+        if (g_con_pos && params.PosUnbondingActiveAt(height)) {
+            // The block's own anchor is at least the parent's: judged at the
+            // parent's, a pass holds for the block, a failure may clear later.
+            const bool by_anchor = g_con_bitcoin_anchor;
+            const auto anchor_at = [prev, by_anchor](int h) -> int {
+                const CBlockIndex* a = (h >= 0 && h <= prev->nHeight) ? prev->GetAncestor(h) : nullptr;
+                if (!a) return -1;
+                return by_anchor ? (int)a->m_anchor_height : h;
+            };
+            std::string reason;
+            if (!CheckPosUnbondingTx(tx, view, by_anchor ? (int)prev->m_anchor_height : height, anchor_at,
+                                     params.pos_unbond_anchor_depth, reason)) {
+                put(LostTxCat::LATER, reason);
+                continue;
+            }
+        }
+        {
+            PosRecordState next_records = records;
+            std::string reason, debug;
+            if (!PosCheckTxRecords(tx, spent, height, params, next_records, reason, debug)) { put(LostTxCat::FAILS, reason); continue; }
+            records = std::move(next_records);
+        }
+        PrecomputedTransactionData txdata(params.hashGenesisBlock);
+        if (!CheckInputScripts(tx, tx_state, view, flags, false, false, txdata)) { put(LostTxCat::FAILS, tx_state.GetRejectReason()); continue; }
+        CTxUndo undo;
+        UpdateCoins(tx, view, undo, height);
+        put(LostTxCat::DUE, "");
+    }
+    return out;
+}
+
 bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,
                                   const CBlockIndex* tip, const Consensus::Params& params)
 {
@@ -3491,7 +3583,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         }
         return false;
     };
-    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, IsInitialBlockDownload(), lost_certified_descendant, state)) {
+    if (check_pos_rules && !LostCheckRecords(block, pindex->pprev, fJustCheck, state)) {
+        return error("%s: LostCheckRecords: %s", __func__, state.ToString());
+    }
+    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, IsInitialBlockDownload(), lost_certified_descendant, view, state)) {
         return error("%s: LostCheckBlock: %s", __func__, state.ToString());
     }
 
@@ -5192,7 +5287,7 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
             // candidate, and the lost-block pass revives it when the evidence
             // or Bitcoin's view no longer binds it. No peer is punished
             // (BLOCK_RECENT_CONSENSUS_CHANGE).
-            if (state.GetRejectReason() == "bad-txns-lost-respend") {
+            if (LostIsRefusal(state.GetRejectReason())) {
                 InvalidBlockFound(pindexNew, state);
                 pindexNew->nStatus |= BLOCK_FAILED_LOST;
                 LostNoteRefused(pindexNew);

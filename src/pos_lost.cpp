@@ -7,7 +7,12 @@
 #include <anchor.h>
 #include <chain.h>
 #include <chainparams.h>
+#include <consensus/merkle.h>
+#include <consensus/tx_verify.h>
 #include <consensus/validation.h>
+#include <hash.h>
+#include <policy/policy.h>
+#include <script/script.h>
 #include <logging.h>
 #include <mainchainrpc.h>
 #include <node/blockstorage.h>
@@ -61,6 +66,9 @@ struct LostBlk {
     bool certified{false};
     //! This node connected it (and judged its certificate then).
     bool own{false};
+    //! Which loss this block belongs to: blocks disconnected together share it,
+    //! and an earlier loss is carried before a later one.
+    uint64_t epoch{0};
     std::vector<std::vector<unsigned char>> btc_headers;
     // Computed by each maintenance pass.
     AnchorState anchor_state{AnchorState::UNKNOWN};
@@ -93,6 +101,10 @@ bool g_ignore{false};
 uint32_t g_window{DEFAULT_POS_LOST_WINDOW};
 uint64_t g_last_scan_gen{0};
 bool g_refused_scanned{false};
+uint64_t g_epoch GUARDED_BY(g_lost_mutex){0};
+uint256 g_last_noted_prev GUARDED_BY(g_lost_mutex);
+//! Bitcoin's best height, as the last maintenance pass read it.
+std::atomic<int> g_btc_h{-1};
 int64_t g_last_replay{0};
 
 fs::path LostPath() { return gArgs.GetDataDirNet() / "lostblocks.dat"; }
@@ -186,13 +198,14 @@ void WriteFile() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
     if (!f) return;
     CAutoFile file(f, SER_DISK, PROTOCOL_VERSION);
     try {
-        file << (uint32_t)1 << (uint64_t)g_blocks.size();
+        file << (uint32_t)3 << (uint64_t)g_blocks.size() << g_epoch;
         for (const auto& [h, b] : g_blocks) {
-            file << *b.block << b.height << b.certified << b.own << b.btc_headers;
+            file << *b.block << b.height << b.certified << b.own << b.epoch << b.btc_headers
+                 << b.prot << b.fork_hash << b.fork_height << (uint8_t)b.anchor_state;
         }
         if (!FileCommit(file.Get())) return;
         file.fclose();
-        RenameOver(tmp, LostPath());
+        (void)RenameOver(tmp, LostPath());
         g_dirty_file = false;
     } catch (const std::exception& e) {
         LogPrintf("Lost blocks: cannot write %s: %s\n", fs::PathToString(LostPath()), e.what());
@@ -210,9 +223,14 @@ bool Binds(const LostSpend& s, uint32_t anchor_h, const CBlockIndex* prev)
 std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockIndex* prev) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
 {
     if (g_spends.empty()) return std::nullopt;
+    std::set<uint256> lost_txids;
+    for (const auto& [o, v] : g_spends) for (const auto& sp : v) lost_txids.insert(sp.txid);
     for (size_t i = 1; i < block.vtx.size(); ++i) {
         const CTransaction& tx = *block.vtx[i];
         const uint256 txid = tx.GetHash();
+        // A lost transaction is carried, not judged as a respend: which of two
+        // conflicting lost transactions stands is the replay's order.
+        if (lost_txids.count(txid)) continue;
         for (const CTxIn& in : tx.vin) {
             if (in.m_is_pegin) continue;
             auto it = g_spends.find(in.prevout);
@@ -250,19 +268,43 @@ void LostInit()
         uint32_t version;
         uint64_t n;
         file >> version >> n;
+        if (version != 3) throw std::runtime_error("unknown version");
+        file >> g_epoch;
         for (uint64_t i = 0; i < n && i < POS_LOST_MAX_BLOCKS; ++i) {
             auto block = std::make_shared<CBlock>();
             int height;
             bool certified, own;
+            uint64_t epoch;
             std::vector<std::vector<unsigned char>> headers;
-            file >> *block >> height >> certified >> own >> headers;
+            bool prot;
+            uint256 fork_hash;
+            int fork_height;
+            uint8_t anchor_state;
+            file >> *block >> height >> certified >> own >> epoch >> headers >> prot >> fork_hash >> fork_height >> anchor_state;
             LostBlk b = MakeBlk(block, height);
+            b.prot = prot;
+            b.fork_hash = fork_hash;
+            b.fork_height = fork_height;
+            b.anchor_state = (AnchorState)std::min<uint8_t>(anchor_state, 2);
             b.certified = certified;
             b.own = own;
+            b.epoch = epoch;
             b.btc_headers = std::move(headers);
             g_blocks.emplace(b.hash, std::move(b));
         }
-        LogPrintf("Lost blocks: read %u from %s\n", (unsigned)g_blocks.size(), fs::PathToString(LostPath()));
+        // The duty holds from the first block this node judges after a
+        // restart, before any maintenance pass: the bound spends as written.
+        for (const auto& [h, b] : g_blocks) {
+            if (!b.prot) continue;
+            for (size_t i = 1; i < b.block->vtx.size(); ++i) {
+                const CTransaction& tx = *b.block->vtx[i];
+                for (const CTxIn& in : tx.vin) {
+                    if (in.m_is_pegin) continue;
+                    g_spends[in.prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height});
+                }
+            }
+        }
+        LogPrintf("Lost blocks: read %u from %s (%u bound outpoints)\n", (unsigned)g_blocks.size(), fs::PathToString(LostPath()), (unsigned)g_spends.size());
     } catch (const std::exception& e) {
         LogPrintf("Lost blocks: cannot read %s: %s\n", fs::PathToString(LostPath()), e.what());
     }
@@ -286,26 +328,572 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
     LostBlk b = MakeBlk(block, pindex->nHeight);
     b.certified = pindex->PosCarriesQuorum();
     b.own = true;
+    // DisconnectTip goes down from the tip: a block whose child was the last
+    // one noted belongs to the same loss.
+    if (g_last_noted_prev != h) ++g_epoch;
+    g_last_noted_prev = b.prev;
+    b.epoch = g_epoch;
     g_blocks.emplace(h, std::move(b));
     WriteFile();
 }
 
-bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
-                    const std::function<bool()>& certified_descendant, BlockValidationState& state)
+namespace {
+
+const std::vector<unsigned char> LOST_RECORD_TAG{'S', 'Q', 'L', 'R'};
+
+std::vector<uint256> MerkleBranch(std::vector<uint256> level, uint32_t pos)
 {
-    if (!LostActive() || !pindexPrev || ibd) return true;
-    LOCK(g_lost_mutex);
-    if (auto why = ViolationLocked(block, pindexPrev)) {
-        if (certified_descendant()) {
-            LogPrintf("Lost blocks: block %s at height %d breaks the rule but has a certified descendant; the evidence does not bear on it: %s\n",
-                      block.GetHash().ToString(), pindexPrev->nHeight + 1, *why);
-            return true;
+    std::vector<uint256> branch;
+    while (level.size() > 1) {
+        if (level.size() & 1) level.push_back(level.back());
+        branch.push_back(level[pos ^ 1]);
+        std::vector<uint256> up;
+        for (size_t i = 0; i < level.size(); i += 2) up.push_back(Hash(level[i], level[i + 1]));
+        level = std::move(up);
+        pos >>= 1;
+    }
+    return branch;
+}
+
+uint256 MerkleFromBranch(uint256 leaf, const std::vector<uint256>& branch, uint32_t pos)
+{
+    for (const uint256& b : branch) {
+        leaf = (pos & 1) ? Hash(b, leaf) : Hash(leaf, b);
+        pos >>= 1;
+    }
+    return leaf;
+}
+
+std::vector<unsigned char> SerHeader(const CBlockHeader& h)
+{
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << h;
+    const auto sp = MakeUCharSpan(ss);
+    return {sp.begin(), sp.end()};
+}
+
+std::optional<CBlockHeader> DeserHeader(const std::vector<unsigned char>& b)
+{
+    try {
+        CDataStream ss(b, SER_NETWORK, PROTOCOL_VERSION);
+        CBlockHeader h;
+        ss >> h;
+        if (!ss.empty()) return std::nullopt;
+        return h;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<unsigned char> SerTxNoWitness(const CTransaction& tx)
+{
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
+    ss << tx;
+    const auto sp = MakeUCharSpan(ss);
+    return {sp.begin(), sp.end()};
+}
+
+std::optional<CTransactionRef> DeserTxNoWitness(const std::vector<unsigned char>& b)
+{
+    try {
+        CDataStream ss(b, SER_NETWORK, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
+        CMutableTransaction mtx;
+        ss >> mtx;
+        if (!ss.empty()) return std::nullopt;
+        return MakeTransactionRef(std::move(mtx));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+CTxOut RecordOutput(const LostRecord& r)
+{
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << r;
+    const auto sp = MakeUCharSpan(ss);
+    std::vector<unsigned char> bytes(sp.begin(), sp.end());
+    return CTxOut(::policyAsset, 0, CScript() << OP_RETURN << LOST_RECORD_TAG << bytes);
+}
+
+//! One input a record binds: until a block anchored above `until`, only `txid`
+//! may spend `o`.
+struct Binding {
+    COutPoint o;
+    uint256 txid;
+    uint32_t until{0};
+};
+
+//! Bindings of the records in blocks of the active chain, by block hash.
+std::map<uint256, std::vector<Binding>> g_recorded GUARDED_BY(::cs_main);
+bool g_recorded_loaded GUARDED_BY(::cs_main){false};
+
+//! The bindings a parsed record makes, without judging it (blocks already accepted).
+std::vector<Binding> BindingsOf(const LostRecord& r)
+{
+    std::vector<Binding> out;
+    for (const LostRecordEntry& e : r.entries) {
+        if (e.k >= r.lost.size()) continue;
+        auto h = DeserHeader(r.lost[e.k]);
+        auto tx = DeserTxNoWitness(e.tx);
+        if (!h || !tx) continue;
+        for (const CTxIn& in : (*tx)->vin) {
+            if (in.m_is_pegin) continue;
+            out.push_back(Binding{in.prevout, (*tx)->GetHash(), h->m_anchor_height + g_window});
         }
-        LogPrintf("Lost blocks: refusing block %s at height %d: %s\n", block.GetHash().ToString(),
-                  pindexPrev->nHeight + 1, *why);
-        return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-txns-lost-respend", *why);
+    }
+    return out;
+}
+
+void LoadRecorded(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (g_recorded_loaded) return;
+    g_recorded_loaded = true;
+    int n = 0;
+    for (const CBlockIndex* p = tip; p && p->m_anchor_height + 3 * g_window >= tip->m_anchor_height && n < 5000; p = p->pprev, ++n) {
+        CBlock blk;
+        if (!ReadBlockFromDisk(blk, p, Params().GetConsensus())) continue;
+        std::vector<Binding> b;
+        for (const auto& r : LostParseRecords(blk)) {
+            if (!r) continue;
+            auto add = BindingsOf(*r);
+            b.insert(b.end(), add.begin(), add.end());
+        }
+        if (!b.empty()) g_recorded[p->GetBlockHash()] = std::move(b);
+    }
+}
+
+//! Every binding of `prev`'s chain still in force for a block anchored at `anchor_h`.
+std::map<COutPoint, uint256> ChainBindings(const CBlockIndex* prev, uint32_t anchor_h) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    std::map<COutPoint, uint256> out;
+    if (g_recorded.empty()) return out;
+    int n = 0;
+    for (const CBlockIndex* p = prev; p && p->m_anchor_height + 3 * g_window >= anchor_h && n < 5000; p = p->pprev, ++n) {
+        auto it = g_recorded.find(p->GetBlockHash());
+        if (it == g_recorded.end()) continue;
+        for (const Binding& b : it->second) {
+            if (anchor_h <= b.until) out.emplace(b.o, b.txid);
+        }
+    }
+    return out;
+}
+
+bool DaemonHeaderKnown(const uint256& hash, uint32_t height, bool& answered)
+{
+    answered = false;
+    try {
+        UniValue p(UniValue::VARR);
+        p.push_back(hash.GetHex());
+        const UniValue reply = CallMainChainRPC("getblockheader", p);
+        answered = true;
+        if (!find_value(reply, "error").isNull()) return false;
+        const UniValue r = find_value(reply, "result");
+        if (!r.isObject()) return false;
+        const UniValue h = find_value(r.get_obj(), "height");
+        return h.isNum() && h.get_int64() == (int64_t)height;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+std::optional<uint256> DaemonBestHashAt(uint32_t height)
+{
+    try {
+        UniValue p(UniValue::VARR);
+        p.push_back((int)height);
+        const UniValue reply = CallMainChainRPC("getblockhash", p);
+        if (!find_value(reply, "error").isNull()) return std::nullopt;
+        const UniValue r = find_value(reply, "result");
+        if (!r.isStr()) return std::nullopt;
+        return uint256S(r.get_str());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+//! A lost header's parent as the certificate check reads it (height and anchor).
+struct ParentView {
+    CBlockIndex idx;
+};
+
+//! Judge one record for a block anchored at `anchor_h` on `prev`. Empty when
+//! valid; `soft` when the Bitcoin daemon could not answer.
+std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const CBlockIndex* prev, bool& soft,
+                        std::vector<Binding>& bindings) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    soft = false;
+    if (r.version != 1) return "version";
+    if (r.lost.empty() || r.entries.empty()) return "empty";
+    if (r.btc_headers.size() > 2 * g_window + 1) return "too-many-bitcoin-headers";
+    std::vector<CBlockHeader> lost;
+    for (const auto& b : r.lost) {
+        auto h = DeserHeader(b);
+        if (!h) return "lost-header-decode";
+        lost.push_back(*h);
+    }
+    // The branch leaves this chain at F and links header to header.
+    const int f_height = (int)lost[0].block_height - 1;
+    if (f_height < 0 || f_height > prev->nHeight) return "fork-height";
+    const CBlockIndex* fork = prev->GetAncestor(f_height);
+    if (!fork || fork->GetBlockHash() != lost[0].hashPrevBlock) return "fork-not-in-chain";
+    uint32_t last_anchor_h = fork->m_anchor_height;
+    uint256 last_anchor = fork->m_anchor_hash;
+    for (size_t i = 0; i < lost.size(); ++i) {
+        if (i > 0 && lost[i].hashPrevBlock != lost[i - 1].GetHash()) return "lost-not-linked";
+        if ((int)lost[i].block_height != f_height + 1 + (int)i) return "lost-height";
+        if (lost[i].m_anchor_height < last_anchor_h) return "lost-anchor-not-monotonic";
+        if (lost[i].m_anchor_height == last_anchor_h && lost[i].m_anchor_hash != last_anchor) return "lost-anchor-swapped";
+        last_anchor_h = lost[i].m_anchor_height;
+        last_anchor = lost[i].m_anchor_hash;
+    }
+    // Bitcoin: the carried headers become known to the daemon (they cost real
+    // work); a lost header's anchor is off this block's anchor chain when the
+    // daemon knows it and the best chain has another block at its height.
+    SubmitHeaders(r.btc_headers);
+    std::vector<int> off(lost.size(), -1); // -1 unknown, 0 on the chain, 1 off it
+    const auto judge_off = [&](size_t i) -> int {
+        if (off[i] >= 0) return off[i];
+        const uint32_t ah = lost[i].m_anchor_height;
+        if (ah > anchor_h) return off[i] = 0; // above this block's anchor: not shown off its chain
+        bool answered = false;
+        if (!DaemonHeaderKnown(lost[i].m_anchor_hash, ah, answered)) {
+            if (!answered) soft = true;
+            return off[i] = 0;
+        }
+        auto best = DaemonBestHashAt(ah);
+        if (!best) { soft = true; return off[i] = 0; }
+        return off[i] = (*best != lost[i].m_anchor_hash) ? 1 : 0;
+    };
+    // The certificate of each block an entry names, under the registry at
+    // this block's parent (exact when nothing changed the stake since the
+    // lost block's parent; doc 03 states the limit).
+    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    std::map<uint32_t, bool> certified;
+    const auto judge_cert = [&](uint32_t k) -> std::string {
+        auto it = certified.find(k);
+        if (it != certified.end()) return it->second ? "" : "certificate";
+        CBlockIndex parent_view;
+        const CBlockIndex* parent = fork;
+        if (k > 0) {
+            parent_view.nHeight = f_height + (int)k;
+            parent_view.m_anchor_height = lost[k - 1].m_anchor_height;
+            parent_view.m_anchor_hash = lost[k - 1].m_anchor_hash;
+            parent = &parent_view;
+        }
+        std::string reason;
+        const int signers = PosVerifyBitfieldCertificate(lost[k], parent, reg, reason);
+        const bool ok = signers >= 0 && signers >= PosSlotQuorumAt(reg, f_height + 1 + (int)k);
+        certified[k] = ok;
+        return ok ? "" : "certificate" + (reason.empty() ? std::string() : " " + reason);
+    };
+    for (const LostRecordEntry& e : r.entries) {
+        if (e.k >= lost.size()) return "entry-block";
+        if (e.pos == 0) return "entry-coinbase";
+        auto tx = DeserTxNoWitness(e.tx);
+        if (!tx) return "entry-tx-decode";
+        const uint256 txid = (*tx)->GetHash();
+        if (MerkleFromBranch(txid, e.branch, e.pos) != lost[e.k].hashMerkleRoot) return "entry-merkle";
+        if (anchor_h > lost[e.k].m_anchor_height + g_window) return "past-window";
+        bool any_off = false;
+        for (size_t i = 0; i <= e.k && !any_off; ++i) any_off = judge_off(i) == 1;
+        if (!any_off) return soft ? "bitcoin-unanswered" : "not-lost";
+        const std::string c = judge_cert(e.k);
+        if (!c.empty()) return c;
+        for (const CTxIn& in : (*tx)->vin) {
+            if (in.m_is_pegin) continue;
+            bindings.push_back(Binding{in.prevout, txid, lost[e.k].m_anchor_height + g_window});
+        }
+    }
+    soft = false;
+    return "";
+}
+
+//! The holders' plan for a block on `prev` anchored at `anchor_h`.
+struct Plan {
+    std::vector<CTransactionRef> prefix;
+    bool cut{false};
+    std::set<uint256> to_record;
+    std::vector<LostRecord> records;
+    std::string summary;
+};
+
+Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& view, bool build)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_lost_mutex)
+{
+    Plan plan;
+    // The pending lost transactions of every lost branch of this chain, by
+    // loss, then height, then position.
+    std::vector<const LostBlk*> blocks;
+    for (const auto& [h, b] : g_blocks) {
+        if (!b.prot || b.fork_height < 0) continue;
+        const CBlockIndex* f = prev->GetAncestor(b.fork_height);
+        if (!f || f->GetBlockHash() != b.fork_hash) continue;
+        if (anchor_h > b.anchor_h + g_window) continue;
+        blocks.push_back(&b);
+    }
+    if (blocks.empty()) return plan;
+    std::sort(blocks.begin(), blocks.end(), [](const LostBlk* a, const LostBlk* b) {
+        return std::tie(a->epoch, a->height) < std::tie(b->epoch, b->height);
+    });
+    std::vector<CTransactionRef> txs;
+    std::vector<std::pair<const LostBlk*, uint32_t>> where;
+    for (const LostBlk* b : blocks) {
+        for (size_t i = 1; i < b->block->vtx.size(); ++i) {
+            txs.push_back(b->block->vtx[i]);
+            where.emplace_back(b, (uint32_t)i);
+        }
+    }
+    const Consensus::Params& consensus = Params().GetConsensus();
+    const auto classes = LostClassifyTxs(txs, view, prev, consensus);
+    const auto bound = ChainBindings(prev, anchor_h);
+    std::set<uint256> bound_txids;
+    for (const auto& [o, t] : bound) bound_txids.insert(t);
+    // What to record: a transaction that fails as it is, not yet recorded on
+    // this chain, whose block this record can show lost and certified.
+    std::map<uint256, std::vector<std::pair<const LostBlk*, uint32_t>>> by_fork;
+    int n_due = 0, n_later = 0, n_fails = 0, n_gone = 0;
+    for (size_t i = 0; i < txs.size(); ++i) {
+        switch (classes[i].first) {
+        case LostTxCat::DUE: ++n_due; break;
+        case LostTxCat::LATER: ++n_later; break;
+        case LostTxCat::GONE: ++n_gone; break;
+        case LostTxCat::FAILS: {
+            ++n_fails;
+            const uint256 txid = txs[i]->GetHash();
+            if (bound_txids.count(txid)) break;
+            // The branch from the fork point to this block, and a block of it
+            // whose anchor is stale and at or below this block's anchor.
+            const LostBlk* b = where[i].first;
+            std::vector<const LostBlk*> path;
+            for (const LostBlk* w = b; w;) {
+                path.push_back(w);
+                auto p = g_blocks.find(w->prev);
+                w = (p != g_blocks.end() && w->height > b->fork_height + 1) ? &p->second : nullptr;
+            }
+            std::reverse(path.begin(), path.end());
+            if (path.empty() || path.front()->prev != b->fork_hash) break;
+            bool shown = false;
+            for (const LostBlk* w : path) shown |= (w->anchor_state == AnchorState::STALE && w->anchor_h <= anchor_h && !w->btc_headers.empty());
+            if (!shown) break;
+            // Certified under the registry this block is judged with.
+            CBlockIndex parent_view;
+            const CBlockIndex* parent = prev->GetAncestor(b->height - 1);
+            if (b->height - 1 > b->fork_height) {
+                const LostBlk* pb = path.size() >= 2 ? path[path.size() - 2] : nullptr;
+                if (!pb) break;
+                parent_view.nHeight = b->height - 1;
+                parent_view.m_anchor_height = pb->anchor_h;
+                parent_view.m_anchor_hash = pb->anchor;
+                parent = &parent_view;
+            }
+            std::string reason;
+            const StakeRegistry& reg = StakeRegistry::GetInstance();
+            const int signers = parent ? PosVerifyBitfieldCertificate(*b->block, parent, reg, reason) : -1;
+            if (signers < 0 || signers < PosSlotQuorumAt(reg, b->height)) {
+                LogPrint(BCLog::VALIDATION, "Lost blocks: %s cannot be recorded: the certificate of %s does not hold under this registry (%s)\n",
+                         txid.ToString(), b->hash.ToString(), reason);
+                break;
+            }
+            plan.to_record.insert(txid);
+            by_fork[b->fork_hash].push_back(where[i]);
+            break;
+        }
+        }
+    }
+    // The prefix: due transactions in order, as many as fit.
+    const uint32_t max_weight = consensus.nMaxBlockWeight ? consensus.nMaxBlockWeight : MAX_BLOCK_WEIGHT;
+    int64_t budget = (int64_t)max_weight - 8000 - (int64_t)consensus.max_block_signature_size -
+                     (plan.to_record.empty() ? 0 : (int64_t)(WITNESS_SCALE_FACTOR * LOST_RECORD_MAX_BYTES));
+    int64_t sig_budget = MAX_BLOCK_SIGOPS_COST - 4000;
+    for (size_t i = 0; i < txs.size(); ++i) {
+        if (classes[i].first != LostTxCat::DUE) continue;
+        const int64_t w = GetTransactionWeight(*txs[i]);
+        const int64_t sig = GetLegacySigOpCount(*txs[i]) * WITNESS_SCALE_FACTOR;
+        if (w > budget || sig > sig_budget) { plan.cut = true; break; }
+        budget -= w;
+        sig_budget -= sig;
+        plan.prefix.push_back(txs[i]);
+    }
+    if (build) {
+        for (const auto& [fork_hash, items] : by_fork) {
+            LostRecord rec;
+            int top = 0;
+            for (const auto& [b, pos] : items) top = std::max(top, b->height);
+            const LostBlk* t = nullptr;
+            for (const auto& [b, pos] : items) if (b->height == top) t = b;
+            std::vector<const LostBlk*> path;
+            for (const LostBlk* w = t; w;) {
+                path.push_back(w);
+                auto p = g_blocks.find(w->prev);
+                w = (p != g_blocks.end() && w->height > t->fork_height + 1) ? &p->second : nullptr;
+            }
+            std::reverse(path.begin(), path.end());
+            std::map<const LostBlk*, uint32_t> index;
+            for (const LostBlk* w : path) {
+                index[w] = rec.lost.size();
+                rec.lost.push_back(SerHeader(w->block->GetBlockHeader()));
+                if (rec.btc_headers.empty() && w->anchor_state == AnchorState::STALE) rec.btc_headers = w->btc_headers;
+            }
+            for (const auto& [b, pos] : items) {
+                std::vector<uint256> leaves;
+                for (const auto& tx : b->block->vtx) leaves.push_back(tx->GetHash());
+                LostRecordEntry e;
+                e.k = index[b];
+                e.pos = pos;
+                e.branch = MerkleBranch(leaves, pos);
+                e.tx = SerTxNoWitness(*b->block->vtx[pos]);
+                rec.entries.push_back(std::move(e));
+            }
+            plan.records.push_back(std::move(rec));
+        }
+    }
+    plan.summary = strprintf("%d due (%d in the prefix%s), %d later, %d failing (%d to record), %d gone",
+                             n_due, (int)plan.prefix.size(), plan.cut ? ", cut" : "", n_later, n_fails,
+                             (int)plan.to_record.size(), n_gone);
+    return plan;
+}
+
+} // namespace
+
+std::vector<std::optional<LostRecord>> LostParseRecords(const CBlock& block)
+{
+    std::vector<std::optional<LostRecord>> out;
+    if (block.vtx.empty()) return out;
+    for (const CTxOut& o : block.vtx[0]->vout) {
+        const CScript& s = o.scriptPubKey;
+        CScript::const_iterator pc = s.begin();
+        opcodetype op;
+        std::vector<unsigned char> data;
+        if (!s.GetOp(pc, op) || op != OP_RETURN) continue;
+        if (!s.GetOp(pc, op, data) || data != LOST_RECORD_TAG) continue;
+        if (!s.GetOp(pc, op, data) || pc != s.end()) { out.emplace_back(std::nullopt); continue; }
+        try {
+            CDataStream ss(data, SER_NETWORK, PROTOCOL_VERSION);
+            LostRecord r;
+            ss >> r;
+            if (!ss.empty()) { out.emplace_back(std::nullopt); continue; }
+            out.emplace_back(std::move(r));
+        } catch (const std::exception&) {
+            out.emplace_back(std::nullopt);
+        }
+    }
+    return out;
+}
+
+bool LostIsRefusal(const std::string& reason)
+{
+    return reason == "bad-txns-lost-respend" || reason == "bad-lost-replay" || reason == "bad-lost-unrecorded";
+}
+
+bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool just_check, BlockValidationState& state)
+{
+    AssertLockHeld(::cs_main);
+    if (!g_con_pos || !g_con_bitcoin_anchor || !g_validate_anchor || !pindexPrev) return true;
+    LoadRecorded(pindexPrev);
+    std::vector<Binding> mine;
+    size_t bytes = 0;
+    for (const auto& r : LostParseRecords(block)) {
+        if (!r) return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-lost-record", "malformed");
+        bytes += GetSerializeSize(*r, PROTOCOL_VERSION);
+        if (bytes > LOST_RECORD_MAX_BYTES) return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-lost-record", "too large");
+        bool soft = false;
+        const std::string why = JudgeRecord(*r, block.m_anchor_height, pindexPrev, soft, mine);
+        if (!why.empty()) {
+            LogPrintf("Lost blocks: block %s carries a record that is not valid: %s\n", block.GetHash().ToString(), why);
+            if (soft) return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "lost-record-unverifiable", why);
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-lost-record", why);
+        }
+    }
+    std::map<COutPoint, uint256> bound = ChainBindings(pindexPrev, block.m_anchor_height);
+    for (const Binding& b : mine) bound.emplace(b.o, b.txid);
+    if (!bound.empty()) {
+        for (size_t i = 1; i < block.vtx.size(); ++i) {
+            const CTransaction& tx = *block.vtx[i];
+            for (const CTxIn& in : tx.vin) {
+                auto it = bound.find(in.prevout);
+                if (it == bound.end() || it->second == tx.GetHash()) continue;
+                const std::string why = strprintf("tx %s spends %s:%u, which recorded tx %s spends", tx.GetHash().ToString(),
+                                                  in.prevout.hash.ToString(), in.prevout.n, it->second.ToString());
+                LogPrintf("Lost blocks: block %s breaks a record: %s\n", block.GetHash().ToString(), why);
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-recorded-respend", why);
+            }
+        }
+    }
+    if (!just_check && !mine.empty()) {
+        g_recorded[block.GetHash()] = std::move(mine);
+        LogPrintf("Lost blocks: block %s at height %d records %d bound input(s)\n", block.GetHash().ToString(),
+                  pindexPrev->nHeight + 1, (int)g_recorded[block.GetHash()].size());
     }
     return true;
+}
+
+LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, CCoinsViewCache& view)
+{
+    AssertLockHeld(::cs_main);
+    LostTemplateParts out;
+    if (!LostActive() || !pindexPrev) return out;
+    LoadRecorded(pindexPrev);
+    LOCK(g_lost_mutex);
+    Plan plan = PlanLocked(pindexPrev, anchor_height, view, /*build=*/true);
+    out.prefix = std::move(plan.prefix);
+    out.cut = plan.cut;
+    for (const LostRecord& r : plan.records) out.records.push_back(RecordOutput(r));
+    if (!out.prefix.empty() || !out.records.empty()) {
+        LogPrintf("Lost blocks: template on %s: %s\n", pindexPrev->GetBlockHash().ToString(), plan.summary);
+    }
+    return out;
+}
+
+bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
+                    const std::function<bool()>& certified_descendant, CCoinsViewCache& view,
+                    BlockValidationState& state)
+{
+    AssertLockHeld(::cs_main);
+    if (!LostActive() || !pindexPrev || ibd) return true;
+    LOCK(g_lost_mutex);
+    std::optional<std::string> why;
+    std::string reason;
+    if ((why = ViolationLocked(block, pindexPrev))) {
+        reason = "bad-txns-lost-respend";
+    } else if (!g_spends.empty()) {
+        // The duty: the due lost transactions first, and the records owed.
+        Plan plan = PlanLocked(pindexPrev, block.m_anchor_height, view, /*build=*/false);
+        size_t i = 0;
+        for (; i < plan.prefix.size(); ++i) {
+            if (i + 1 >= block.vtx.size() || block.vtx[i + 1]->GetHash() != plan.prefix[i]->GetHash()) break;
+        }
+        if (i < plan.prefix.size()) {
+            why = strprintf("does not begin with the due lost transactions (%d of %d in place; %s)", (int)i, (int)plan.prefix.size(), plan.summary);
+            reason = "bad-lost-replay";
+        } else if (plan.cut && block.vtx.size() != 1 + plan.prefix.size()) {
+            why = strprintf("carries other transactions while due lost transactions did not fit (%s)", plan.summary);
+            reason = "bad-lost-replay";
+        } else if (!plan.to_record.empty()) {
+            std::set<uint256> carried;
+            for (const auto& r : LostParseRecords(block)) {
+                if (!r) continue;
+                for (const auto& e : r->entries) {
+                    if (auto tx = DeserTxNoWitness(e.tx)) carried.insert((*tx)->GetHash());
+                }
+            }
+            for (const uint256& t : plan.to_record) {
+                if (!carried.count(t)) {
+                    why = strprintf("does not record lost tx %s (%s)", t.ToString(), plan.summary);
+                    reason = "bad-lost-unrecorded";
+                    break;
+                }
+            }
+        }
+    }
+    if (!why) return true;
+    if (certified_descendant()) {
+        LogPrintf("Lost blocks: block %s at height %d breaks the duty but has a certified descendant; the evidence does not bear on it: %s\n",
+                  block.GetHash().ToString(), pindexPrev->nHeight + 1, *why);
+        return true;
+    }
+    LogPrintf("Lost blocks: refusing block %s at height %d: %s: %s\n", block.GetHash().ToString(),
+              pindexPrev->nHeight + 1, reason, *why);
+    return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, reason, *why);
 }
 
 std::optional<uint256> LostConflict(const CTransaction& tx, uint32_t tip_anchor_height)
@@ -413,6 +1001,10 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     b.btc_headers = msg.btc_headers;
     b.anchor_state = verdict;
     LOCK(g_lost_mutex);
+    {
+        auto parent = g_blocks.find(block.hashPrevBlock);
+        b.epoch = parent != g_blocks.end() ? parent->second.epoch : ++g_epoch;
+    }
     LogPrintf("Lost blocks: took evidence %s at height %d (anchor %u %s, %d signer(s), %s)\n", hash.ToString(), height,
               b.anchor_h, verdict == AnchorState::STALE ? "off Bitcoin's best chain" : "on Bitcoin's best chain",
               signers, certified ? "certified" : "below the quorum");
@@ -489,6 +1081,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
     // tip that cannot advance would otherwise hold a refusal for ever.
     int btc_h = -1;
     if (!GetMainchainBlockCount(btc_h)) btc_h = -1;
+    if (btc_h >= 0) g_btc_h = btc_h;
     // 4) Which blocks are lost, and the outpoints they bind.
     bool changed = false;
     std::vector<uint256> need_headers;
@@ -523,11 +1116,13 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                     walk = &p->second;
                     continue;
                 }
-                const CBlockIndex* f = chainman.m_blockman.LookupBlockIndex(walk->prev);
-                if (f && chainman.ActiveChain().Contains(f)) {
-                    b.fork_height = f->nHeight;
-                    b.fork_hash = f->GetBlockHash();
-                }
+                // The fork point is the branch's first parent outside the
+                // store, whether or not this node's tip has reached it yet (a
+                // node restarting behind it must still refuse what the lost
+                // block binds once it gets there; each candidate checks that
+                // the fork point is its ancestor).
+                b.fork_height = walk->height - 1;
+                b.fork_hash = walk->prev;
                 break;
             }
             branch_stale[h] = stale && b.fork_height >= 0;
@@ -667,10 +1262,8 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 g_refused.erase(h);
                 continue;
             }
-            CBlock blk;
-            if (!ReadBlockFromDisk(blk, p, Params().GetConsensus())) continue;
-            LOCK(g_lost_mutex);
-            if (!ViolationLocked(blk, p->pprev)) revive.push_back(p);
+            // Judged again on its next activation, by the whole duty.
+            revive.push_back(p);
         }
     }
     if (!revive.empty()) {

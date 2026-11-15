@@ -9,6 +9,7 @@
 #include <chain.h>
 #include <musig.h>
 #include <pos.h>
+#include <pos_lost.h>
 #include <vrf.h>
 #include <chainparams.h>
 #include <coins.h>
@@ -147,6 +148,8 @@ void BlockAssembler::resetBlock()
     feeMap = CAmountMap();
     m_pos_records = std::make_shared<PosRecordState>();
     m_submission_spent.clear();
+    m_lost_records.clear();
+    m_lost_cut = false;
 }
 
 std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age, DynaFedParamEntry* proposed_entry, const std::vector<CScript>* commit_scripts, const CPubKey* pos_proposer, const std::vector<unsigned char>* pos_vrf_proof, const std::vector<CPubKey>* pos_vrf_committee)
@@ -270,6 +273,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     int nPackagesSelected = 0;
     int nDescendantsUpdated = 0;
     if (!m_coinbase_only) {
+        // SEQUENTIA lost blocks: the due lost transactions come before anything
+        // else, whatever this producer's own fee list and floor say (pos_lost.h).
+        addLostReplay(pindexPrev);
+    }
+    if (!m_coinbase_only && !m_lost_cut) {
         if (SupervisionActive(nHeight)) {
             addSupervisionSubmissions();
         }
@@ -317,6 +325,8 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
         pblocktemplate->vTxFees[index] = -feeAmount;
         index++;
     }
+    // SEQUENTIA lost blocks: the records this block owes.
+    for (const CTxOut& rec : m_lost_records) coinbaseTx.vout.push_back(rec);
     // Non-consensus commitment output before finishing coinbase transaction
     if (commit_scripts && !commit_scripts->empty()) {
         for (auto commit_script: *commit_scripts) {
@@ -627,6 +637,56 @@ void BlockAssembler::SortForBlock(const CTxMemPool::setEntries& package, std::ve
 // Each time through the loop, we compare the best transaction in
 // mapModifiedTxs with the next transaction in the mempool to decide what
 // transaction package to work on next.
+void BlockAssembler::addLostReplay(const CBlockIndex* pindexPrev)
+{
+    if (!LostActive()) return;
+    uint32_t anchor_h = pindexPrev->m_anchor_height;
+    uint256 anchor_hash = pindexPrev->m_anchor_hash;
+    bool replaced = false;
+    // The anchor this block is about to take (chosen again below; the
+    // records owed depend on it).
+    if (!GetAnchorForNewBlock(pindexPrev->m_anchor_height, pindexPrev->m_anchor_hash, anchor_h, anchor_hash, &replaced)) return;
+    CCoinsViewCache view(&m_chainstate.CoinsTip());
+    LostTemplateParts parts = LostForTemplate(pindexPrev, anchor_h, view);
+    m_lost_records = std::move(parts.records);
+    m_lost_cut = parts.cut;
+    CCoinsViewCache work(&m_chainstate.CoinsTip());
+    const auto& fedpegscripts = GetValidFedpegScripts(pindexPrev, chainparams.GetConsensus(), true);
+    for (const CTransactionRef& tx : parts.prefix) {
+        TxValidationState state;
+        CAmountMap fee_map;
+        std::set<std::pair<uint256, COutPoint>> pegins_spent;
+        if (!Consensus::CheckTxInputs(*tx, state, work, nHeight, fee_map, pegins_spent, nullptr, false, true, fedpegscripts)) {
+            LogPrintf("Lost blocks: due transaction %s does not connect in the template (%s)\n", tx->GetHash().ToString(), state.ToString());
+            break;
+        }
+        std::vector<Coin> spent;
+        for (const CTxIn& in : tx->vin) spent.push_back(in.m_is_pegin ? Coin() : work.AccessCoin(in.prevout));
+        std::string reason, debug;
+        PosRecordState records = *m_pos_records;
+        if (PosCheckTxRecords(*tx, spent, nHeight, chainparams.GetConsensus(), records, reason, debug)) {
+            *m_pos_records = std::move(records);
+        }
+        pblocktemplate->block.vtx.emplace_back(tx);
+        pblocktemplate->vTxFees.push_back(0);
+        pblocktemplate->vTxSigOpsCost.push_back(GetLegacySigOpCount(*tx) * WITNESS_SCALE_FACTOR);
+        nBlockWeight += GetTransactionWeight(*tx);
+        nBlockSigOpsCost += GetLegacySigOpCount(*tx) * WITNESS_SCALE_FACTOR;
+        ++nBlockTx;
+        feeMap += fee_map;
+        for (const CTxIn& in : tx->vin) {
+            if (!in.m_is_pegin) {
+                work.SpendCoin(in.prevout);
+                m_submission_spent.insert(in.prevout);
+            }
+        }
+        AddCoins(work, *tx, nHeight);
+    }
+    if (!m_lost_records.empty()) {
+        for (const CTxOut& o : m_lost_records) nBlockWeight += ::GetSerializeSize(o, PROTOCOL_VERSION) * WITNESS_SCALE_FACTOR;
+    }
+}
+
 void BlockAssembler::addSupervisionSubmissions()
 {
     const auto submissions = SupervisionSubmissionQueue::GetInstance().Entries();

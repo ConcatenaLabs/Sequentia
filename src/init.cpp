@@ -2019,6 +2019,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         vImportFiles.push_back(fs::PathFromString(strFile));
     }
 
+    // SEQUENTIA lost blocks (pos_lost.h): the store and its duty are in force
+    // before this node connects a block or meets a peer.
+    if (g_con_pos && g_con_bitcoin_anchor && g_validate_anchor) LostInit();
+
     chainman.m_load_block = std::thread(&util::TraceThread, "loadblk", [=, &chainman, &args] {
         ThreadImport(chainman, vImportFiles, args);
     });
@@ -2436,7 +2440,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         } else {
             ChainstateManager* anchor_chainman = node.chainman.get();
             CTxMemPool* lost_mempool = node.mempool.get();
-            LostInit();
             const int64_t anchor_poll = std::max<int64_t>(1, gArgs.GetIntArg("-anchorpollinterval", DEFAULT_ANCHOR_POLL_INTERVAL));
             // Run the anchor watcher on its OWN thread, not the main scheduler.
             // When a parent reorg orphans an anchor, AnchorWatchTask calls

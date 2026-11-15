@@ -200,6 +200,19 @@ bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache&
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 /** The input scripts of `tx` under the flags the mempool applies at the tip, for
  *  transactions that reach a block template without passing the mempool. */
+/** SEQUENTIA lost blocks (pos_lost.h): what each transaction of a lost branch
+ *  is for a block built on `prev`, with the lost block's own witnesses. DUE: valid
+ *  there, in this order (later ones are judged after it). LATER: valid only later
+ *  as it is (a height, time or relative lock, a coin not yet mature, or the child
+ *  of a LATER one). FAILS: not valid as it is (scripts, a payment proof, a
+ *  height-gated record rule, a peg-in, or the child of a FAILS one). GONE: an
+ *  input is spent on this chain (it is already mined, or something it conflicts
+ *  with is). */
+enum class LostTxCat { DUE, LATER, FAILS, GONE };
+std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector<CTransactionRef>& txs,
+                                                               CCoinsViewCache& base, const CBlockIndex* prev,
+                                                               const Consensus::Params& params) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
                             const Consensus::Params& params, TxValidationState& state)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
