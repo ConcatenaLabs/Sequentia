@@ -72,10 +72,10 @@ Everything is configurable here; the config file never needs hand-editing.
 
 | Tab | What it controls |
 |---|---|
-| **Status** | Live decisions per asset (price, market cap, volume, admitted/rejected **and why**), last push result per node. |
+| **Status** | Live decisions per asset (price, market cap, volume, admitted/rejected **and why**), the last poll, and when the list nodes read was published. |
 | **Market source** | The market-data API URL, its **quote currency** (see below), API format, the Asset Registry URL, the source **scope** and **manual prices** (see below), poll interval, publisher name. |
 | **Admission rules** | The criteria (market cap, volume, price-jump, volatility, issuer allow-list), ALL/ANY combination, always-admit / always-reject exceptions. |
-| **Nodes** | The node RPCs that receive the whitelist — as many as you like (host, port, user+password or cookie file). |
+| **Publishing** | Where the list is published (`/feewhitelist` on this port, and the `--publish-file` if one is set) and the command that connects a node to it. Nodes read the list; this server writes to none and holds no node's login. |
 | **Access** | The public toggles, the rate limit, the default table page size, and the admin password. |
 
 The asset tables (public page and admin Status) are **sortable** — click any
@@ -401,7 +401,7 @@ WantedBy=multi-user.target
 Order of operations for a public deployment:
 
 1. create the config (start from `config.example.json`; `chmod 600` — it holds
-   node RPC credentials);
+   the admin password's hash);
 2. `--set-password` (the server refuses `--ui-host 0.0.0.0` without one);
 3. start the service, log in at `/admin`, enable the public toggles you want;
 4. open the port on your firewall.

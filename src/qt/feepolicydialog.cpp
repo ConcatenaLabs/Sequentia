@@ -81,7 +81,7 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     intro->setWordWrap(true);
     layout->addWidget(intro);
 
-    // Which price server writes the whitelist, if any, and how to change that.
+    // Which price server's list this node reads, if any, and how to change that.
     auto* ps = new QGroupBox(tr("Price server"), this);
     auto* ps_layout = new QVBoxLayout(ps);
     m_ps_status = new QLabel(ps);
@@ -187,14 +187,14 @@ void FeePolicyDialog::showPriceServerState()
     const QString url = QString::fromStdString(s["url"].get_str());
     if (m_ps_url->text().isEmpty()) m_ps_url->setText(url);
     QString text = s["default"].isTrue()
-        ? tr("Connected to the network's price server, %1. The whitelist is dynamic: that server writes it.").arg(url)
-        : tr("Connected to the price server at %1. The whitelist is dynamic: that server writes it.").arg(url);
+        ? tr("Connected to the network's price server, %1. The whitelist is dynamic: this node reads the list that server publishes.").arg(url)
+        : tr("Connected to the price server at %1. The whitelist is dynamic: this node reads the list that server publishes.").arg(url);
     const QString error = s["last_error"].isStr() ? QString::fromStdString(s["last_error"].get_str()) : QString();
     if (s["has_list"].isTrue()) {
-        text += " " + tr("Last written %1.").arg(timeText(s["list_written"].get_int64()));
+        text += " " + tr("List read %1.").arg(timeText(s["list_written"].get_int64()));
         if (!error.isEmpty()) text += " " + tr("Its last answer was refused or did not arrive (%1); the list in force is kept.").arg(error);
     } else {
-        text += " " + tr("It has not sent a list yet%1, so no asset is accepted until it does.")
+        text += " " + tr("This node has not read a list from it yet%1, so no asset is accepted until it does.")
                           .arg(error.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(error));
     }
     const bool stale = s["has_list"].isTrue() && s["list_written"].get_int64() > 0 &&
@@ -209,7 +209,7 @@ bool FeePolicyDialog::confirmHandWrite()
     if (!m_ps_state.isObject() || !m_ps_state["connected"].isTrue()) return true;
     const QString url = QString::fromStdString(m_ps_state["url"].get_str());
     return QMessageBox::question(this, tr("Write the whitelist by hand?"),
-               tr("This node is connected to the price server at %1, which writes its whitelist. Writing it by "
+               tr("This node is connected to the price server at %1 and reads its whitelist from it. Writing it by "
                   "hand disconnects the node from that server for good, and the whitelist becomes static. You "
                   "can connect again here at any time.\n\nWrite it by hand?").arg(url),
                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes;

@@ -777,8 +777,9 @@ class TheFirstRoundWaitsForBaselines(unittest.TestCase):
 
 
 class ThePublishFileIsTheWhitelistNodesConnectTo(unittest.TestCase):
-    """--publish-file writes the body of GET /api/whitelist after every completed
-    poll: the list a node connected to this price server (-feepriceserver) takes.
+    """--publish-file writes the body of GET /feewhitelist (the rates and when
+    they were made) after every round that makes a list: the list a node
+    connected to this price server (-feepriceserver) reads.
     It must be that body exactly, written whole, public-readable, and never an
     empty list, which a connected node refuses."""
 

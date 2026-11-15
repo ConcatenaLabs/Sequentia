@@ -114,8 +114,8 @@ is stored.
 
 The table has two states. It is **static** when the operator writes it by hand,
 and **dynamic** when the node is connected to a price server, its operator's own
-or another operator's ([§5](#5-the-price-server)), which is then the table's
-only writer. There is no third state. A node may also fetch
+or another operator's ([§5](#5-the-price-server)): the node reads the list that
+server publishes, which is then the table's only source. There is no third state. A node may also fetch
 market prices for display (`-referencepricesurl`, used to show amounts in a
 reference currency); they never enter the whitelist, so an asset is accepted
 only because the operator, or a price server, listed it.
@@ -328,11 +328,11 @@ The reference unit is anchored to a chosen value (for example a USD-equivalent
 stablecoin) so rates are meaningful; the choice is operator policy, not consensus.
 The node holds the last-set rates indefinitely - there is **no** staleness or
 max-age option; keeping rates fresh (and refusing assets when a feed dies, by
-writing `0` or omitting them) is the price server's job. The one rule the node enforces
+publishing `0` or omitting them) is the price server's job. The one rule the node enforces
 is the **non-negative-rate** floor: a negative quote is rejected outright, while a
 zero is accepted and read as "refuse this asset". Vetting source data - quorum
 across feeds, guarding implausible inter-poll jumps and dust-priced rates - is the
-price server's responsibility before it writes.
+price server's responsibility before it publishes.
 
 The reference-unit rate math lives next to `ExchangeRateMap::ConvertAmountToValue`
 / `ConvertValueToAmount` and handles the `INT64_MAX` saturation edge. Running and

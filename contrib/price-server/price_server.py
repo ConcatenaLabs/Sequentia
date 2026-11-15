@@ -88,7 +88,7 @@ def scaled_rate(price, precision):
 
 # Published rates must satisfy 0 < rate <= MAX_RATE. The node parses each rate
 # with get_int64; a value above INT64_MAX (~9.22e18) makes that parse throw and
-# the node drops the WHOLE setfeeexchangerates batch. We clamp well below that so
+# a connected node refuses the WHOLE list it read. We clamp well below that so
 # one absurd quote can never poison every other asset's rate; offenders are
 # dropped per-asset and logged instead. The ceiling leaves headroom above 1e8x
 # precision scaling (a 0-decimal asset multiplies the rate by 1e8) and the

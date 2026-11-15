@@ -230,7 +230,8 @@ server. The network's price server for the testnet is
 is a price server's published list, so the address of a price feed API, or of
 the registry, is refused and nothing is written.
 
-While connected, that price server is the whitelist's only writer. A write by
+While connected, the list the node reads from that price server is the
+whitelist's only source. A write by
 hand, with `setfeeexchangerates` or from an edit in the desktop wallet, ends the
 connection and makes the whitelist static, an emptied one included. To connect
 again, use `setfeepriceserver` or Connect in the desktop wallet.

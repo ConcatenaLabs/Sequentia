@@ -255,7 +255,7 @@ static UniValue FeePriceServerToJSON()
 }
 
 static const std::vector<RPCResult> FEE_PRICE_SERVER_RESULT{
-    {RPCResult::Type::BOOL, "connected", "Whether this node is connected to a price server, which is then its whitelist's only writer"},
+    {RPCResult::Type::BOOL, "connected", "Whether this node is connected to a price server, whose published list it reads and which is then its whitelist's only source"},
     {RPCResult::Type::STR, "whitelist", "\"dynamic\" when connected to a price server, \"static\" when written by hand"},
     {RPCResult::Type::STR, "decided_by", "Where the choice in force was made: \"command line\", \"configuration file\", \"settings\" (the operator's last setfeepriceserver, hand write or desktop-wallet choice, recorded in settings.json), \"default\" (the network's price server), \"whitelist file\" (a list written by hand, which the network's default yields to) or \"none\""},
     {RPCResult::Type::STR, "url", /*optional=*/true, "The address of the price server's published list"},
@@ -293,8 +293,8 @@ static RPCHelpMan setfeepriceserver()
 {
     return RPCHelpMan{"setfeepriceserver",
                 "\nConnect this node to a price server, its operator's own or another operator's, or disconnect it.\n"
-                "Connected, the node's fee whitelist is dynamic: the price server is its only writer, and the node\n"
-                "takes the list it publishes now and every -feepriceserverpoll seconds. The node asks first and\n"
+                "Connected, the node's fee whitelist is dynamic: the node reads the list the price server publishes,\n"
+                "now and every -feepriceserverpoll seconds, and that list is its only source. The node asks first and\n"
                 "connects only if the answer is a price server's published list; a price feed API's answer, or\n"
                 "anything else, is refused and changes nothing.\n"
                 "\nAn empty address disconnects: the list in force is kept, as a static whitelist saved to\n"

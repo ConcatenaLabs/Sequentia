@@ -1542,8 +1542,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 : strprintf(
                 "This node accepts no asset for transaction fees, so it will not send or relay "
                 "transactions. It still validates the chain, and its wallet can still receive. "
-                "To change that, write the fee whitelist: list assets and prices in %s or with "
-                "setfeeexchangerates, or set up a price server to keep it current.",
+                "To change that, write the fee whitelist by hand, in %s or with setfeeexchangerates, "
+                "or connect the node to a price server (-feepriceserver or setfeepriceserver) to keep it current.",
                 exchange_rates_config_file);
             LogPrintf("Warning: %s\n", notice);
             tfm::format(std::cerr, "Warning: %s\n", notice);

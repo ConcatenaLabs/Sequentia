@@ -1466,10 +1466,11 @@ public:
         m_default_blinded_addresses = false;
 
         // No asset is accepted for fees merely by default, here as on the
-        // mainnet: a node accepts what its list says once it is written, by
-        // its operator or by a price server, and nothing before. A data
-        // directory still holding the seed this chain once started with has
-        // it moved aside at startup (init.cpp), not loaded.
+        // mainnet: a node accepts what its list says once it has one, written
+        // by its operator or read from a price server it is connected to, and
+        // nothing before. A data directory still holding the seed this chain
+        // once started with keeps that file untouched, and it is not loaded
+        // (feepriceserver.cpp).
         m_seed_fee_whitelist = false;
 
         // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_test), std::end(chainparams_seed_test));
