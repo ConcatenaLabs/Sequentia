@@ -1,8 +1,8 @@
 # Sequentia price server
 
 A small, stdlib-only Python program that keeps Sequentia nodes' **fee
-whitelists** up to date. A whitelist written by hand is static; one a price
-server updates is dynamic.
+whitelists** up to date. A whitelist written by hand is static; one a node
+reads from a price server is dynamic.
 
 A price server takes what a **price feed API** reports, and filters and treats
 it under its own configuration. Each poll it:
@@ -12,31 +12,25 @@ it under its own configuration. Each poll it:
 2. **fetches prices** for those assets from one price feed API;
 3. applies your **admission rules** to decide which assets are allowed to pay
    transaction fees, and at what rate;
-4. **publishes** the resulting whitelist to the nodes connected to it, in
-   either or both of two ways:
-   - **by address**: a node started with `-feepriceserver=<address>` (or told
-     `setfeepriceserver "<address>"`) asks for the list this server publishes,
-     at its `GET /api/whitelist` or in the file it writes with `--publish-file`,
-     and takes it as its whitelist. This needs no RPC login to the node. It is
-     how a node uses its operator's own price server (the desktop wallet's
-     "Run my own price server" connects the node to this server's
-     `/api/whitelist` on the same machine), another operator's, and the
-     network's: every testnet node is connected by default to
-     `http://sequentiatestnet.com/feewhitelist`;
-   - **by RPC**: written to each node in `node_rpc` / `node_rpcs` with the
-     `setfeeexchangerates` RPC and `persist=false`, as the network's price server
-     does for the public nodes. The node shows that as connected by RPC.
+4. **publishes** the resulting list, the rates and when they were made and
+   nothing else, at its `GET /feewhitelist` and in the file it writes with
+   `--publish-file`.
 
-A node connected to a price server either way has a dynamic whitelist; one
-written by hand has a static one.
+A price server never writes to a node, and holds no node's login. A node reads
+from it: started with `-feepriceserver=<address>` (or told
+`setfeepriceserver "<address>"`), it asks for the published list at startup and
+every minute and takes it as its whitelist. That is how a node uses its
+operator's own price server (the desktop wallet's "Run my own price server"
+connects the node to this server's `/feewhitelist` on the same machine), another
+operator's, and the network's: every testnet node is connected by default to
+`http://sequentiatestnet.com/feewhitelist`. One price server feeds every node
+that connects to it.
 
 Nothing goes from a price feed API to a node's whitelist without a price
 server: a node refuses an answer that is not a price server's published list.
-Stop the server and the whitelists it writes stop changing (each node keeps the
-last list it received; a node it writes to over RPC falls back to its operator's
-static file at a restart, and a node connected to it keeps its cached list).
-Nothing here touches consensus: it only decides which assets a node accepts
-fees in.
+Stop the server and the whitelists of the nodes connected to it stop changing:
+each keeps the last list it read, cached across its own restarts. Nothing here
+touches consensus: it only decides which assets a node accepts fees in.
 
 No dependencies — just Python 3. On `chain=test` and `chain=sequentia` the open fee market is always on; a custom chain needs `-con_any_asset_fees=1`.
 
@@ -45,22 +39,30 @@ No dependencies — just Python 3. On `chain=test` and `chain=sequentia` the ope
 ```bash
 python3 price_server.py --config config.json                 # poll forever
 python3 price_server.py --config config.json --once          # one poll, print, exit
-python3 price_server.py --config config.json --dry-run       # decide + log, don't publish
-python3 price_server.py --config config.json --ui-port 8090  # + web UI on http://127.0.0.1:8090
+python3 price_server.py --config config.json --dry-run       # also log each round's list in full
+python3 price_server.py --config config.json --ui-port 8089  # + web UI and /feewhitelist on http://127.0.0.1:8089
 python3 price_server.py --config config.json --set-password  # set the admin password, then exit
 python3 price_server.py --config config.json --publish-file /srv/feewhitelist/feewhitelist.json
-                                                             # + publish the whitelist for nodes that connect
+                                                             # + publish the list as a file for a web server
 ```
 
 Copy `config.example.json` to `config.json` as a starting point; its defaults
 point at the public Sequentia testnet demo feed, so a fresh install works out
-of the box. Leave `node_rpc` out to publish without writing to any node, then
-connect your node to it: `sequentia-cli setfeepriceserver
-"http://127.0.0.1:8090/api/whitelist"` (with no admin password set the API
-answers this machine; with one, switch the public JSON API on). From the
-desktop node GUI, **Settings → Price server** does all of this: it launches the
-bundled copy with a UI on localhost and connects the node to it, with no setup
-at all.
+of the box. Then connect your node to it: `sequentia-cli setfeepriceserver
+"http://127.0.0.1:8089/feewhitelist"`. From the desktop node GUI,
+**Settings → Price server** does all of this: it launches the bundled copy with
+a UI on localhost and connects the node to it, with no setup at all.
+
+A configuration that names a node to write to (`node_rpc`, `node_rpcs`, or
+`clear_whitelist_on_shutdown`, which older configurations carry) is refused at
+startup with what to do instead: remove it and connect each node by address.
+
+On its first round after a start the server publishes only once every asset can
+be judged: `max_change_factor` compares with the previous round, which the
+first round does not have, so that round seeds the comparison and publishes
+nothing rather than a list missing those assets. A round that admits nothing
+keeps the last list published, with the time it was made, so a stale list never
+looks fresh.
 
 ## The web UI: one port, two audiences
 
@@ -131,12 +133,23 @@ is one config field: point your `source.url` at another operator's
 (`_meta` is informational; consumers of the Sequentia format ignore entries
 without a `price` field.)
 
+### `GET /feewhitelist`
+
+The published list, the one a node connected to this server reads
+(`-feepriceserver`): the rates and when they were made, nothing else. It is
+served whatever the public API switch says, without the per-IP rate limit, and
+answers 503 until the first list is made. A node takes the list whole or not at
+all, and refuses one that is empty, dated ahead of its clock, or older than the
+list it holds.
+
+```json
+{"updated": 1784034446.66, "rates": {"<asset-id-64-hex>": 5238188, "...": 100000000}}
+```
+
 ### `GET /api/whitelist`
 
-The rates as pushed to the nodes, plus the per-asset decisions. This is also
-the list a node connected to this server takes (`-feepriceserver`): it reads
-`updated` and `rates`, takes the list whole or not at all, and refuses one that
-is empty or older than the list it holds.
+The operator's view: the published rates plus the per-asset decisions and the
+frame they are stated in.
 
 ```json
 {
@@ -184,7 +197,7 @@ normally plain **USD**. It does **not** need to exist as an on-chain asset. Set
 it once in the Market source tab; every market price, market cap and volume the
 server reads and displays is in that unit.
 
-The rates pushed to the nodes are in **reference units**, which the next section
+The rates this server publishes are in **reference units**, which the next section
 defines. They coincide with the quote currency under the default conversion
 factor of `1.0`, so most operators can read the two words as one thing. They part
 company as soon as the factor is changed, or when an asset is priced by hand.
@@ -313,19 +326,14 @@ absurd quote can never poison the rest of the batch).
 
 Everything below is editable from the UI; the UI reads and writes the same
 file passed to `--config` (atomically). Download a backup any time from
-**Access → Download the current config** — it includes node RPC credentials,
-keep it private.
+**Access → Download the current config** — it includes the admin password
+hash, keep it private.
 
 ```jsonc
 {
   "poll_interval_secs": 60,
   "source_timeout": 15,
   "source_name": "my-price-server",        // publisher name shown on the public page / _meta
-
-  "node_rpcs": [                            // every node that receives the whitelist
-    {"name": "local", "host": "127.0.0.1", "port": 18776,
-     "user": "rpcuser", "password": "rpcpassword"}   // or "cookie": "/path/.cookie"
-  ],
 
   "registry_url": "http://sequentiatestnet.com/registry/index.minimal.json",
 
@@ -356,11 +364,11 @@ keep it private.
 
 ## Publishing the whitelist for nodes that connect
 
-`--publish-file <path>` writes the body of `GET /api/whitelist` to a file after
-every completed poll, whole (a temporary file renamed over the old one) and
-world-readable, so a web server can publish it without exposing this server's
-own web UI. Nothing is written until a poll has admitted at least one asset. It
-is written in `--dry-run` too, since that publishes nothing to any node. The
+`--publish-file <path>` writes the body of `GET /feewhitelist` to a file after
+every round that makes a list, whole (a temporary file renamed over the old
+one) and world-readable, so a web server can publish it without exposing this
+server's own web UI. Nothing is written until a round has admitted at least one
+asset. The
 network's price server publishes its file this way at
 `http://sequentiatestnet.com/feewhitelist`; a node connects to it with
 `-feepriceserver=<that address>`.
@@ -405,8 +413,10 @@ sequentia-cli getfeeexchangerates            # the whitelist (asset -> rate)
 sequentia-cli getfeeacceptancepolicy         # the whitelist as {asset: {rate}}
 sequentia-cli getfeeassetinfo                # per asset: accepted here? on the registry? priced?
 sequentia-cli getfeeassetinfo USDX           # ...for one asset
-sequentia-cli setfeeexchangerates '{...}'    # operator manual set (persists to exchangerates.json)
-sequentia-cli setfeeexchangerates '{}'       # empty the whitelist
+sequentia-cli getfeepriceserver              # connected to which price server? last list? last error?
+sequentia-cli setfeepriceserver "http://127.0.0.1:8089/feewhitelist"   # connect to this server
+sequentia-cli setfeeexchangerates '{...}'    # write the list by hand instead: static, saved to exchangerates.json
+sequentia-cli setfeeexchangerates '{}'       # empty the whitelist by hand
 ```
 
 `getfeeassetinfo` is the quickest way to see why a wallet refuses to pay in an
@@ -417,7 +427,7 @@ theirs will not.
 
 ## Windows installer bundle
 
-The Windows installer ships this sidecar with a self-contained interpreter so
+The Windows installer ships this price server with a self-contained interpreter so
 the node GUI's **Settings → Price server** launcher works with no Python
 install. That interpreter (the official embeddable CPython) is **not** vendored
 in git — run `./fetch-embeddable-python.sh` once before `make deploy` to
@@ -429,9 +439,10 @@ stdlib-only, so the stock embeddable distribution suffices.
 | Surface | Who can reach it | Notes |
 |---|---|---|
 | `/admin` + all POSTs | Admin only | password (PBKDF2) + session cookie; same-origin + CSRF on writes; loopback-only when no password is set |
-| `/`, `/public` | Everyone, **if** `public_status` | read-only; never shows config or nodes |
+| `/feewhitelist` | Everyone | the published list: rates and when they were made, nothing else |
+| `/`, `/public` | Everyone, **if** `public_status` | read-only; never shows config |
 | `/api/prices`, `/api/whitelist` | Everyone, **if** `public_api` | rate-limited per IP |
-| Node RPC credentials | Never served | live only in the config file (600) and in RAM |
+| Node logins | None held | a price server writes to no node; nodes read from it |
 | Failed logins | — | logged with the client IP; each attempt costs a flat delay |
 
 For wiring real market-data oracles (providers, keys, rate limits) and the

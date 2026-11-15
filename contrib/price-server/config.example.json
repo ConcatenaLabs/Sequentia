@@ -1,33 +1,20 @@
 {
-  "_comment": "Sequentia price server. It DISCOVERS your network's assets from the Asset Registry (ticker -> id), prices them from ONE market-data API, applies the admission rules below, and publishes the resulting fee-asset whitelist to your node via setfeeexchangerates (persist=false). You do NOT list assets here. These defaults point at the public Sequentia testnet demo, so a fresh install works out of the box; edit node_rpc to match your local node, and tune the rules in the config UI.",
-
+  "_comment": "Sequentia price server. It DISCOVERS your network's assets from the Asset Registry (ticker -> id), prices them from ONE market-data API, applies the admission rules below, and PUBLISHES the resulting fee whitelist: at GET /feewhitelist on its UI port, and in the file --publish-file names. A price server never writes to a node: each node connects to it by that address (-feepriceserver, or setfeepriceserver on a running node) and reads the list, which makes the node's whitelist dynamic. You do NOT list assets here. These defaults point at the public Sequentia testnet demo, so a fresh install works out of the box; tune the rules in the config UI.",
   "poll_interval_secs": 60,
   "source_timeout": 15,
   "source_name": "sequentia-price-server",
-
-  "node_rpc": {
-    "_comment": "Optional: a node this server writes its whitelist to by RPC (setfeeexchangerates, persist=false). Leave it out when your nodes connect to this server by address instead (-feepriceserver / setfeepriceserver pointing at its /api/whitelist), which needs no login; the desktop wallet's Run my own price server removes it and connects the node that way. Use either user+password from your node conf, or \"cookie\": \"<datadir>/<network>/.cookie\" -- the cookie is re-read on every call, so it survives a node restart rotating it. 18776 is the chain=test default (the testnet is the default chain). Getting this wrong does not stop the server: it keeps polling and every push is refused, so watch the log after the first poll for \"published N rate(s) to 0/1 node(s)\".",
-    "host": "127.0.0.1",
-    "port": 18776,
-    "cookie": "~/.elements/testnet3/.cookie"
-  },
-
   "registry_url": "http://sequentiatestnet.com/registry/index.minimal.json",
-
   "source": {
     "_comment": "A Sequentia-format API returns every asset keyed by ticker ({\"SEQ\":{\"price\":..,\"market_cap\":..,\"volume_24h\":..}, ...}) in one call, so no JSON paths are needed. For a third-party API set format=custom and add price_path / market_cap_path / volume_24h_path (with an optional {ticker} placeholder). Optional scoping: mode = \"all\" (default) | \"except\" | \"only\", with assets = a list of tickers or asset ids the mode refers to.",
     "url": "http://sequentiatestnet.com/prices",
     "quote_currency": "USD",
     "format": "sequentia"
   },
-
   "_reference_comment": "The reference unit the published rates are denominated in, given as a CONVERSION FACTOR: how many of the API's numeraire units (source.quote_currency) make ONE reference unit. 1.0, the default, is the identity: the reference unit is the API's numeraire itself, so a $1 stablecoin (USDX) gets rate 1e8. The reference unit is economically INERT: translating every API price by the same factor preserves every relative value, so USD, EUR or an invented unit produce identical ratios in the whitelist. It changes what this server DISPLAYS, and nothing about the economics. No asset is a privileged 1:1 anchor: an asset absent from the whitelist is not accepted, the policy asset included, so this server publishes it explicitly like any other asset (ConvertAmountToValue in src/exchangerates.cpp). The factor matters in exactly one place: a manually priced asset, whose price is entered in reference units and is never translated. The previous key name reference_price_usd is still read, so older configs keep working. A local real-price feed is contrib/price-server/mock-price-api.py (Yahoo Finance; tBTC=BTC/USD, EURX/GOLD/SILVR/OILX real, tSEQ mocked).",
   "api_units_per_reference_unit": 1.0,
-
   "manual_prices": {
     "_comment": "Fixed prices, IN REFERENCE UNITS, for assets the market source does not cover: {\"TICKER\": 0.5} means 1 unit is worth 0.5 reference units. They are published exactly as entered and are never re-denominated (api_units_per_reference_unit translates API-sourced prices only). Used only when an asset has no market price; such an asset is admitted at that rate (always_reject still wins)."
   },
-
   "feed_aliases": {
     "_comment": "Map a registry ticker to the key the price feed uses for that asset, when they differ. The Sequence token's registry/display ticker is tSEQ (TSEQ) but the feed prices it under the chain-independent key SEQ (as the node GUI and explorer also do), so they refer to the same asset and merge into one row. SBTC (bridge-pegged Bitcoin) is priced exactly as BTC, which the feed keys as tBTC. Bridged stablecoins carry a .e suffix in the registry and none in the feed. An asset whose registry ticker finds no feed key is simply never priced, and so never admitted -- silently, since there is nothing wrong with it: keep this map in step with the registry or assets go missing from the whitelist for no visible reason. Keys are matched case-insensitively.",
     "TSEQ": "SEQ",
@@ -35,17 +22,14 @@
     "USDC.e": "USDC",
     "EURC.e": "EURC"
   },
-
   "default_thresholds": {
     "_comment": "Admission rules. Empty (only 'require') = admit every discovered asset that has a valid price. Add keys to tighten: min_market_cap, min_volume_24h, max_change_factor, max_volatility, min_price, max_price, issuer_domains. 'require' is 'all' or 'any'.",
     "require": "all"
   },
-
   "exceptions": {
     "always_admit": [],
     "always_reject": []
   },
-
   "ui": {
     "_comment": "Web UI access. public_status / public_api expose the read-only price page and the JSON API (/api/prices, /api/whitelist) to anyone who can reach the UI port, rate-limited per IP. password_hash gates the admin area; set it from the Access tab or with --set-password (never write it by hand).",
     "public_status": false,

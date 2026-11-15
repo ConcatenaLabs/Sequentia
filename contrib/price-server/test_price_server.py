@@ -31,7 +31,10 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -577,7 +580,7 @@ class TheGeneratorEmitsTheCurrentSchema(unittest.TestCase):
         return mod
 
     def generate(self, out, *extra):
-        return self.generator().main(["--out", out, "--committee", "2", *extra])
+        return self.generator().main(["--out", out, *extra])
 
     def written(self, tmp, *extra):
         out = os.path.join(tmp, "config.json")
@@ -597,7 +600,8 @@ class TheGeneratorEmitsTheCurrentSchema(unittest.TestCase):
             cfg = self.written(tmp)
         for key in ("source", "registry_url", "feed_aliases", "api_units_per_reference_unit"):
             self.assertIn(key, cfg)
-        self.assertEqual(len(cfg["node_rpcs"]), 2)
+        # A price server writes to no node: no node's login in its config.
+        self.assertNotIn("node_rpcs", cfg)
         self.assertNotIn("node_rpc", cfg)
 
     def test_it_no_longer_emits_the_pre_registry_shape(self):
@@ -700,39 +704,76 @@ class AnEmptyRoundNeverEmptiesTheWhitelist(unittest.TestCase):
                         "every asset should be recorded as unpriced this round")
 
 
-class ShutdownLeavesTheWhitelistInPlace(unittest.TestCase):
-    """Stopping a monitoring sidecar must not take the network's fee policy down."""
+class APriceServerWritesToNoNode(unittest.TestCase):
+    """A price server publishes its list and nodes read it. It holds no node's
+    login and calls no node, so a config that names one is refused with the
+    way forward, and nothing in the server can reach a node."""
 
-    class _RecordingRpc:
-        def __init__(self):
-            self.url = "http://stub-node"
-            self.calls = []
+    def test_node_logins_are_refused(self):
+        for key, value in (("node_rpc", {"host": "127.0.0.1", "port": 18776}),
+                           ("node_rpcs", [{"host": "127.0.0.1", "port": 18776}]),
+                           ("clear_whitelist_on_shutdown", True)):
+            with self.assertRaises(ps.ConfigError) as cm:
+                ps.PriceServer(base_cfg(**{key: value}), dry_run=False)
+            self.assertIn("never writes to a node", str(cm.exception), key)
 
-        def call(self, method, *args):
-            self.calls.append((method, args))
-            return None
+    def test_nothing_in_it_calls_a_node(self):
+        with open(ps.__file__, encoding="utf8") as f:
+            code = f.read()
+        self.assertNotIn("setfeeexchangerates\",", code)
+        self.assertFalse(hasattr(ps, "NodeRPC"))
 
-    def _server_at_shutdown(self, **cfg_extra):
-        cfg = base_cfg(node_rpcs=[], **cfg_extra)
-        srv = ps.PriceServer(cfg, dry_run=False)
-        rpc = self._RecordingRpc()
-        srv.rpcs = [rpc]
+    def test_a_publishing_config_polls_and_publishes(self):
+        srv = ps.PriceServer(base_cfg(), dry_run=False)
+        rates, _srv = poll_server(base_cfg(), LIVE_PRICES)
+        self.assertTrue(rates)
+
+    def test_shutdown_calls_nothing(self):
+        srv = ps.PriceServer(base_cfg(), dry_run=False)
         srv.last_rates = {"aa" * 32: 100000000}
         srv.stopping = True   # so run() skips straight to the shutdown tail
-        srv.run()
-        return rpc
+        srv.run()             # no node to call; nothing raises
 
-    def test_shutdown_does_not_clear_by_default(self):
-        rpc = self._server_at_shutdown()
-        self.assertEqual(rpc.calls, [],
-                         "clearing on shutdown would leave every fed node accepting no fee asset")
 
-    def test_an_operator_can_still_opt_in(self):
-        rpc = self._server_at_shutdown(clear_whitelist_on_shutdown=True)
-        self.assertEqual([m for m, _a in rpc.calls], ["setfeeexchangerates"])
-        method, args = rpc.calls[0]
-        self.assertEqual(args[0], {}, "the opt-in still clears")
-        self.assertIs(args[1], False, "and still without persisting, so a restart recovers")
+class TheFirstRoundWaitsForBaselines(unittest.TestCase):
+    """max_change_factor compares with the previous round, so a server's first
+    round has nothing to compare with. Publishing that round would drop every
+    asset the rule covers from every connected node, only for want of a
+    baseline. The first round publishes nothing; the second judges them all."""
+
+    def two_rounds(self, cfg):
+        registry = {tk.upper(): (asset_id(tk), "example.test", 8) for tk in LIVE_PRICES}
+        feed = {tk.upper(): {"price": p, "market_cap": None, "volume_24h": None} for tk, p in LIVE_PRICES.items()}
+        real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
+        ps.fetch_registry = lambda url, timeout: dict(registry)
+        ps.fetch_prices = lambda source, timeout: dict(feed)
+        try:
+            srv = ps.PriceServer(cfg, dry_run=True)
+            first = srv.poll_once()
+            second = srv.poll_once()
+        finally:
+            ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
+        return first, second, srv
+
+    def test_no_reduced_list_on_the_first_round(self):
+        cfg = base_cfg(default_thresholds={"require": "all", "max_change_factor": 5.0},
+                       manual_prices={})
+        first, second, srv = self.two_rounds(cfg)
+        self.assertEqual(first, {}, "the first round must not publish a list that lacks the gated assets")
+        self.assertEqual(len(second), len(LIVE_PRICES), "the second round admits every asset")
+
+    def test_no_reduced_list_when_some_assets_are_ungated(self):
+        # An always_admit asset passes the first round; publishing it alone would
+        # be the reduced list this guards against.
+        cfg = base_cfg(default_thresholds={"require": "all", "max_change_factor": 5.0},
+                       exceptions={"always_admit": ["USDX"]})
+        first, second, _srv = self.two_rounds(cfg)
+        self.assertEqual(first, {})
+        self.assertEqual(len(second), len(LIVE_PRICES))
+
+    def test_without_the_rule_the_first_round_publishes(self):
+        first, _second, _srv = self.two_rounds(base_cfg())
+        self.assertEqual(len(first), len(LIVE_PRICES))
 
 
 class ThePublishFileIsTheWhitelistNodesConnectTo(unittest.TestCase):
@@ -756,13 +797,16 @@ class ThePublishFileIsTheWhitelistNodesConnectTo(unittest.TestCase):
             ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
         return srv
 
-    def test_the_file_is_the_api_body(self):
+    def test_the_file_holds_the_list_and_nothing_else(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "feewhitelist.json")
             srv = self.poll_into(path, LIVE_PRICES)
             with open(path, encoding="utf8") as f:
                 published = json.load(f)
-            self.assertEqual(published, json.loads(json.dumps(ps._whitelist_payload(srv))))
+            # The rates and when they were made: no admission decisions, manual
+            # prices, reference-unit settings or anything else of the operator's.
+            self.assertEqual(set(published), {"updated", "rates"})
+            self.assertEqual(published, json.loads(json.dumps(ps._published_list(srv))))
             self.assertEqual(published["rates"], srv.last_rates)
             self.assertIsInstance(published["updated"], float)
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
@@ -779,37 +823,48 @@ class ThePublishFileIsTheWhitelistNodesConnectTo(unittest.TestCase):
             path = os.path.join(d, "feewhitelist.json")
             srv = self.poll_into(path, LIVE_PRICES)
             good = dict(srv.last_rates)
+            with open(path, encoding="utf8") as f:
+                made = json.load(f)["updated"]
+            time.sleep(0.01)
             self.poll_into(path, {}, srv=srv)
             with open(path, encoding="utf8") as f:
-                self.assertEqual(json.load(f)["rates"], good)
+                kept = json.load(f)
+            self.assertEqual(kept["rates"], good)
+            # Kept with the time it was made: a round that admitted nothing
+            # must not make an old list look freshly made.
+            self.assertEqual(kept["updated"], made)
+            self.assertEqual(ps._published_list(srv)["updated"], made)
 
     def test_no_file_without_the_option(self):
         srv = self.poll_into(None, LIVE_PRICES)
         self.assertIsNone(srv.publish_file)
 
 
-class AServerThatOnlyPublishesNeedsNoNodeLogin(unittest.TestCase):
-    """A node connected to this server takes its /api/whitelist, so a config
-    with no node RPC at all is a whole config: it polls and publishes, and
-    writes to no node."""
+class TheListIsServedAtFeewhitelist(unittest.TestCase):
+    """GET /feewhitelist is the published list, for nodes to read: served
+    whatever the public API's switch says, and 503 before there is one."""
 
-    def test_no_node_rpc_is_a_valid_config(self):
-        cfg = base_cfg()
-        cfg.pop("node_rpc", None)
-        cfg.pop("node_rpcs", None)
-        srv = ps.PriceServer(cfg, dry_run=False)
-        self.assertEqual(srv.rpcs, [])
-        registry = {tk.upper(): (asset_id(tk), "example.test", 8) for tk in LIVE_PRICES}
-        feed = {tk.upper(): {"price": p, "market_cap": None, "volume_24h": None} for tk, p in LIVE_PRICES.items()}
-        real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
-        ps.fetch_registry = lambda url, timeout: dict(registry)
-        ps.fetch_prices = lambda source, timeout: dict(feed)
+    def get(self, srv, path):
+        httpd = ps.start_config_ui(srv, "127.0.0.1", 0)
+        port = httpd.server_address[1]
         try:
-            rates = srv.poll_once()
+            with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
         finally:
-            ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
-        self.assertTrue(rates)
-        self.assertEqual(ps._whitelist_payload(srv)["rates"], rates)
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_served_with_the_public_api_off(self):
+        srv = ps.PriceServer(base_cfg(ui={"public_api": False}), dry_run=True)
+        self.assertEqual(self.get(srv, "/feewhitelist")[0], 503)
+        _rates, polled = poll_server(base_cfg(ui={"public_api": False}), LIVE_PRICES)
+        status, body = self.get(polled, "/feewhitelist")
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body), {"updated", "rates"})
+        self.assertEqual(body["rates"], polled.last_rates)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
