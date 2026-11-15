@@ -427,7 +427,23 @@ only coins still unspent: a spent coin cannot be spent again.
 - **Stake changes in the lost branch.** A lost block whose certificate does
   not verify under the registry at B's parent cannot be recorded, because
   stake changed in its branch before it. Its failing transactions are then
-  protected only by the holders' refusal until the lapse.
+  protected only by the holders' refusal until the lapse, never by nothing:
+  the holders bind every outpoint of a lost block whatever its record. A
+  stake change is itself a lost transaction, due and replayed in lost order,
+  so the registry the next blocks are judged with converges on the lost
+  branch's as the replay proceeds.
+- **The window's floor in time.** Six Bitcoin blocks can pass in minutes on
+  a test network's block storms. A floor of 3,600 seconds of Bitcoin median
+  time past above the lost block's anchor, read from the Bitcoin daemon as the
+  lapse is, would keep the window an hour long there; it is not part of the
+  rule.
+- **The holders' check per candidate.** The plan (the due run and the
+  records owed) is computed once per parent on each holder and shared by the
+  template, every proposal on that parent and the block's connection. It costs
+  about 0.2 ms per pending transaction, almost all of it reading the coins its
+  inputs spend: about 1 second with one stale Bitcoin block of full blocks
+  pending (4,800 transactions) and about 3 seconds with three (14,400). It is
+  paid in the first round at each height of the replay.
 - **A deeper fork point.** A lost branch whose transactions' window has
   passed is not carried.
 
@@ -467,7 +483,9 @@ upgraded. A node on the old rules reads a record as an ordinary `OP_RETURN`
 output and follows the upgraded committee's chain. It parts from it only if
 a quorum certifies a block that breaks a binding.
 
-Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_replay.py` and,
+Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_replay.py` (the
+due run and its floor, the producer's opt-out, a producer's own-asset block,
+a fork point too deep, kill -9 during a replay, full lost blocks) and,
 together with the payment proof, `feature_pos_lost_swap.py`.
 
 ### What the watcher costs the Bitcoin daemon
