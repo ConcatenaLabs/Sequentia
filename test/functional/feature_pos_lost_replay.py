@@ -26,6 +26,7 @@ feature_pos_lost_blocks.py. Cases (LOST_CASES):
 """
 
 import os
+import shutil
 import time
 from decimal import Decimal
 
@@ -550,6 +551,78 @@ class LostReplayTest(LostBlocksTest):
         self.record("r6", "there again", "honest blocks (height, carried, ordinary tx, weight): %s; occurrences in the chain of the %d abusive and the ordinary tx: %s" %
                     (hs2, len(in_l), counts))
         assert_equal(counts, {1: len(in_l) + 1})
+        self.realign()
+
+    # ----------------------------------------------------------- fab
+    def case_fab(self):
+        self.log.info("(fab) a fabricated lost block on a deep fork point: at the tip and at a syncing node")
+        a = self.nodes[SELLER]
+        n1, n2 = self.nodes[1], self.nodes[2]
+        c = self.fund()
+        p_hash = n1.getbestblockhash()
+        a_p = self.tip(n1)["anchorheight"]
+        # The honest chain moves on, W + 2 Bitcoin blocks later.
+        self.btc_mine(W + 2)
+        for _ in range(2):
+            self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        top = n1.getblockhash(n1.getblockheader(p_hash)["height"] + 1)
+        # The fabricator, isolated, builds L' on P, anchored on a fresh Bitcoin block B, with Tf spending c.
+        b_hash = self.btc_mine(1)[0]
+        self.disconnect_all(SELLER)
+        a.setnetworkactive(False)
+        a.invalidateblock(top)
+        self.wait_until(lambda: a.getbestblockhash() == p_hash, timeout=30)
+        tf_hex = self.spend(c, a.getnewaddress(), Decimal("0.0001"))
+        tf = a.sendrawtransaction(tf_hex)
+        fab = self.produce(SELLER, ALL_KEYS, leaders=[SELLER], txs_must=[tf])
+        self.record("fab", "L'", "%s on P (height %d, anchor %d), anchor %d, certified by the current keys, carries Tf spending c" %
+                    (fab["hash"][:12], fab["height"] - 1, a_p, fab["block"]["anchorheight"]))
+        # Bitcoin replaces B; the fabricator goes back to the honest chain; L' is in its store, lost.
+        self.btc().invalidateblock(b_hash)
+        self.btc_mine(2)
+        a.reconsiderblock(top)
+        self.wait_until(lambda: a.getbestblockhash() == n1.getbestblockhash(), timeout=60)
+        self.wait_until(lambda: fab["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=30)
+        ev = a.getlostblock(fab["hash"])
+        # A syncing node: node 5 wiped and started with no peer, shown L' first.
+        self.stop_node(LATE)
+        shutil.rmtree(os.path.join(self.nodes[LATE].datadir, "elementsregtest", "blocks"))
+        shutil.rmtree(os.path.join(self.nodes[LATE].datadir, "elementsregtest", "chainstate"))
+        lp = os.path.join(self.nodes[LATE].datadir, "elementsregtest", "lostblocks.dat")
+        if os.path.exists(lp):
+            os.remove(lp)
+        self.start_node(LATE, extra_args=self.node_args(LATE))
+        late = self.nodes[LATE]
+        self.record("fab", "syncing node (at genesis, IBD %s)" % late.getblockchaininfo()["initialblockdownload"],
+                    self.sub(late, ev["block"], ev["bitcoinheaders"]))
+        # At the tip.
+        r = self.sub(n2, ev["block"], ev["bitcoinheaders"])
+        time.sleep(3)
+        self.record("fab", "node 2 at the tip", "%s; L' held lost there: %s" % (r, fab["hash"] in self.lost(2)))
+        a.setnetworkactive(True)
+        self.mesh(range(N))
+        self.sync_tips(range(N))
+        self.record("fab", "node 5 synced", "tip %s; holds L': %s" % (late.getbestblockhash()[:12], fab["hash"] in self.lost(LATE)))
+        # Does L' freeze c? The owner spends c otherwise.
+        r_hex = self.spend(c, n1.getnewaddress(), Decimal("0.0002"))
+        r_id = tx_from_hex(r_hex).rehash()
+        try:
+            n2.sendrawtransaction(r_hex)
+            self.record("fab", "node 2's mempool takes c's other spend", "yes")
+        except JSONRPCException as e:
+            self.record("fab", "node 2's mempool takes c's other spend", "no: " + e.error["message"])
+        a.sendrawtransaction(r_hex)
+        since = [self.log_size(i) for i in range(N)]
+        h = self.produce(SELLER, ALL_KEYS, leaders=[1], txs_must=[r_id])
+        time.sleep(3)
+        on = [i for i in HONEST if self.in_chain(self.nodes[i], h["hash"])]
+        self.record("fab", "a block spending c otherwise", "taken by honest nodes %s" % on)
+        refusal = self.log_has(2, "Lost blocks: refusing block %s" % h["hash"], since[2])
+        if refusal:
+            self.record("fab", "node 2 refuses it", refusal[0].split("[LostCheckBlock] ", 1)[-1][:300])
+        assert "fork-too-deep" in r, r
+        assert_equal(on, HONEST)
         self.realign()
 
     # ------------------------------------------------------------ b1, b2

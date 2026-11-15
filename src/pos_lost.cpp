@@ -76,6 +76,7 @@ struct LostBlk {
     bool prot{false};
     uint256 fork_hash;
     int fork_height{-1};
+    int64_t fork_anchor_h{-1};
 };
 
 struct LostSpend {
@@ -595,6 +596,7 @@ std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const CBlockInde
         const uint256 txid = (*tx)->GetHash();
         if (MerkleFromBranch(txid, e.branch, e.pos) != lost[e.k].hashMerkleRoot) return "entry-merkle";
         if (anchor_h > lost[e.k].m_anchor_height + g_window) return "past-window";
+        if (lost[e.k].m_anchor_height > fork->m_anchor_height + g_window) return "fork-too-deep";
         bool any_off = false;
         for (size_t i = 0; i <= e.k && !any_off; ++i) any_off = judge_off(i) == 1;
         if (!any_off) return soft ? "bitcoin-unanswered" : "not-lost";
@@ -1006,6 +1008,9 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     }
     if (g_con_blockheightinheader && (uint32_t)height != block.block_height) return "bad-height";
     if (block.m_anchor_height < parent_anchor_h) return "bad-anchor-not-monotonic";
+    // A fork point more than W below the block is not carried: whatever
+    // forked that long ago left the window before it was lost (doc 03).
+    if (!parent_in_store && block.m_anchor_height > parent_anchor_h + g_window) return "fork-too-deep";
     int btc_h = 0;
     if (GetMainchainBlockCount(btc_h) && (uint32_t)btc_h > block.m_anchor_height + g_window) return "expired";
     // Where its anchor stands: a block of a branch Bitcoin left, or the child
@@ -1144,6 +1149,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         for (auto& [h, b] : g_blocks) {
             b.fork_height = -1;
             b.fork_hash.SetNull();
+            b.fork_anchor_h = -1;
             bool stale = false;
             const LostBlk* walk = &b;
             for (int guard = 0; walk && guard < 10000; ++guard) {
@@ -1160,6 +1166,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 // the fork point is its ancestor).
                 b.fork_height = walk->height - 1;
                 b.fork_hash = walk->prev;
+                if (const CBlockIndex* f = chainman.m_blockman.LookupBlockIndex(walk->prev)) b.fork_anchor_h = (int64_t)f->m_anchor_height;
                 break;
             }
             branch_stale[h] = stale && b.fork_height >= 0;
@@ -1168,6 +1175,9 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         std::set<uint256> prot;
         for (const auto& [h, b] : g_blocks) {
             if (!b.certified || !branch_stale[h]) continue;
+            // Within the window of its fork point (an unknown fork point is
+            // judged when it is known).
+            if (b.fork_anchor_h >= 0 && (int64_t)b.anchor_h > b.fork_anchor_h + (int64_t)g_window) continue;
             const LostBlk* walk = &b;
             while (walk && prot.insert(walk->hash).second) {
                 auto p = g_blocks.find(walk->prev);
