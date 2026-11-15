@@ -13,7 +13,12 @@ feature_pos_lost_blocks.py. Cases (LOST_CASES):
   r2  two lost blocks: a transaction due at once, one held by its locktime, a
       child held by its relative lock; replayed at the heights they fall due,
       with a holder killed (-9) between the steps;
-  r3  two lost branches whose transactions conflict: the one lost first stands.
+  r3  two lost branches whose transactions conflict: the one lost first stands;
+  r4  a carried transaction paying its fee in an asset the producer does not
+      list: claimed by default, left unclaimed with -poslostleaveunlisted;
+  r5  more due transactions than one block holds, bound by signature
+      operations: the longest prefix that fits, refused when empty or short,
+      nothing else while it is cut, ordinary transactions once it is done.
 """
 
 import os
@@ -22,10 +27,11 @@ from decimal import Decimal
 
 from feature_pos_lost_blocks import LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W
 from test_framework.authproxy import JSONRPCException
-from test_framework.messages import tx_from_hex
+from test_framework.messages import tx_from_hex, CTxInWitness
+from test_framework.script import CScript, OP_0, OP_1, OP_IF, OP_ENDIF, OP_DROP, OP_CHECKMULTISIG
 from test_framework.util import assert_equal
 
-CASES = os.environ.get("LOST_CASES", "r1,r2,r3").split(",")
+CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5").split(",")
 
 
 class LostReplayTest(LostBlocksTest):
@@ -209,6 +215,190 @@ class LostReplayTest(LostBlocksTest):
         assert r_id not in txs
         self.record("r3", "outcome", "block %s at height %d assembled by node 2: tx[1] = T; R not carried (its input is T's)" % (h["hash"][:12], h["height"]))
         self.sync_tips(HONEST + [LATE])
+        self.realign()
+
+
+    # ---------------------------------------------------------------- r4
+    def coinbase_assets(self, node, h):
+        cb = node.getblock(h, 2)["tx"][0]
+        out = {}
+        for o in cb["vout"]:
+            if o.get("value", 0) > 0:
+                out[o["asset"]] = out.get(o["asset"], Decimal(0)) + Decimal(str(o["value"]))
+        return out
+
+    def lose_one(self, case, txid, maker=SELLER, leader=1):
+        """`txid` (in `maker`'s mempool) certified in L with a certified child, then L lost."""
+        self.btc_mine(1)
+        L = self.produce(maker, ALL_KEYS, leaders=[leader], txs_must=[txid])
+        self.produce(maker, ALL_KEYS, leaders=[leader])
+        self.sync_tips(range(N))
+        assert self.nodes[1].getblockheader(L["hash"])["poscertified"]
+        since = self.lose(case, [L["hash"]])
+        return L, since
+
+    def case_r4(self):
+        self.log.info("(r4) a carried fee in an asset the producer does not list: claimed by default; left unclaimed with the switch")
+        a = self.nodes[SELLER]
+        n1 = self.nodes[1]
+        iss = a.issueasset(assetamount=Decimal("1000"), tokenamount=0, blind=False, fee_asset="bitcoin")
+        self.produce(SELLER, ALL_KEYS, txs_must=[iss["txid"]])
+        self.sync_tips(range(N))
+        X = iss["asset"]
+        rates = a.getfeeexchangerates()
+        rates[X] = 100000000
+        a.setfeeexchangerates(rates)
+        assert X not in n1.getfeeexchangerates()
+        self.record("r4", "asset", "X = %s, issued and listed by the seller only" % X[:16])
+        results = {}
+        for mode, node_i in (("default", 1), ("switch", 2)):
+            if mode == "switch":
+                self.extra = {2: ["-poslostleaveunlisted=1"]}
+                self.restart_node(2, extra_args=self.node_args(2))
+                for j in range(N):
+                    if j != 2:
+                        self.connect_nodes(2, j)
+                self.sync_tips(range(N))
+            t = a.sendtoaddress(address=n1.getnewaddress(), amount=Decimal("1"), assetlabel=X, fee_asset_label=X)
+            fee = -Decimal(str(a.gettransaction(t)["fee"][X]))
+            try:
+                n1.sendrawtransaction(a.getrawtransaction(t))
+                raise AssertionError("an honest mempool took a fee in an unlisted asset")
+            except JSONRPCException as e:
+                if mode == "default":
+                    self.record("r4", "honest mempool refuses T (fee in X)", e.error["message"])
+            L, since = self.lose_one("r4", t)
+            h = self.produce(node_i, ALL_KEYS, leaders=[SELLER])
+            node = self.nodes[node_i]
+            txs = self.tx_ids(node, h["hash"])
+            assert_equal(txs[1], t)
+            claimed = self.coinbase_assets(node, h["hash"])
+            self.sync_tips(HONEST + [LATE])
+            for i in HONEST + [LATE]:
+                assert self.in_chain(self.nodes[i], h["hash"])
+            results[mode] = claimed.get(X)
+            self.record("r4", mode, "block %s assembled by node %d: tx[1] = T (fee %s X); coinbase claims of X: %s; accepted by nodes %s" %
+                        (h["hash"][:12], node_i, fee, claimed.get(X, "none"), HONEST + [LATE]))
+            if mode == "default":
+                assert_equal(claimed.get(X), fee)
+            else:
+                assert X not in claimed
+                assert self.log_has(2, "left unclaimed (-poslostleaveunlisted)")
+            self.realign()
+        self.extra = {}
+        self.restart_node(2, extra_args=self.node_args(2))
+        self.mesh(range(N))
+        self.sync_tips(range(N))
+
+    # ---------------------------------------------------------------- r5
+    def heavy_scripts(self, n):
+        """n distinct witness scripts, each counted as 3,940 signature operations (197 CHECKMULTISIG of 20)."""
+        return [CScript([i.to_bytes(4, "little"), OP_DROP, OP_0, OP_IF] + [OP_CHECKMULTISIG] * 197 + [OP_ENDIF, OP_1]) for i in range(n)]
+
+    def sats(self, v):
+        return int(round(Decimal(str(v)) * 10**8))
+
+    def order_first(self, node, txids):
+        """Make `node`'s template take `txids` first, in this order (absolute modified fees)."""
+        for j, t in enumerate(txids):
+            e = node.getmempoolentry(t)
+            target = self.sats(e["fees"]["base"]) + (len(txids) - j + 1) * 10**9
+            node.prioritisetransaction(txid=t, fee_delta=target - self.sats(e["fees"]["modified"]))
+
+    def clear_priority(self, node, txids):
+        for t in txids:
+            if t in node.getrawmempool():
+                e = node.getmempoolentry(t)
+                d = self.sats(e["fees"]["base"]) - self.sats(e["fees"]["modified"])
+                if d:
+                    node.prioritisetransaction(txid=t, fee_delta=d)
+
+    def case_r5(self):
+        self.log.info("(r5) more due transactions than one block holds (signature operations): the longest prefix, and nothing else")
+        a = self.nodes[SELLER]
+        n1 = self.nodes[1]
+        n = 30
+        scripts = self.heavy_scripts(n)
+        addrs = [a.decodescript(s.hex())["segwit"]["address"] for s in scripts]
+        coin = self.fund(Decimal("2"))
+        outs = [{ad: Decimal("0.01")} for ad in addrs]
+        outs.append({a.getnewaddress(): Decimal("2") - Decimal("0.3") - Decimal("0.001")})
+        outs.append({"fee": Decimal("0.001")})
+        raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}], outs)
+        ftx = a.sendrawtransaction(a.signrawtransactionwithwallet(raw)["hex"])
+        self.produce(SELLER, ALL_KEYS, txs_must=[ftx])
+        self.sync_tips(range(N))
+        fdec = a.getrawtransaction(ftx, 1)
+        heavy = []
+        for i, s in enumerate(scripts):
+            vout = [o["n"] for o in fdec["vout"] if o["scriptPubKey"].get("address") == addrs[i]][0]
+            r = a.createrawtransaction([{"txid": ftx, "vout": vout}], [{n1.getnewaddress(): Decimal("0.009")}, {"fee": Decimal("0.001")}])
+            tx = tx_from_hex(r)
+            while len(tx.wit.vtxinwit) < len(tx.vin):
+                tx.wit.vtxinwit.append(CTxInWitness())
+            tx.wit.vtxinwit[0].scriptWitness.stack = [bytes(s)]
+            hx = tx.serialize().hex()
+            heavy.append(n1.sendrawtransaction(hx))
+        # An ordinary transaction, made now, sent once the replay starts.
+        coin2 = self.fund()
+        o_hex = self.spend(coin2, n1.getnewaddress(), Decimal("0.0001"))
+        o_id = tx_from_hex(o_hex).rehash()
+        self.btc_mine(1)
+        Ls = []
+        while any(t in n1.getrawmempool() for t in heavy):
+            Ls.append(self.produce(1, ALL_KEYS))
+        self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        order = []
+        for L in Ls:
+            order += [t for t in self.tx_ids(n1, L["hash"])[1:] if t in heavy]
+        assert_equal(len(order), n)
+        sig = [n1.getrawtransaction(t, 1) for t in order[:1]]
+        self.record("r5", "lost branch", "%d blocks %s holding %d transactions of 3,940 signature operations each (%s per block); one block holds 80,000" %
+                    (len(Ls), [L["height"] for L in Ls], n, [len(self.tx_ids(n1, L["hash"])) - 1 for L in Ls]))
+        since = self.lose("r5", [L["hash"] for L in Ls])
+        # A leader that carries none of them.
+        x = self.seller_block(ALL_KEYS, exclude=order)
+        self.refused_by("r5", HONEST, x["hash"], since, "bad-lost-replay")
+        line = self.log_has(1, "Lost blocks: refusing block %s" % x["hash"], since[1])[0]
+        k = int(line.split(" in the prefix")[0].rsplit("(", 1)[1])
+        self.record("r5", "the floor", "%d of %d due fit the signature-operation limit (80,000 less 4,000 held back): k = %d" % (k, n, k))
+        assert k < n
+        # A leader that carries a shorter prefix, in lost order.
+        self.realign()
+        since = [self.log_size(i) for i in range(N)]
+        self.order_first(a, order[:k - 1])
+        try:
+            y = self.seller_block(ALL_KEYS, exclude=order[k - 1:])
+        finally:
+            self.clear_priority(a, order)
+        assert_equal(self.tx_ids(a, y["hash"])[1:k], order[:k - 1])
+        self.refused_by("r5", HONEST, y["hash"], since, "(%d of %d in place" % (k - 1, k))
+        # The full prefix and an ordinary transaction while it is cut.
+        self.realign()
+        since = [self.log_size(i) for i in range(N)]
+        a.sendrawtransaction(o_hex)
+        self.order_first(a, order[:k])
+        try:
+            z = self.seller_block(ALL_KEYS, exclude=order[k:], include=[o_id])
+        finally:
+            self.clear_priority(a, order)
+        assert_equal(self.tx_ids(a, z["hash"])[1:k + 1], order[:k])
+        self.refused_by("r5", HONEST, z["hash"], since, "carries other transactions while due lost transactions did not fit")
+        self.realign()
+        # The honest assembler: the prefix alone, then the rest, then ordinary transactions.
+        n1.sendrawtransaction(o_hex)
+        h1 = self.produce(1, ALL_KEYS, leaders=[SELLER])
+        t1 = self.tx_ids(n1, h1["hash"])
+        assert_equal(t1[1:], order[:k])
+        self.sync_tips(HONEST + [LATE])
+        h2 = self.produce(1, ALL_KEYS, leaders=[SELLER])
+        t2 = self.tx_ids(n1, h2["hash"])
+        assert_equal(t2[1:1 + n - k], order[k:])
+        self.sync_tips(HONEST + [LATE])
+        self.record("r5", "outcome", "F+1 (%s): the %d of the prefix and nothing else; F+2 (%s): the other %d, then %d ordinary transaction(s)%s" %
+                    (h1["hash"][:12], k, h2["hash"][:12], n - k, len(t2) - 1 - (n - k), " (the waiting one among them)" if o_id in t2 else ""))
+        assert o_id in t2
         self.realign()
 
     # ------------------------------------------------------------ b1, b2

@@ -36,6 +36,8 @@ CASES = os.environ.get("LOST_CASES", "a,b,c,f,g").split(",")
 RESULTS = os.environ.get("LOST_RESULTS", "")
 BASE_BIN = os.environ.get("LOST_BASE_BIN", "")
 W = int(os.environ.get("LOST_WINDOW", "6"))
+# The testnet's block weight; fees in any accepted asset, as on the testnet.
+MAX_WEIGHT = int(os.environ.get("LOST_MAX_WEIGHT", "400000"))
 N = 6
 SELLER = 0
 LATE = 5
@@ -91,7 +93,7 @@ class LostBlocksTest(BitcoinTestFramework):
             "-con_connect_genesis_outputs=1", "-acceptnonstdtxn=1", "-par=1", "-fallbackfee=0.0001",
             "-blindedaddresses=0", "-con_default_blinded_addresses=0",
             "-con_bitcoin_anchor=1", "-validateanchor=1", "-anchorpollinterval=1", "-anchorminconf=1",
-            "-posescapestallmtpgap=0",
+            "-posescapestallmtpgap=0", "-con_any_asset_fees=1", "-con_maxblockweight=%d" % MAX_WEIGHT,
             "-mainchainrpchost=127.0.0.1", "-mainchainrpcport=%d" % self.btc_port,
             "-mainchainrpcuser=%s" % self.btc_user, "-mainchainrpcpassword=%s" % self.btc_pass,
             "-parentgenesisblockhash=%s" % self.btc_genesis, "-debug=mempool", "-debug=validation", "-txindex=1",
@@ -101,6 +103,7 @@ class LostBlocksTest(BitcoinTestFramework):
             a.append("-poslostwindow=%d" % W)
         if i == SELLER:
             a += ["-posdebugignorelost=1", "-minrelaytxfee=0", "-blockmintxfee=0"]
+        a += getattr(self, "extra", {}).get(i, [])
         return a
 
     def setup_network(self):

@@ -79,6 +79,13 @@ struct LostRecord {
 };
 //! The most record bytes one block may carry.
 static constexpr size_t LOST_RECORD_MAX_BYTES = 25000;
+//! The due prefix's floor (doc 03, "The duty of a holder"): the weight held
+//! back for the header and the coinbase, one coinbase fee output at its
+//! largest payee script per fee asset of the prefix, and the signature
+//! operations held back for the coinbase.
+static constexpr int64_t LOST_RESERVED_WEIGHT = 8000;
+static constexpr int64_t LOST_FEE_OUTPUT_WEIGHT = 4 * 160;
+static constexpr int64_t LOST_RESERVED_SIGOPS = 4000;
 
 //! The records a block's coinbase carries (malformed ones as nullopt).
 std::vector<std::optional<LostRecord>> LostParseRecords(const CBlock& block);

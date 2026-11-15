@@ -7,6 +7,7 @@
 #include <anchor.h>
 #include <chain.h>
 #include <chainparams.h>
+#include <confidential_validation.h>
 #include <consensus/merkle.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
@@ -615,6 +616,7 @@ struct Plan {
     std::set<uint256> to_record;
     std::vector<LostRecord> records;
     std::string summary;
+    int64_t micros{0};
 };
 
 Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& view, bool build)
@@ -644,13 +646,15 @@ Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& vie
         }
     }
     const Consensus::Params& consensus = Params().GetConsensus();
-    const auto classes = LostClassifyTxs(txs, view, prev, consensus);
+    const int64_t t0 = GetTimeMicros();
+    std::vector<int64_t> sigops;
+    const auto classes = LostClassifyTxs(txs, view, prev, consensus, &sigops);
     const auto bound = ChainBindings(prev, anchor_h);
     std::set<uint256> bound_txids;
     for (const auto& [o, t] : bound) bound_txids.insert(t);
     // What to record: a transaction that fails as it is, not yet recorded on
     // this chain, whose block this record can show lost and certified.
-    std::map<uint256, std::vector<std::pair<const LostBlk*, uint32_t>>> by_fork;
+    std::vector<std::pair<const LostBlk*, uint32_t>> recordable;
     int n_due = 0, n_later = 0, n_fails = 0, n_gone = 0;
     for (size_t i = 0; i < txs.size(); ++i) {
         switch (classes[i].first) {
@@ -694,27 +698,16 @@ Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& vie
                          txid.ToString(), b->hash.ToString(), reason);
                 break;
             }
-            plan.to_record.insert(txid);
-            by_fork[b->fork_hash].push_back(where[i]);
+            recordable.push_back(where[i]);
             break;
         }
         }
     }
-    // The prefix: due transactions in order, as many as fit.
-    const uint32_t max_weight = consensus.nMaxBlockWeight ? consensus.nMaxBlockWeight : MAX_BLOCK_WEIGHT;
-    int64_t budget = (int64_t)max_weight - 8000 - (int64_t)consensus.max_block_signature_size -
-                     (plan.to_record.empty() ? 0 : (int64_t)(WITNESS_SCALE_FACTOR * LOST_RECORD_MAX_BYTES));
-    int64_t sig_budget = MAX_BLOCK_SIGOPS_COST - 4000;
-    for (size_t i = 0; i < txs.size(); ++i) {
-        if (classes[i].first != LostTxCat::DUE) continue;
-        const int64_t w = GetTransactionWeight(*txs[i]);
-        const int64_t sig = GetLegacySigOpCount(*txs[i]) * WITNESS_SCALE_FACTOR;
-        if (w > budget || sig > sig_budget) { plan.cut = true; break; }
-        budget -= w;
-        sig_budget -= sig;
-        plan.prefix.push_back(txs[i]);
-    }
-    if (build) {
+    // The records, one per lost branch, of the given entries.
+    const auto build_records = [&](const std::vector<std::pair<const LostBlk*, uint32_t>>& entries) {
+        std::map<uint256, std::vector<std::pair<const LostBlk*, uint32_t>>> by_fork;
+        for (const auto& e : entries) by_fork[e.first->fork_hash].push_back(e);
+        std::vector<LostRecord> out;
         for (const auto& [fork_hash, items] : by_fork) {
             LostRecord rec;
             int top = 0;
@@ -744,12 +737,56 @@ Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& vie
                 e.tx = SerTxNoWitness(*b->block->vtx[pos]);
                 rec.entries.push_back(std::move(e));
             }
-            plan.records.push_back(std::move(rec));
+            out.push_back(std::move(rec));
+        }
+        return out;
+    };
+    // The record owed by this block: the longest prefix, in lost order, of
+    // the recordable transactions whose records fit the block's record bytes.
+    // The rest is owed by the next block (each block of the window records
+    // what is left), so a large failing set never makes every block invalid.
+    std::vector<std::pair<const LostBlk*, uint32_t>> chosen;
+    for (const auto& e : recordable) {
+        chosen.push_back(e);
+        size_t bytes = 0;
+        for (const LostRecord& r : build_records(chosen)) bytes += GetSerializeSize(r, PROTOCOL_VERSION);
+        if (bytes > LOST_RECORD_MAX_BYTES) {
+            chosen.pop_back();
+            break;
         }
     }
-    plan.summary = strprintf("%d due (%d in the prefix%s), %d later, %d failing (%d to record), %d gone",
+    for (const auto& [b, pos] : chosen) plan.to_record.insert(b->block->vtx[pos]->GetHash());
+    // The prefix: the due transactions in lost order, the longest run of them
+    // that fits the consensus limits. The weight left for them is the block's
+    // less a fixed reserve for the header, the coinbase and the certificate,
+    // less the record bytes when a record is owed, and less one coinbase fee
+    // output (at its largest payee script) per fee asset the prefix pays in;
+    // the signature operations are counted as ConnectBlock counts them. Fixed
+    // reserves keep the floor a function of the chain and the lost blocks
+    // alone, so a leader cannot shorten it by padding its own coinbase.
+    const uint32_t max_weight = consensus.nMaxBlockWeight ? consensus.nMaxBlockWeight : MAX_BLOCK_WEIGHT;
+    int64_t budget = (int64_t)max_weight - LOST_RESERVED_WEIGHT - (int64_t)consensus.max_block_signature_size -
+                     (plan.to_record.empty() ? 0 : (int64_t)(WITNESS_SCALE_FACTOR * LOST_RECORD_MAX_BYTES));
+    int64_t sig_budget = MAX_BLOCK_SIGOPS_COST - LOST_RESERVED_SIGOPS;
+    std::set<CAsset> fee_assets;
+    for (size_t i = 0; i < txs.size(); ++i) {
+        if (classes[i].first != LostTxCat::DUE) continue;
+        int64_t w = GetTransactionWeight(*txs[i]);
+        for (const auto& [asset, amount] : GetFeeMap(*txs[i])) {
+            if (amount > 0 && !fee_assets.count(asset)) w += LOST_FEE_OUTPUT_WEIGHT;
+        }
+        const int64_t sig = sigops[i];
+        if (w > budget || sig > sig_budget) { plan.cut = true; break; }
+        budget -= w;
+        sig_budget -= sig;
+        for (const auto& [asset, amount] : GetFeeMap(*txs[i])) if (amount > 0) fee_assets.insert(asset);
+        plan.prefix.push_back(txs[i]);
+    }
+    if (build) plan.records = build_records(chosen);
+    plan.micros = GetTimeMicros() - t0;
+    plan.summary = strprintf("%d due (%d in the prefix%s), %d later, %d failing (%d to record of %d recordable), %d gone; classified in %d us",
                              n_due, (int)plan.prefix.size(), plan.cut ? ", cut" : "", n_later, n_fails,
-                             (int)plan.to_record.size(), n_gone);
+                             (int)plan.to_record.size(), (int)recordable.size(), n_gone, (int)plan.micros);
     return plan;
 }
 
