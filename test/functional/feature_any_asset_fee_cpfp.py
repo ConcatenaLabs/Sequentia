@@ -67,7 +67,7 @@ class AnyAssetFeeCpfpTest(BitcoinTestFramework):
         self.skip_if_no_wallet()
 
     def set_rates(self, asset_rate=ASSET_RATE):
-        self.node.setfeeexchangerates({'gasset': GASSET_RATE, self.asset: asset_rate}, False)
+        self.node.setfeeexchangerates({'gasset': GASSET_RATE, self.asset: asset_rate})
 
     def send(self, inputs, outputs_asset, amount, fee_asset, fee_rate):
         """A transaction paying `amount` of `outputs_asset` to the wallet, its

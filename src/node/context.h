@@ -58,6 +58,11 @@ struct NodeContext {
     interfaces::WalletLoader* wallet_loader{nullptr};
     std::unique_ptr<CScheduler> scheduler;
     std::unique_ptr<CScheduler> reverification_scheduler;
+    //! SEQUENTIA: the node's public feeds (the asset registry, the reference
+    //! prices, the price server it is connected to) on a thread of their own,
+    //! so a slow server never holds the scheduler that block connection waits
+    //! on (through the validation-interface queue it drains).
+    std::unique_ptr<CScheduler> feeds_scheduler;
     //! SEQUENTIA: dedicated thread running the Bitcoin-anchor reorg watcher
     //! (AnchorWatchTask). It must NOT run on the main scheduler: the watcher
     //! calls InvalidateBlock -> SyncWithValidationInterfaceQueue(), which blocks

@@ -981,6 +981,14 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
             // process sendStatus and on error generate message shown to user
             processSendCoinsReturn(sendStatus);
 
+            if (sendStatus.status == WalletModel::FeeListChanged) {
+                // Review again: the fee is chosen under the list in force now.
+                fNewRecipientAllowed = true;
+                m_current_transaction.reset();
+                m_current_blind_details.reset();
+                QTimer::singleShot(0, this, [this] { sendButtonClicked(false); });
+                return;
+            }
             if (sendStatus.status == WalletModel::OK) {
                 Q_EMIT coinsSent(m_current_transaction->getWtx()->GetHash());
             } else {
@@ -1214,6 +1222,10 @@ void SendCoinsDialog::processSendCoinsReturn(const WalletModel::SendCoinsReturn 
     case WalletModel::PaymentRequestExpired:
         msgParams.first = tr("Payment request expired.");
         msgParams.second = CClientUIInterface::MSG_ERROR;
+        break;
+    case WalletModel::FeeListChanged:
+        msgParams.first = sendCoinsReturn.reasonCommitFailed + " " + tr("The review opens again with the fee under the list in force now.");
+        msgParams.second = CClientUIInterface::MSG_WARNING;
         break;
     // included to prevent a compiler warning.
     case WalletModel::OK:

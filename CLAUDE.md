@@ -177,11 +177,19 @@ production behaviour needs `-con_default_blinded_addresses=0`.
 **No privileged asset outside staking.** Only SEQ can stake. For everything else
 it is one asset among equals — fees are payable in any accepted asset. A silent
 fallback to the policy asset is a privilege, and privileges are bugs.
-The mainnet (`sequentia`) therefore starts with an empty fee whitelist
-(`m_seed_fee_whitelist = false`): a node there accepts nothing, and its wallet
-refuses to send, until the operator lists assets or sets up a price server. The
-testnet and custom chains start with SEQ listed at 1:1 instead, so a regtest
-node reproducing mainnet behaviour needs `-con_seed_fee_whitelist=0`.
+So no asset is listed before a node's fee whitelist is written
+(`m_seed_fee_whitelist = false` on both public chains). A whitelist is static
+when written by hand and dynamic when the node is connected to a price server,
+its operator's own or another operator's, and reads the list that server
+publishes; a price server never writes to a node, and nothing goes from a price
+feed API to the whitelist without a price server. The testnet (`test`) runs no
+price server of its own: it is connected to the network's (`-feepriceserver`,
+`src/feepriceserver.cpp`), so its whitelist is populated as it starts. The mainnet (`sequentia`) has no default price server and starts
+empty and static: it accepts nothing, and its wallet refuses to send, until the
+operator writes the list or connects to a price server. Custom chains, and only
+they, start with SEQ listed at 1:1 instead, by their own setting; a regtest node reproducing the mainnet needs
+`-con_seed_fee_whitelist=0`, and one reproducing the testnet adds
+`-con_default_fee_price_server=<address>`.
 
 **Bitcoin anchoring is supreme.** Every block references a Bitcoin block header.
 If that anchor is reorged away, this chain reorgs too, in real time. Immediate

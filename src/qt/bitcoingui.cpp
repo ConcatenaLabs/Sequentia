@@ -8,6 +8,7 @@
 #include <qt/clientmodel.h>
 #include <qt/createwalletdialog.h>
 #include <qt/guiconstants.h>
+#include <qt/feepolicydialog.h>
 #include <qt/guiutil.h>
 #include <qt/modaloverlay.h>
 #include <qt/networkstyle.h>
@@ -71,6 +72,7 @@
 #include <QMenuBar>
 #include <QGridLayout>
 #include <QSpacerItem>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QProgressDialog>
@@ -361,10 +363,10 @@ void BitcoinGUI::createActions()
     feePolicyAction = new QAction(tr("&Fee acceptance…"), this);
     feePolicyAction->setStatusTip(tr("View and edit which assets this node accepts for fee payment"));
 
-    // Sequentia operator tool: launch the bundled price-server sidecar (which keeps the dynamic fee
-    // whitelist updated) and open its configuration page in a browser. Node-level; no wallet needed.
+    // Sequentia operator tool: run your own price server (the bundled one), connect this node to
+    // the list it publishes, and open its configuration page in a browser. Node-level; no wallet needed.
     priceServerAction = new QAction(tr("&Price server…"), this);
-    priceServerAction->setStatusTip(tr("Start the price-server sidecar and open its configuration page"));
+    priceServerAction->setStatusTip(tr("Run your own price server, connect this node to it and open its configuration page"));
     connect(priceServerAction, &QAction::triggered, this, &BitcoinGUI::launchPriceServer);
 
 #ifdef ENABLE_WALLET
@@ -1119,24 +1121,87 @@ void BitcoinGUI::promptFeeSetupIfNeeded()
     for (const FeeAssetInfo& info : m_node.listFeeAssetInfo()) {
         if (info.accepted) return;
     }
+    // A node connected to a price server is waiting for its list, which is
+    // not something the user has to set up; the Send form and the Fee
+    // acceptance dialog say what it is waiting for.
+    if (feePriceServerState()["connected"].isTrue()) return;
     // Nothing is accepted, so nothing can be sent or relayed. That is how a node
-    // starts on a chain that does not seed the whitelist, and the user should
-    // hear it here rather than from a refused payment.
+    // starts on a chain with no default price server (the mainnet), and the
+    // user should hear it here rather than from a refused payment.
     QMessageBox box(QMessageBox::Information, tr("Set up fee acceptance"),
                     tr("This node does not yet accept any asset for transaction fees, so it cannot "
                        "send or relay transactions. You can receive in the meantime.\n\n"
-                       "Choose which assets it accepts and what each is worth. You can set the "
-                       "prices by hand, or set up the price server to keep them current."),
+                       "Its fee whitelist says which assets it accepts and what each is worth. Write "
+                       "it by hand, and it is static; or connect to a price server, another "
+                       "operator's or your own, and it is dynamic: the node reads the list that server "
+                       "publishes and keeps it current."),
                     QMessageBox::NoButton, this);
-    QPushButton* setup = box.addButton(tr("Set up now"), QMessageBox::AcceptRole);
+    QPushButton* by_hand = box.addButton(tr("Write it by hand"), QMessageBox::AcceptRole);
+    QPushButton* connect_to = box.addButton(tr("Connect to a price server…"), QMessageBox::AcceptRole);
+    QPushButton* run_own = box.addButton(tr("Run my own price server"), QMessageBox::AcceptRole);
     box.addButton(tr("Later"), QMessageBox::RejectRole);
+    // A message box sizes its buttons to its text column, which clips labels
+    // this long; each button asks for the width its own label needs.
+    for (QPushButton* b : {by_hand, connect_to, run_own}) {
+        b->setMinimumWidth(GUIUtil::TextWidth(b->fontMetrics(), b->text()) + 40);
+    }
     box.exec();
-    if (box.clickedButton() == setup) gotoFeePolicyDialog();
+    if (box.clickedButton() == by_hand) gotoFeePolicyDialog();
+    else if (box.clickedButton() == connect_to) connectToPriceServer();
+    else if (box.clickedButton() == run_own) launchPriceServer();
+}
+
+UniValue BitcoinGUI::feePriceServerState()
+{
+    try {
+        return m_node.executeRpc("getfeepriceserver", UniValue(UniValue::VARR), std::string());
+    } catch (...) {
+        return UniValue(UniValue::VOBJ);
+    }
+}
+
+void BitcoinGUI::connectToPriceServer(QString suggestion)
+{
+    if (suggestion.isEmpty()) {
+        const UniValue state = feePriceServerState();
+        if (state["network_price_server"].isStr()) suggestion = QString::fromStdString(state["network_price_server"].get_str());
+    }
+    bool ok = false;
+    const QString url = QInputDialog::getText(this, tr("Connect to a price server"),
+        tr("The address of the price server's published whitelist, e.g. http://host:8089/feewhitelist. "
+           "A price feed's address is not a price server and is refused."),
+        QLineEdit::Normal, suggestion, &ok).trimmed();
+    if (!ok || url.isEmpty()) return;
+    if (statusBar()) statusBar()->showMessage(tr("Asking the price server at %1…").arg(url));
+    // Asked off the GUI thread (a slow price server must not freeze the window);
+    // the answer comes back here.
+    LocalPriceServer::SetPriceServerAsync(m_node, this, url.toStdString(), [this, url](bool connected, const QString& why) {
+        if (statusBar()) statusBar()->clearMessage();
+        if (connected) {
+            QMessageBox::information(this, tr("Connected to a price server"),
+                tr("This node is connected to the price server at %1 and reads the whitelist that server publishes.").arg(url));
+            return;
+        }
+        if (QMessageBox::warning(this, tr("Connect to a price server"), why,
+                                 QMessageBox::Retry | QMessageBox::Cancel) == QMessageBox::Retry) {
+            connectToPriceServer(url);
+        }
+    });
 }
 
 void BitcoinGUI::launchPriceServer()
 {
     showNormalIfMinimized();
+    {
+        const UniValue state = feePriceServerState();
+        if (state["connected"].isTrue() &&
+            QMessageBox::question(this, tr("Run your own price server?"),
+                tr("This node is connected to a price server. Running your own connects it to yours "
+                   "instead.\n\nRun your own price server?"),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
+            return;
+        }
+    }
     const QString appDir = QCoreApplication::applicationDirPath();
 
     // Locate the bundled sidecar (see GUIUtil::findPriceServerFile for the search order).
@@ -1152,8 +1217,8 @@ void BitcoinGUI::launchPriceServer()
                             "source tree. Looked in:") + "\n" + searched.join("\n");
         text += "\n\n" + (feed.isEmpty()
             ? tr("This node has no price feed configured (-referencepricesurl), so amounts show no reference value.")
-            : tr("Note: this node reads its prices from %1. Running the sidecar here is only needed to "
-                 "publish your own feed.").arg(feed));
+            : tr("Note: the reference prices this node shows come from %1 and never enter its fee "
+                 "whitelist. Your own price server makes a whitelist of your own, which this node then reads.").arg(feed));
         QMessageBox box(QMessageBox::Warning, tr("Price server"), text, QMessageBox::Cancel, this);
         QPushButton* locate = box.addButton(tr("Locate…"), QMessageBox::AcceptRole);
         box.exec();
@@ -1192,8 +1257,14 @@ void BitcoinGUI::launchPriceServer()
             return;
         }
     }
+    // Your own price server publishes its list on this machine and the node
+    // connects to it there, as to any price server: no RPC login to the node.
+    if (!LocalPriceServer::PrepareConfig(cfg)) {
+        QMessageBox::warning(this, tr("Price server"), tr("Could not prepare the price-server config at %1.").arg(cfg));
+        return;
+    }
 
-    const int uiPort = 8089;
+    const int uiPort = LocalPriceServer::Port();
     const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
 
     // Already running (from an earlier click)? Just reopen the page — never spawn a
@@ -1202,11 +1273,32 @@ void BitcoinGUI::launchPriceServer()
         QDesktopServices::openUrl(QUrl(url));
         return;
     }
+    // Something else holds the port, perhaps a price server started another
+    // way: the probe below would take it for ours. Say so, and offer the two
+    // ways on: connect to whatever serves there, or use another port.
+    {
+        QTcpSocket probe;
+        probe.connectToHost(QStringLiteral("127.0.0.1"), static_cast<quint16>(uiPort));
+        const bool taken = probe.waitForConnected(300);
+        probe.abort();
+        if (taken) {
+            QMessageBox box(QMessageBox::Warning, tr("Price server"),
+                tr("Port %1 on this machine is already in use, perhaps by a price server you already run, "
+                   "so your own cannot start there.\n\nIf a price server listens there, connect this node "
+                   "to its list at %2. Otherwise start the wallet with -ownpriceserverport set to a free port.")
+                    .arg(uiPort).arg(LocalPriceServer::ListUrl()),
+                QMessageBox::Cancel, this);
+            QPushButton* connect_to = box.addButton(tr("Connect to it"), QMessageBox::AcceptRole);
+            box.exec();
+            if (box.clickedButton() == connect_to) connectToPriceServer(LocalPriceServer::ListUrl());
+            return;
+        }
+    }
 
     // Launch as a TRACKED child bound to LOOPBACK ONLY (never 0.0.0.0), so it cannot
-    // outlive the GUI: stopPriceServer() (called from the destructor) terminates it,
-    // which triggers the sidecar's own clean shutdown (clearing the dynamic fee
-    // whitelist). This replaces the old startDetached(), which orphaned the process.
+    // outlive the GUI: stopPriceServer() (called from the destructor) terminates it.
+    // The node keeps the last list it read, and its cache, until it is
+    // connected elsewhere or the whitelist is written by hand.
     if (m_price_server) { m_price_server->deleteLater(); m_price_server = nullptr; }
     m_price_server = new QProcess(this);
     m_price_server->setWorkingDirectory(sdir);
@@ -1261,6 +1353,14 @@ void BitcoinGUI::launchPriceServer()
             pollTimer->stop();
             pollTimer->deleteLater();
             QDesktopServices::openUrl(QUrl(url));
+            LocalPriceServer::ConnectWhenPublished(m_node, this, [this](bool ok, const QString& msg) {
+                if (ok) {
+                    if (statusBar()) statusBar()->showMessage(tr("Connected to your price server; the fee whitelist is dynamic."), 8000);
+                } else {
+                    QMessageBox::warning(this, tr("Price server"),
+                        tr("Your price server is running, but this node could not connect to it: %1").arg(msg));
+                }
+            });
         } else if (++(*attempts) >= 30) { // ~9s of 300ms polls
             pollTimer->stop();
             pollTimer->deleteLater();
@@ -1288,8 +1388,8 @@ void BitcoinGUI::stopPriceServer()
 {
     if (!m_price_server) return;
     if (m_price_server->state() != QProcess::NotRunning) {
-        // SIGTERM lets the sidecar run its own clean shutdown (it clears the dynamic
-        // fee whitelist on the node); fall back to kill() if it doesn't exit promptly.
+        // SIGTERM lets the price server stop cleanly; fall back to kill() if it
+        // doesn't exit promptly. The node keeps the last list it read.
         m_price_server->terminate();
         if (!m_price_server->waitForFinished(3000)) {
             m_price_server->kill();

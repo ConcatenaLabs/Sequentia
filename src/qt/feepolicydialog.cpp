@@ -4,6 +4,7 @@
 
 #include <qt/feepolicydialog.h>
 
+
 #include <qt/guiutil.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
@@ -14,7 +15,9 @@
 #include <interfaces/node.h>
 #include <util/system.h>
 
+#include <QApplication>
 #include <QComboBox>
+#include <QDateTime>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDialogButtonBox>
@@ -27,11 +30,13 @@
 #include <QHeaderView>
 #include <QDoubleValidator>
 #include <QIntValidator>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPointer>
 #include <QProcess>
 #include <QMessageBox>
 #include <QPushButton>
@@ -44,6 +49,8 @@
 #include <QVBoxLayout>
 
 #include <climits>
+#include <memory>
+#include <thread>
 
 static QTableWidgetItem* roItem(const QString& text)
 {
@@ -56,7 +63,9 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     : QDialog(parent), m_platform_style(platformStyle)
 {
     setWindowTitle(tr("Fee acceptance policy"));
-    resize(640, 560);
+    // Tall enough for the price-server section, the list and the editor at once;
+    // at the old height the list was squeezed to a single row.
+    resize(680, 760);
     auto* layout = new QVBoxLayout(this);
 
     // Wrapped, or this paragraph states its own length as the dialog's minimum
@@ -64,14 +73,38 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     auto* intro = new QLabel(tr("Assets this node accepts for transaction fees, and what one unit of "
                                 "each is worth. A fee is only worth what the asset it is paid in is "
                                 "worth, so this is what lets fees in different assets be compared. "
-                                "An asset that is not listed is not accepted. Set prices here by "
-                                "hand, or launch the price server to keep the list up to date."),
+                                "An asset that is not listed is not accepted. The whitelist is static "
+                                "when you write it by hand here, and dynamic when this node is "
+                                "connected to a price server: connect to one below, another "
+                                "operator's or your own."),
                              this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
 
+    // Which price server's list this node reads, if any, and how to change that.
+    auto* ps = new QGroupBox(tr("Price server"), this);
+    auto* ps_layout = new QVBoxLayout(ps);
+    m_ps_status = new QLabel(ps);
+    m_ps_status->setWordWrap(true);
+    m_ps_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    ps_layout->addWidget(m_ps_status);
+    auto* ps_row = new QHBoxLayout();
+    m_ps_url = new QLineEdit(ps);
+    m_ps_url->setPlaceholderText(tr("Address of a price server's published list, e.g. http://host:8089/feewhitelist"));
+    m_ps_url->setToolTip(tr("A price server publishes its whitelist at an address like this one. A price "
+                            "feed's address is not a price server and is refused."));
+    m_ps_connect = new QPushButton(tr("Connect"), ps);
+    m_ps_disconnect = new QPushButton(tr("Disconnect"), ps);
+    m_ps_disconnect->setToolTip(tr("Keep the list in force as a static whitelist and stop taking updates."));
+    ps_row->addWidget(m_ps_url, 1);
+    ps_row->addWidget(m_ps_connect);
+    ps_row->addWidget(m_ps_disconnect);
+    ps_layout->addLayout(ps_row);
+    layout->addWidget(ps);
+
     // The single fee whitelist (the effective accepted set).
     m_whitelist = new QTableWidget(0, 2, this);
+    m_whitelist->setMinimumHeight(140);
     m_whitelist->setHorizontalHeaderLabels({tr("Asset"), tr("Price of 1 unit (USD)")});
     m_whitelist->horizontalHeader()->setStretchLastSection(true);
     m_whitelist->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
@@ -108,11 +141,14 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     layout->addWidget(edit);
 
     m_status = new QLabel(this);
+    // Wrapped: an error quoting a price server's answer is long, and an
+    // unwrapped label widens the whole dialog past the screen's edge.
+    m_status->setWordWrap(true);
     layout->addWidget(m_status);
 
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Close, this);
     m_refresh = bb->addButton(tr("Refresh"), QDialogButtonBox::ActionRole);
-    m_launch_price_server = bb->addButton(tr("Launch price server"), QDialogButtonBox::ActionRole);
+    m_launch_price_server = bb->addButton(tr("Run my own price server"), QDialogButtonBox::ActionRole);
     layout->addWidget(bb);
 
     connect(bb, &QDialogButtonBox::rejected, this, &QDialog::close);
@@ -120,6 +156,97 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
     connect(m_add, &QPushButton::clicked, this, &FeePolicyDialog::onAddOrUpdate);
     connect(m_remove, &QPushButton::clicked, this, &FeePolicyDialog::onRemoveSelected);
     connect(m_launch_price_server, &QPushButton::clicked, this, &FeePolicyDialog::onLaunchPriceServer);
+    connect(m_ps_connect, &QPushButton::clicked, this, &FeePolicyDialog::onConnectPriceServer);
+    connect(m_ps_disconnect, &QPushButton::clicked, this, &FeePolicyDialog::onDisconnectPriceServer);
+}
+
+static QString timeText(int64_t t)
+{
+    return t > 0 ? GUIUtil::dateTimeStr(QDateTime::fromSecsSinceEpoch(t)) : QObject::tr("never");
+}
+
+void FeePolicyDialog::showPriceServerState()
+{
+    const UniValue& s = m_ps_state;
+    if (!s.isObject()) { m_ps_status->setText(QString()); return; }
+    const bool connected = s["connected"].isTrue();
+    const QString network = s["network_price_server"].isStr() ? QString::fromStdString(s["network_price_server"].get_str()) : QString();
+    m_ps_disconnect->setEnabled(connected);
+    m_ps_disconnect->setToolTip(tr("Keep the list in force as a static whitelist and stop taking updates."));
+    if (!connected) {
+        QString text = tr("Not connected to a price server. The whitelist is static: it is what you write "
+                          "to it by hand.");
+        if (s["disconnected_because"].isStr()) {
+            text += " " + tr("Disconnected because %1.").arg(QString::fromStdString(s["disconnected_because"].get_str()));
+        }
+        m_ps_status->setStyleSheet(QString());
+        m_ps_status->setText(text);
+        if (m_ps_url->text().isEmpty()) m_ps_url->setText(network);
+        return;
+    }
+    const QString url = QString::fromStdString(s["url"].get_str());
+    if (m_ps_url->text().isEmpty()) m_ps_url->setText(url);
+    QString text = s["default"].isTrue()
+        ? tr("Connected to the network's price server, %1. The whitelist is dynamic: this node reads the list that server publishes.").arg(url)
+        : tr("Connected to the price server at %1. The whitelist is dynamic: this node reads the list that server publishes.").arg(url);
+    const QString error = s["last_error"].isStr() ? QString::fromStdString(s["last_error"].get_str()) : QString();
+    if (s["has_list"].isTrue()) {
+        text += " " + tr("List read %1.").arg(timeText(s["list_written"].get_int64()));
+        if (!error.isEmpty()) text += " " + tr("Its last answer was refused or did not arrive (%1); the list in force is kept.").arg(error);
+    } else {
+        text += " " + tr("This node has not read a list from it yet%1, so no asset is accepted until it does.")
+                          .arg(error.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(error));
+    }
+    const bool stale = s["has_list"].isTrue() && s["list_written"].get_int64() > 0 &&
+                       QDateTime::currentSecsSinceEpoch() - s["list_written"].get_int64() > 3600;
+    if (stale) text += " " + tr("The list in force is more than an hour old.");
+    m_ps_status->setStyleSheet((!error.isEmpty() || stale || !s["has_list"].isTrue()) ? "color:#ffb020;" : QString());
+    m_ps_status->setText(text);
+}
+
+bool FeePolicyDialog::confirmHandWrite()
+{
+    if (!m_ps_state.isObject() || !m_ps_state["connected"].isTrue()) return true;
+    const QString url = QString::fromStdString(m_ps_state["url"].get_str());
+    return QMessageBox::question(this, tr("Write the whitelist by hand?"),
+               tr("This node is connected to the price server at %1 and reads its whitelist from it. Writing it by "
+                  "hand disconnects the node from that server for good, and the whitelist becomes static. You "
+                  "can connect again here at any time.\n\nWrite it by hand?").arg(url),
+               QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes;
+}
+
+void FeePolicyDialog::setPriceServerBusy(bool busy)
+{
+    m_ps_busy = busy;
+    for (QPushButton* b : {m_ps_connect, m_ps_disconnect, m_add, m_remove, m_launch_price_server}) {
+        if (b) b->setEnabled(!busy);
+    }
+    if (!busy) showPriceServerState();
+}
+
+void FeePolicyDialog::onConnectPriceServer()
+{
+    const std::string url = m_ps_url->text().trimmed().toStdString();
+    if (url.empty()) { setStatus(tr("Enter the address of a price server's published list."), true); return; }
+    if (!m_wallet_model || m_ps_busy) return;
+    setPriceServerBusy(true);
+    setStatus(tr("Asking the price server at %1…").arg(QString::fromStdString(url)));
+    LocalPriceServer::SetPriceServerAsync(m_wallet_model->node(), this, url, [this](bool ok, const QString& err) {
+        setPriceServerBusy(false);
+        if (ok) { setStatus(tr("Connected; the whitelist is the price server's.")); refresh(); }
+        else { setStatus(err, true); }
+    });
+}
+
+void FeePolicyDialog::onDisconnectPriceServer()
+{
+    if (!m_wallet_model || m_ps_busy) return;
+    setPriceServerBusy(true);
+    LocalPriceServer::SetPriceServerAsync(m_wallet_model->node(), this, std::string(), [this](bool ok, const QString& err) {
+        setPriceServerBusy(false);
+        if (ok) { setStatus(tr("Disconnected. The list in force is kept as a static whitelist.")); refresh(); }
+        else { setStatus(err, true); }
+    });
 }
 
 void FeePolicyDialog::setModel(WalletModel* model)
@@ -178,76 +305,86 @@ std::map<std::string, int64_t> FeePolicyDialog::currentRates(bool& ok, QString& 
     return out;
 }
 
-bool FeePolicyDialog::nodeRpcEndpoint(QJsonObject& out) const
+int LocalPriceServer::Port()
 {
-    // Where THIS node listens, and how the sidecar should authenticate to it.
-    // Prefer the cookie: it is what the node writes for its own tools, and it
-    // keeps an rpcpassword out of a second file on disk. The sidecar re-reads
-    // the cookie on every call, so a node restart rotating it is harmless.
-    const uint16_t port = static_cast<uint16_t>(gArgs.GetIntArg("-rpcport", BaseParams().RPCPort()));
-    out = QJsonObject();
-    out["host"] = QStringLiteral("127.0.0.1");
-    out["port"] = int(port);
+    const int64_t port = gArgs.GetIntArg("-ownpriceserverport", DEFAULT_PORT);
+    return port > 0 && port <= 65535 ? static_cast<int>(port) : DEFAULT_PORT;
+}
 
-    const std::string user = gArgs.GetArg("-rpcuser", "");
-    const std::string pass = gArgs.GetArg("-rpcpassword", "");
-    if (!user.empty() && !pass.empty()) {
-        out["user"] = QString::fromStdString(user);
-        out["password"] = QString::fromStdString(pass);
-        return true;
-    }
-    const fs::path cookie = AbsPathForConfigVal(fs::PathFromString(gArgs.GetArg("-rpccookiefile", ".cookie")));
-    out["cookie"] = QString::fromStdString(fs::PathToString(cookie));
+QString LocalPriceServer::ListUrl()
+{
+    return QStringLiteral("http://127.0.0.1:%1/feewhitelist").arg(Port());
+}
+
+bool LocalPriceServer::PrepareConfig(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QJsonParseError perr{};
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &perr);
+    f.close();
+    if (perr.error != QJsonParseError::NoError || !doc.isObject()) return false;
+    QJsonObject root = doc.object();
+    // A price server publishes its list and the node reads it; it writes to no
+    // node and holds no node's login. A config from an older copy of the
+    // wallet carries those settings, which the price server refuses: drop them.
+    for (const char* key : {"node_rpc", "node_rpcs", "clear_whitelist_on_shutdown"}) root.remove(key);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
     return true;
 }
 
-void FeePolicyDialog::writeNodeRpcInto(const QString& path) const
+void LocalPriceServer::SetPriceServerAsync(interfaces::Node& node, QObject* context, const std::string& url,
+                                           std::function<void(bool, const QString&)> done)
 {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) return;
-    const QByteArray raw = f.readAll();
-    f.close();
-
-    QJsonParseError perr{};
-    QJsonDocument doc = QJsonDocument::fromJson(raw, &perr);
-    if (perr.error != QJsonParseError::NoError || !doc.isObject()) return;
-
-    QJsonObject root = doc.object();
-    QJsonObject rpc;
-    if (!nodeRpcEndpoint(rpc)) return;
-    // Keep the file's own explanation of the field; only the values are ours.
-    const QJsonObject existing = root.value("node_rpc").toObject();
-    if (existing.contains("_comment")) rpc["_comment"] = existing.value("_comment");
-    root["node_rpc"] = rpc;
-
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    f.close();
+    // Off the GUI thread: connecting asks the price server first, which may
+    // take as long as -feepriceservertimeout, and a frozen window is worse
+    // than a moment's wait. The result comes back on the GUI thread, and only
+    // while the context still exists.
+    QPointer<QObject> guard(context);
+    interfaces::Node* nodePtr = &node;
+    std::thread([guard, nodePtr, url, done]() {
+        bool ok = false;
+        QString error;
+        UniValue params(UniValue::VARR);
+        params.push_back(url);
+        try {
+            nodePtr->executeRpc("setfeepriceserver", params, std::string());
+            ok = true;
+        } catch (const UniValue& e) {
+            error = e.isObject() && e.exists("message") ? QString::fromStdString(e["message"].get_str()) : QString::fromStdString(e.write());
+        } catch (const std::exception& e) {
+            error = QString::fromStdString(e.what());
+        } catch (...) {
+            error = QObject::tr("Unknown error.");
+        }
+        QMetaObject::invokeMethod(qApp, [guard, done, ok, error]() {
+            if (guard) done(ok, error);
+        });
+    }).detach();
 }
 
-QString FeePolicyDialog::nodeRpcMismatch(const QString& path) const
+void LocalPriceServer::ConnectWhenPublished(interfaces::Node& node, QObject* context, std::function<void(bool, const QString&)> done)
 {
-    // An EXISTING config can point somewhere else entirely -- an older copy of
-    // the example, or a node that has since moved port. The sidecar will not
-    // complain in any way the operator sees: it polls, prices, pushes, and the
-    // pushes are refused. Say so here, where they are about to start it.
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) return QString();
-    const QByteArray raw = f.readAll();
-    f.close();
-    QJsonParseError perr{};
-    const QJsonDocument doc = QJsonDocument::fromJson(raw, &perr);
-    if (perr.error != QJsonParseError::NoError || !doc.isObject()) return QString();
-
-    const QJsonObject rpc = doc.object().value("node_rpc").toObject();
-    if (rpc.isEmpty()) return QString();
-    const int configured = rpc.value("port").toInt();
-    const uint16_t actual = static_cast<uint16_t>(gArgs.GetIntArg("-rpcport", BaseParams().RPCPort()));
-    if (configured == int(actual)) return QString();
-    return tr("The price server config at %1 publishes to port %2, but this node listens on %3. "
-              "Nothing will reach it until that is corrected — the sidecar reports the refusals "
-              "only in its own log.")
-        .arg(path).arg(configured).arg(int(actual));
+    auto* timer = new QTimer(context);
+    auto attempts = std::make_shared<int>(0);
+    auto inflight = std::make_shared<bool>(false);
+    interfaces::Node* nodePtr = &node;
+    QObject::connect(timer, &QTimer::timeout, context, [nodePtr, context, timer, attempts, inflight, done]() {
+        if (*inflight) return;
+        *inflight = true;
+        const bool last = ++(*attempts) >= 45; // ~90 s: its first poll fetches the registry and the feed
+        SetPriceServerAsync(*nodePtr, timer, ListUrl().toStdString(), [timer, inflight, last, done](bool ok, const QString& error) {
+            *inflight = false;
+            if (ok || last) {
+                timer->stop();
+                timer->deleteLater();
+                done(ok, ok ? ListUrl() : error);
+            }
+        });
+    });
+    timer->start(2000);
 }
 
 void FeePolicyDialog::refresh()
@@ -255,6 +392,12 @@ void FeePolicyDialog::refresh()
     m_whitelist->setRowCount(0);
     m_remove->setEnabled(false);
     if (!m_wallet_model) { setStatus(tr("No wallet loaded."), true); return; }
+
+    {
+        bool ok = false; QString err;
+        m_ps_state = callRpc("getfeepriceserver", UniValue(UniValue::VARR), ok, err);
+        showPriceServerState();
+    }
 
     // Shown as prices rather than as the rates the node stores. The stored rate
     // is atoms of the asset per reference fee atom, times a factor for the
@@ -271,6 +414,7 @@ void FeePolicyDialog::refresh()
         // a claim that this row is Bitcoin.
         QTableWidgetItem* name = roItem(GUIUtil::assetDisplayNameForKey(info.identifier));
         name->setToolTip(tr("Fee policy key: %1").arg(QString::fromStdString(info.identifier)));
+        name->setData(Qt::UserRole, QString::fromStdString(info.identifier));
         m_whitelist->setItem(row, 0, name);
         const double price = UnitPriceFromFeeRate(info.rate, info.precision);
         auto* price_item = roItem(info.accepted ? QString::number(price, 'f', price >= 1.0 ? 2 : 8)
@@ -282,7 +426,10 @@ void FeePolicyDialog::refresh()
         if (info.accepted) accepted++;
     }
     if (accepted == 0) {
-        setStatus(tr("No asset is accepted for fees yet, so this node cannot send. Add one above, or launch the price server."), true);
+        setStatus(m_ps_state.isObject() && m_ps_state["connected"].isTrue()
+                      ? tr("No asset is accepted for fees yet, so this node cannot send until its price server sends a list.")
+                      : tr("No asset is accepted for fees yet, so this node cannot send. Add one above, connect to a price server, or run your own."),
+                  true);
     } else {
         setStatus(tr("%n asset(s) accepted for fees.", "", accepted));
     }
@@ -313,6 +460,7 @@ void FeePolicyDialog::onAddOrUpdate()
                                              : DEFAULT_ASSET_PRECISION;
     const long long rate = (price == 0.0) ? 0 : FeeRateFromUnitPrice(price, precision);
     if (price > 0.0 && rate <= 0) { setStatus(tr("That price is too small to represent for this asset."), true); return; }
+    if (!confirmHandWrite()) return;
 
     bool ok = false; QString err;
     // Start from the FULL current policy so every other accepted asset is preserved
@@ -336,7 +484,11 @@ void FeePolicyDialog::onRemoveSelected()
     const int row = sel.first().row();
     QTableWidgetItem* assetItem = m_whitelist->item(row, 0);
     if (!assetItem) { setStatus(tr("Select an entry to remove."), true); return; }
-    const std::string assetKey = assetItem->text().toStdString();
+    // The key the whitelist holds, not the name on display: the two differ
+    // whenever the GUI shows an asset by another name, and erasing the shown
+    // name would remove nothing while saying "Removed."
+    const std::string assetKey = assetItem->data(Qt::UserRole).toString().toStdString();
+    if (!confirmHandWrite()) return;
 
     bool ok = false; QString err;
     // Start from the FULL current policy, drop just this asset, and write the rest back so the
@@ -355,79 +507,15 @@ void FeePolicyDialog::onRemoveSelected()
 
 void FeePolicyDialog::onLaunchPriceServer()
 {
-    // Resolve the bundled sidecar the SAME way BitcoinGUI::launchPriceServer does
-    // (GUIUtil::findPriceServerFile). Never hardcode a /home/<user> path — that is
-    // dead on every shipped install.
-    const QString appDir = QCoreApplication::applicationDirPath();
-    QString script = GUIUtil::findPriceServerFile(QStringLiteral("price_server.py"));
-    if (script.isEmpty()) {
-        // Offer to be pointed at it rather than leaving a dead end; the choice is
-        // remembered, so this is asked once.
-        QMessageBox box(QMessageBox::Warning, tr("Price server"),
-                        tr("Could not find the price-server script (price_server.py). "
-                           "It ships beside the node binary, or in contrib/price-server/ in the source tree."),
-                        QMessageBox::Cancel, this);
-        QPushButton* locate = box.addButton(tr("Locate…"), QMessageBox::AcceptRole);
-        box.exec();
-        if (box.clickedButton() != locate) {
-            setStatus(tr("Could not find the price-server script (price_server.py)."), true);
-            return;
-        }
-        script = GUIUtil::promptForPriceServerScript(this);
-        if (script.isEmpty()) return;
-    }
-    const QString sdir = QFileInfo(script).absolutePath();
-
-    // A Python interpreter that can actually run the sidecar (on Windows the bare
-    // name "python3" is usually a Store stub that runs nothing).
-    const QString python = GUIUtil::findPythonInterpreter(sdir);
-    if (python.isEmpty()) {
-        setStatus(tr("The price server needs Python, and no usable interpreter was found. Install Python 3 "
-                     "and try again (on Windows the built-in \"python3\" shortcut only opens the Microsoft "
-                     "Store and cannot run the server)."), true);
+    // One launcher for the whole wallet: the main window's, which tracks the
+    // price server it starts (it stops with the wallet) and connects this node
+    // to it once it publishes.
+    // Called by name: the main window's slot (BitcoinGUI::launchPriceServer).
+    QWidget* main = parentWidget() ? parentWidget()->window() : nullptr;
+    if (main && QMetaObject::invokeMethod(main, "launchPriceServer")) {
+        setStatus(tr("Starting your price server; this node connects to it once it publishes its first list, "
+                     "at %1.").arg(LocalPriceServer::ListUrl()));
         return;
     }
-
-    // Per-user config in the app data dir; seed it from the bundled config.example.json on first run.
-    const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (!dataDir.isEmpty()) QDir().mkpath(dataDir);
-    const QString cfg = (dataDir.isEmpty() ? sdir : dataDir) + "/price-server.json";
-    if (!QFileInfo::exists(cfg)) {
-        QString example = GUIUtil::findPriceServerFile(QStringLiteral("config.example.json"));
-        if (example.isEmpty()) {
-            const QString beside = sdir + QStringLiteral("/config.example.json");
-            if (QFileInfo::exists(beside)) example = beside;
-        }
-        if (example.isEmpty() || !QFile::copy(example, cfg)) {
-            setStatus(tr("Could not create a default price-server config at %1.").arg(cfg), true);
-            return;
-        }
-        // The example ships a placeholder RPC endpoint, and copying it verbatim
-        // was a trap: the sidecar starts, polls, prices everything correctly and
-        // pushes it all at a port with no node behind it, for as long as nobody
-        // reads its log. We know exactly where this node listens and how to
-        // authenticate to it, so write that in rather than leave it to be
-        // discovered later by its absence.
-        QFile::setPermissions(cfg, QFile::ReadOwner | QFile::WriteOwner);
-        writeNodeRpcInto(cfg);
-    }
-
-    const QString mismatch = nodeRpcMismatch(cfg);
-
-    const int uiPort = 8089;
-    const QStringList args{script, "--config", cfg, "--ui-port", QString::number(uiPort), "--ui-host", "127.0.0.1"};
-    if (!QProcess::startDetached(python, args, sdir)) {
-        setStatus(tr("Failed to start the price server using '%1'. Ensure Python is available.").arg(python), true);
-        return;
-    }
-
-    // Give the sidecar a moment to bind, then open its configuration UI in the browser.
-    const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
-    QTimer::singleShot(1500, this, [url]{ QDesktopServices::openUrl(QUrl(url)); });
-    if (!mismatch.isEmpty()) {
-        setStatus(mismatch, true);
-        return;
-    }
-    setStatus(tr("The price server is starting; its configuration page will open at %1. "
-                 "It will maintain the whitelist; Refresh to see updates.").arg(url));
+    setStatus(tr("Open Run my own price server from the main window's Settings menu."), true);
 }

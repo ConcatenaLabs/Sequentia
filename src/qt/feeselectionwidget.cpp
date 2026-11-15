@@ -14,6 +14,7 @@
 #include <exchangerates.h>
 #include <feeassets.h>
 #include <interfaces/node.h>
+#include <univalue.h>
 #include <policy/feerate.h>
 #include <wallet/coincontrol.h>
 
@@ -609,11 +610,18 @@ void FeeSelectionWidget::updateWarning()
             if (candidate.accepted) { any_accepted = true; break; }
         }
         if (!any_accepted) {
+            UniValue state;
+            try {
+                state = m_model->node().executeRpc("getfeepriceserver", UniValue(UniValue::VARR), std::string());
+            } catch (...) {}
             m_warning->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
-            m_warning->setText(
-                tr("This node accepts no asset for transaction fees yet, so nothing can be sent. "
-                   "Set prices by hand or launch the price server under Settings → Fee acceptance. "
-                   "Receiving is not affected."));
+            m_warning->setText(state.isObject() && state["connected"].isTrue()
+                ? tr("This node is connected to the price server at %1, which has not sent a fee whitelist "
+                     "yet, so nothing can be sent until it does. Receiving is not affected.")
+                      .arg(QString::fromStdString(state["url"].get_str()))
+                : tr("This node accepts no asset for transaction fees yet, so nothing can be sent. "
+                     "Write the whitelist by hand, or connect to a price server, under Settings → Fee "
+                     "acceptance. Receiving is not affected."));
             m_warning->setVisible(true);
             return;
         }

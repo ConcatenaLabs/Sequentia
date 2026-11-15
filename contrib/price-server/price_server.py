@@ -33,24 +33,21 @@ whitelist (see doc/sequentia/02-open-fee-market.md). Each round it:
      `round(price * 1e8)` for the common 8-decimal case (a no-op) and corrects
      the valuation for any asset with a different denomination, otherwise a fee
      paid in, say, a 2-decimal asset would be mis-valued by 1e6. Then it
-  5. publishes the result via the node's `setfeeexchangerates` RPC with
-     persist=false.
+  5. PUBLISHES the result: GET /feewhitelist on its own port, and the file
+     --publish-file names, for a web server to serve. Either holds the list and
+     when it was made ({"updated": <time>, "rates": {...}}), nothing else.
 
-The node keeps a SINGLE fee-asset whitelist; this sidecar owns it in full.
-`setfeeexchangerates` replaces the published set wholesale, so whatever this
-server emits each round IS the whitelist. persist=false keeps these automated
-pushes out of the node's exchangerates.json, so a restart falls back to the
-operator's hand-configured (static) whitelist rather than a dead price server's
-last rates. On clean shutdown the rates are cleared (fail safe: assets leave the
-whitelist rather than ride a dead price).
+A price server never writes to a node. A node connects to it by that address
+(-feepriceserver, or setfeepriceserver) and reads the list, which makes the
+node's fee whitelist dynamic; the node keeps the last list it read whenever this
+server cannot be reached. One server feeds as many nodes as connect to it.
 Stdlib only; no external dependencies.
 
 Usage:
-    price_server.py --config config.json [--once] [--dry-run] [--ui-port N]
+    price_server.py --config config.json [--once] [--dry-run] [--ui-port N] [--publish-file PATH]
 """
 
 import argparse
-import base64
 import collections
 import hashlib
 import hmac
@@ -91,7 +88,7 @@ def scaled_rate(price, precision):
 
 # Published rates must satisfy 0 < rate <= MAX_RATE. The node parses each rate
 # with get_int64; a value above INT64_MAX (~9.22e18) makes that parse throw and
-# the node drops the WHOLE setfeeexchangerates batch. We clamp well below that so
+# a connected node refuses the WHOLE list it read. We clamp well below that so
 # one absurd quote can never poison every other asset's rate; offenders are
 # dropped per-asset and logged instead. The ceiling leaves headroom above 1e8x
 # precision scaling (a 0-decimal asset multiplies the rate by 1e8) and the
@@ -131,6 +128,17 @@ DEFAULT_REFERENCE_FACTOR = 1.0
 # A config still setting the key is REFUSED rather than ignored, because
 # ignoring it would silently change the denomination the fees are quoted in.
 REMOVED_KEYS = {
+    "node_rpc": (
+        "a price server never writes to a node. Remove it: each node connects to this "
+        "server instead and reads its list (-feepriceserver=http://<this server>:<ui port>/feewhitelist, "
+        "or the address where --publish-file is served; setfeepriceserver does the same on a running node)"),
+    "node_rpcs": (
+        "a price server never writes to a node. Remove it: each node connects to this "
+        "server instead and reads its list (-feepriceserver=http://<this server>:<ui port>/feewhitelist, "
+        "or the address where --publish-file is served; setfeepriceserver does the same on a running node)"),
+    "clear_whitelist_on_shutdown": (
+        "a price server never writes to a node, so there is nothing to clear. Remove it: a node "
+        "connected to this server keeps the last list it read while the server is down"),
     "reference_asset_label": (
         "the pinned-token reference mode was removed: the reference unit is always an "
         "abstract factor, never a token, so that no asset is a privileged 1:1 anchor. "
@@ -168,43 +176,6 @@ def check_config(cfg):
     for key, guidance in REMOVED_KEYS.items():
         if key in cfg:
             raise ConfigError("config key %r is no longer supported: %s" % (key, guidance))
-
-
-class NodeRPC:
-    """Minimal JSON-RPC client for the Sequentia node."""
-
-    def __init__(self, cfg):
-        self.url = "http://%s:%d/" % (cfg.get("host", "127.0.0.1"), cfg["port"])
-        # The cookie is re-read per call, not cached here: a node writes a NEW
-        # cookie every time it starts, so a cached one works right up until the
-        # node is restarted and then fails every push with 401 -- silently, if
-        # nobody is reading the log. Path only; the read is in auth().
-        self.cookie_path = os.path.expanduser(cfg["cookie"]) if "cookie" in cfg else None
-        self.static_auth = None
-        if self.cookie_path is None:
-            self.static_auth = "%s:%s" % (cfg["user"], cfg["password"])
-        self.timeout = cfg.get("timeout", 30)
-
-    def auth(self):
-        if self.cookie_path is None:
-            return self.static_auth
-        with open(self.cookie_path, encoding="utf8") as f:
-            return f.read().strip()
-
-    def call(self, method, *params):
-        payload = json.dumps({
-            "jsonrpc": "1.0", "id": "price-server",
-            "method": method, "params": list(params),
-        }).encode()
-        req = urllib.request.Request(self.url, data=payload, headers={
-            "Authorization": "Basic " + base64.b64encode(self.auth().encode()).decode(),
-            "Content-Type": "application/json",
-        })
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            reply = json.loads(resp.read())
-        if reply.get("error") is not None:
-            raise RuntimeError("node RPC error from %s: %s" % (method, reply["error"]))
-        return reply["result"]
 
 
 def http_get_json(url, timeout):
@@ -301,6 +272,11 @@ def fetch_prices_custom(source, tickers, timeout):
     return out
 
 
+#: The status of an asset refused only because max_change_factor has no
+#: baseline yet: on a server's first round, every asset it applies to.
+PENDING_BASELINE = "pending: max_change_factor has no baseline yet (next round)"
+
+
 class AssetState:
     """Per-ticker rolling state (price history for volatility, last accepted /
     pending rate for the max_change_factor gate). Admission itself is decided by
@@ -324,24 +300,23 @@ class AssetState:
 
 
 class PriceServer:
-    def __init__(self, config, dry_run=False, config_path=None):
+    def __init__(self, config, dry_run=False, config_path=None, publish_file=None):
         check_config(config)  # every construction path, not just the CLI
         self.cfg = config
         self.dry_run = dry_run
         self.config_path = config_path
+        self.publish_file = publish_file  # where the whitelist is published for nodes to connect to
         self._lock = threading.Lock()
         self._states = {}            # TICKER -> AssetState
         self.last_rates = {}         # asset_id -> rate (last published)
         self.last_report = []        # [{ticker, id, domain, price, price_unit, rate, status}] for the UI
         self.last_prices = {}        # TICKER -> {price, market_cap, volume_24h} (for the public API)
         self.last_poll_ts = None     # unix time of the last completed poll
-        self.node_status = []        # [{url, ok, error, ts}] result of the last publish per node
-        if dry_run:
-            self.rpcs = []
-        elif "node_rpcs" in config:
-            self.rpcs = [NodeRPC(n) for n in config["node_rpcs"]]
-        else:
-            self.rpcs = [NodeRPC(config["node_rpc"])]
+        # When the rates last came out of a round that admitted something: the
+        # published list's time. A round that admits nothing keeps the last
+        # list, and its time, so a stale list never looks freshly made.
+        self.last_admitted_ts = None
+        self.published_once = False  # whether this run has published a list yet
         self.source_name = config.get("source_name", "price-server")
         self.stopping = False
 
@@ -357,7 +332,7 @@ class PriceServer:
 
     def apply_config(self, *, source=None, thresholds=None, exceptions=None,
                      poll_interval=None, source_name=None, registry_url=None,
-                     nodes=None, ui=None, manual_prices=None):
+                     ui=None, manual_prices=None):
         """Replace config sections from the UI and persist atomically."""
         with self._lock:
             if source is not None:
@@ -373,11 +348,6 @@ class PriceServer:
                 self.cfg["source_name"] = source_name
             if registry_url is not None:
                 self.cfg["registry_url"] = registry_url
-            if nodes is not None:
-                self.cfg["node_rpcs"] = nodes
-                self.cfg.pop("node_rpc", None)
-                if not self.dry_run:
-                    self.rpcs = [NodeRPC(n) for n in nodes]
             if manual_prices is not None:
                 self.cfg["manual_prices"] = manual_prices
             if ui is not None:
@@ -453,6 +423,10 @@ class PriceServer:
                     failed = [n for n, ok, ev in checks if not (ok and ev)]
                     if change_eval and not change_ok:
                         state.pending_rate = new_rate
+                    if failed == ["max_change_factor"] and not change_eval:
+                        # Refused only for want of a baseline, which the next
+                        # round has: not a judgement on the asset.
+                        return None, PENDING_BASELINE
                     return None, "rejected: " + ",".join(failed)
 
         if new_rate <= 0:
@@ -694,26 +668,40 @@ class PriceServer:
                 r["rate"], r["status"] = None, "skipped: rate outside the publishable range in reference units"
             else:
                 r["rate"] = published
-        # A round that admitted NOTHING is not a policy, it is a failure. Publishing
-        # it would empty every fed node's whitelist, and since the node no longer
-        # falls back to the policy asset at 1:1 that halts relay just as surely as
-        # the shutdown clear did. One bad feed response, or a simultaneous trip of
-        # the market-cap / volume / change-factor floors, must not be able to do
-        # that. Keep the last good map and say so loudly.
-        if not rates:
-            if self.last_rates:
-                log.error("this poll admitted NO assets; REFUSING to publish an empty whitelist. "
-                          "Keeping the last good set of %d rate(s) in place; relay is unaffected. "
-                          "Investigate the feed or the admission thresholds.", len(self.last_rates))
-                self.last_report = report
-                self.last_prices = prices
-                self.last_poll_ts = time.time()
-                return self.last_rates
-            log.error("this poll admitted NO assets and there is no previous set to fall back on; "
-                      "publishing nothing. Fed nodes keep whatever they already had.")
+        # A server's first round cannot apply max_change_factor (there is no
+        # previous rate to compare with), so it would leave out every asset that
+        # rule covers. Publishing that list would drop those assets from every
+        # node connected here, and evict their transactions, only for want of a
+        # baseline. The first round seeds the baselines and publishes nothing;
+        # nodes keep the last list they read (the publish file of the previous
+        # run included) until the next round, which can judge every asset.
+        pending = [r for r in report if r["status"] == PENDING_BASELINE]
+        if pending and not self.published_once:
+            log.info("first round: %d asset(s) need a baseline for max_change_factor; publishing "
+                     "from the next round, which has one", len(pending))
             self.last_report = report
             self.last_prices = prices
             self.last_poll_ts = time.time()
+            return self.last_rates
+
+        # A round that admitted NOTHING is not a policy, it is a failure.
+        # Publishing it would empty the whitelist of every node connected here,
+        # and since no asset is accepted by default that halts their relay. One
+        # bad feed response, or a simultaneous trip of the market-cap / volume /
+        # change-factor floors, must not be able to do that. Keep the last good
+        # list, with the time it was made, and say so loudly.
+        if not rates:
+            self.last_report = report
+            self.last_prices = prices
+            self.last_poll_ts = time.time()
+            if self.last_rates:
+                log.error("this poll admitted NO assets; REFUSING to publish an empty whitelist. "
+                          "The last good list of %d rate(s), made %s, stays published. "
+                          "Investigate the feed or the admission thresholds.", len(self.last_rates),
+                          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.last_admitted_ts or 0)))
+                return self.last_rates
+            log.error("this poll admitted NO assets and there is no previous list; publishing nothing. "
+                      "Connected nodes keep whatever they already had.")
             return {}
 
         # A round that admitted FEWER assets than the last one is not necessarily
@@ -726,43 +714,41 @@ class PriceServer:
             for asset_id in dropped:
                 r = by_id.get(asset_id, {})
                 log.warning("asset %s (%s) was in the last whitelist and is NOT in this one: %s. "
-                            "Nodes will stop accepting fees in it.",
+                            "Connected nodes will stop accepting fees in it.",
                             r.get("ticker", "?"), asset_id[:16], r.get("status", "no longer discovered"))
 
+        now = time.time()
         self.last_rates = rates
         self.last_report = report
         self.last_prices = prices
-        self.last_poll_ts = time.time()
+        self.last_poll_ts = now
+        self.last_admitted_ts = now
+        self.published_once = True
         admitted = sum(1 for r in report if r["rate"] is not None)
         if self.dry_run:
-            log.info("dry-run: %d/%d discovered assets admitted; would publish %s",
+            log.info("dry-run: %d/%d discovered assets admitted: %s",
                      admitted, len(report), json.dumps(rates))
-            return rates
-        ok = 0
-        node_status = []
-        for rpc in self.rpcs:
-            try:
-                rpc.call("setfeeexchangerates", rates, False)  # persist=False: re-pushed each poll
-                ok += 1
-                node_status.append({"url": rpc.url, "ok": True, "error": "", "ts": time.time()})
-            except Exception as e:
-                log.warning("publish to %s failed: %s", rpc.url, e)
-                node_status.append({"url": rpc.url, "ok": False, "error": str(e), "ts": time.time()})
-        self.node_status = node_status
-        log.info("published %d rate(s) to %d/%d node(s) (%d/%d discovered admitted)",
-                 len(rates), ok, len(self.rpcs), admitted, len(report))
-        # Reaching NO node is a total failure, and it must not read like the
-        # line above reads -- "published 6 rate(s) to 0/1 node(s)" has the word
-        # "published" in it and scrolls past as if something happened. Nothing
-        # did: the node is still on whatever whitelist it last had, or on its
-        # static file. This exact state ran unnoticed for weeks on a laptop
-        # whose config pointed at a port no node listened on.
-        if ok == 0 and self.rpcs:
-            log.error("PUBLISHED TO NO NODE: all %d configured node RPC(s) refused or were "
-                      "unreachable. The node is NOT using these rates. Check node_rpc in the "
-                      "config against the node's own rpcport/rpcuser (or cookie path): %s",
-                      len(self.rpcs), "; ".join("%s: %s" % (n["url"], n["error"]) for n in node_status))
+        self.write_publish_file()
+        log.info("published %d rate(s) (%d/%d discovered admitted)%s", len(rates), admitted, len(report),
+                 " to %s" % self.publish_file if self.publish_file else "")
         return rates
+
+    def write_publish_file(self):
+        """Publish the list as a file, for a web server to serve to the nodes
+        connected to this price server: the same body as GET /feewhitelist,
+        written whole (a temporary file renamed over the old one) after every
+        round that made a list. Nothing is written before the first: a node
+        refuses an empty list, and an empty file would say nothing true."""
+        if not self.publish_file or not self.last_rates:
+            return
+        tmp = self.publish_file + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf8") as f:
+                json.dump(_published_list(self), f, indent=2)
+            os.chmod(tmp, 0o644)  # it is public by definition
+            os.replace(tmp, self.publish_file)
+        except OSError as e:
+            log.error("could not write the published whitelist to %s: %s", self.publish_file, e)
 
     def run(self):
         signal.signal(signal.SIGTERM, self._stop)
@@ -779,37 +765,11 @@ class PriceServer:
             deadline = time.time() + self.cfg.get("poll_interval_secs", 60)
             while not self.stopping and time.time() < deadline:
                 time.sleep(0.5)
-        # ⚠ DO NOT CLEAR THE WHITELIST HERE.
-        #
-        # This used to push `setfeeexchangerates {}` to every node on SIGTERM. That
-        # was fail-safe for exactly one reason: the node fell back to accepting the
-        # policy asset 1:1 whenever the whitelist did not list it, so an empty map
-        # still left a working fee asset. That fallback is gone — no asset is the
-        # reference unit, and an asset absent from the whitelist is simply not
-        # accepted, the policy asset included.
-        #
-        # So clearing on shutdown now means: every fed node accepts NO fee asset,
-        # RecomputeFees evicts, the mempools empty and RELAY STOPS FLEET-WIDE.
-        # Stopping a monitoring sidecar must never take the network's fee policy
-        # down with it. The last-good rates stay in place instead; they were pushed
-        # with persist=False, so they are runtime state that a node restart clears
-        # by itself, and a node that never restarts keeps relaying on the last
-        # policy this server published rather than on none at all.
-        #
-        # An operator who genuinely wants the old behaviour can opt in, but it is
-        # off by default because the safe choice must not be the one you remember
-        # to configure.
-        if not self.dry_run and self.cfg.get("clear_whitelist_on_shutdown", False):
-            for rpc in self.rpcs:
-                try:
-                    rpc.call("setfeeexchangerates", {}, False)  # persist=False: clear without touching the static file
-                except Exception as e:
-                    log.warning("could not clear the fee-asset whitelist on %s: %s", rpc.url, e)
-            log.warning("cleared the fee-asset whitelist on shutdown (clear_whitelist_on_shutdown=true): "
-                        "every fed node now accepts NO fee asset and will not relay until this server runs again")
-        else:
-            log.info("shutting down; leaving the last published fee-asset whitelist in place "
-                     "(%d rate(s)) so relay continues", len(self.last_rates))
+        # A price server writes to no node, so stopping it changes no node:
+        # each connected node keeps the last list it read until this server
+        # publishes again.
+        log.info("shutting down; connected nodes keep the last published list (%d rate(s))",
+                 len(self.last_rates))
 
     def _stop(self, _sig, _frame):
         self.stopping = True
@@ -857,6 +817,13 @@ def _src(srv):
         "market_cap_path": s.get("market_cap_path", "market_cap"),
         "volume_24h_path": s.get("volume_24h_path", "volume_24h"),
     }
+
+
+def _published_list(srv):
+    """The published list: GET /feewhitelist, and the --publish-file. The rates
+    and when they were made, nothing else: the admission decisions, manual
+    prices and settings stay on the operator's side (GET /api/whitelist)."""
+    return {"updated": srv.last_admitted_ts, "rates": srv.last_rates}
 
 
 def _whitelist_payload(srv):
@@ -1022,9 +989,6 @@ function tab(ev,id){
 function addExc(k){var l=document.getElementById('list_'+k);var d=document.createElement('div');d.className='excrow';
 var i=document.createElement('input');i.name=k;var b=document.createElement('button');b.type='button';b.className='rm';
 b.innerHTML='\\u00d7';b.onclick=function(){d.remove()};d.appendChild(i);d.appendChild(b);l.appendChild(d);i.focus();}
-function addNode(){var t=document.getElementById('nodetpl');var c=t.content.cloneNode(true);
-document.getElementById('nodelist').appendChild(c);}
-function rmNode(b){b.closest('tr').remove();}
 function addManual(){var l=document.getElementById('list_manual');var d=document.createElement('div');d.className='excrow';
 d.innerHTML='<input name=manual_ticker placeholder="TICKER or 64-hex id" style="flex:2">'+
 '<input name=manual_price placeholder="price in reference units" style="flex:1">'+
@@ -1256,14 +1220,6 @@ def _scope_and_manual_cards(srv):
     ])
 
 
-def _nodes_current(srv):
-    if "node_rpcs" in srv.cfg:
-        return list(srv.cfg["node_rpcs"])
-    if "node_rpc" in srv.cfg:
-        return [srv.cfg["node_rpc"]]
-    return []
-
-
 def _render_admin(srv, csrf_token, saved=False, error=""):
     esc = html.escape
     t = srv.thresholds()
@@ -1276,13 +1232,6 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
 
     # -- status tab --
     admitted = sum(1 for r in srv.last_report if r["rate"] is not None)
-    nodes_ok = sum(1 for n in srv.node_status if n["ok"])
-    node_rows = "".join(
-        "".join(["<tr><td class='num mono'>", esc(n["url"]), "</td>",
-                 "<td class=num>", _fmt_age(n["ts"]), "</td>",
-                 "<td>", ('<span class="pill good">OK</span>' if n["ok"]
-                          else '<span class="pill bad">' + esc(n["error"][:80] or "failed") + "</span>"), "</td></tr>"])
-        for n in srv.node_status) or '<tr><td colspan=3 class=noterow>No publish attempted yet.</td></tr>'
     status_tab = "".join([
         "<div class=kpis>",
         '<div class=kpi><div class=l>Whitelisted</div><div class=v>', str(admitted), " / ", str(len(srv.last_report)), "</div>",
@@ -1291,12 +1240,10 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         "</div><div class=s>every ", esc(str(srv.cfg.get("poll_interval_secs", 60))), " s</div></div>",
         '<div class=kpi><div class=l>Quote currency</div><div class=v>', esc(quote), "</div>",
         '<div class=s>set in Market source</div></div>',
-        '<div class=kpi><div class=l>Nodes updated</div><div class=v>', str(nodes_ok), " / ", str(len(srv.rpcs)),
-        "</div><div class=s>last push per node below</div></div>",
+        '<div class=kpi><div class=l>List published</div><div class=v>', _fmt_age(srv.last_admitted_ts),
+        "</div><div class=s>nodes read it at /feewhitelist</div></div>",
         "</div>",
         "<div class=card><h2>Assets &amp; admission decisions</h2>", _decisions_table(srv), "</div>",
-        "<div class=card><h2>Node pushes <span class=right>setfeeexchangerates \xb7 persist=false</span></h2>",
-        "<table><tr><th>Node RPC</th><th>Last push</th><th>Status</th></tr>", node_rows, "</table></div>",
     ])
 
     # -- market source tab (part of the main /save form) --
@@ -1307,7 +1254,7 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         "<div class=frow><label>Quote currency</label><div><input name=quote_currency value=\"", esc(quote),
         "\" style=\"max-width:120px\"><div class=hint>The currency the API reports prices in, usually plain USD "
         "(it does not need to exist as an on-chain asset). Every price, market cap and volume on these pages is "
-        "expressed in it. The rates pushed to your nodes are in <b>reference units</b>, which are this currency "
+        "expressed in it. The rates this server publishes are in <b>reference units</b>, which are this currency "
         "only while the conversion factor <code>api_units_per_reference_unit</code> is 1.0 (the default); set any "
         "other factor and the rates are in that unit instead.</div></div></div>",
         "<div class=frow><label>API format</label><div>",
@@ -1364,31 +1311,18 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         exc_list("issuer_domains", "Trusted issuer domains", "Assets whose registry-verified issuer domain is in this list pass the issuer rule."),
     ])
 
-    # -- nodes tab (its own form) --
-    nodes = _nodes_current(srv)
-
-    def node_row(n):
-        return "".join([
-            "<tr><td><input name=node_name value=\"", esc(str(n.get("name", ""))), "\" placeholder=\"my node\"></td>",
-            "<td><input class=mono name=node_host value=\"", esc(str(n.get("host", "127.0.0.1"))), "\"></td>",
-            "<td style='width:90px'><input class=num name=node_port value=\"", esc(str(n.get("port", ""))), "\"></td>",
-            "<td><input name=node_user value=\"", esc(str(n.get("user", ""))), "\" autocomplete=off></td>",
-            "<td><input type=password name=node_password value=\"", esc(str(n.get("password", ""))), "\" autocomplete=new-password></td>",
-            "<td><input class=mono name=node_cookie value=\"", esc(str(n.get("cookie", ""))), "\" placeholder=\"(or cookie file)\"></td>",
-            "<td><button type=button class=rm onclick=rmNode(this)>&times;</button></td></tr>",
-        ])
+    # -- publishing tab: how nodes read the list --
+    port = getattr(srv, "ui_port", None)
+    here = "http://&lt;this host&gt;:%s/feewhitelist" % (esc(str(port)) if port else "&lt;ui port&gt;")
     nodes_tab = "".join([
-        '<form method=post action=/nodes>',
-        '<input type=hidden name=csrf_token value="', esc(csrf_token), '">',
-        "<div class=card><h2>Nodes receiving the whitelist <span class=right>setfeeexchangerates \xb7 persist=false</span></h2>",
-        "<table><tr><th>Name</th><th>Host</th><th>RPC port</th><th>RPC user</th><th>RPC password</th><th>Cookie file</th><th></th></tr>",
-        "<tbody id=nodelist>", "".join(node_row(n) for n in nodes), "</tbody></table>",
-        "<template id=nodetpl>", node_row({}), "</template>",
-        '<div class=frm><div><button type=button class=ghost onclick=addNode()>+ Add node</button></div>',
-        "<div class=hint>Each node must run with <code>-con_any_asset_fees=1</code>. Give either user+password or a "
-        "cookie file path. If the price server stops, every node simply keeps the last whitelist it received.</div></div>",
-        '<div class=savebar><button class=btn type=submit>Save nodes</button>',
-        "<span class=mut>applies live — the next poll publishes to the new list</span></div></div></form>",
+        "<div class=card><h2>Publishing <span class=right>nodes read; this server writes to none</span></h2>",
+        "<p>This server publishes its list, the rates and when they were made and nothing else, at <code>",
+        here, "</code>", (" and in the file <code>" + esc(srv.publish_file) + "</code>") if srv.publish_file else "",
+        ". A node connects to it by that address and reads the list every minute, which makes its fee "
+        "whitelist dynamic:</p>",
+        "<pre class=mono>sequentiad -feepriceserver=", here, "\nsequentia-cli setfeepriceserver ", here, "</pre>",
+        "<p class=mut>A node keeps the last list it read while this server is down. Any number of nodes may "
+        "connect; none needs a login here, and this server needs none of theirs.</p></div>",
     ])
 
     # -- access tab (its own form) --
@@ -1433,7 +1367,7 @@ def _render_admin(srv, csrf_token, saved=False, error=""):
         '<button class=on onclick="tab(event,\'t-status\')">Status</button>',
         '<button onclick="tab(event,\'t-source\')">Market source</button>',
         '<button onclick="tab(event,\'t-rules\')">Admission rules</button>',
-        '<button onclick="tab(event,\'t-nodes\')">Nodes</button>',
+        '<button onclick="tab(event,\'t-nodes\')">Publishing</button>',
         '<button onclick="tab(event,\'t-access\')">Access</button>',
         "</nav>",
         '<div class="tab on" id=t-status>', status_tab, "</div>",
@@ -1513,33 +1447,7 @@ def _ui_parse(srv, form):
             "manual_prices": manual}
 
 
-def _nodes_parse(form):
-    """Parse the Nodes form: parallel input lists, one entry per row."""
-    names = form.get("node_name", [])
-    hosts = form.get("node_host", [])
-    ports = form.get("node_port", [])
-    users = form.get("node_user", [])
-    pws = form.get("node_password", [])
-    cookies = form.get("node_cookie", [])
-    nodes = []
-    for i in range(len(hosts)):
-        host = hosts[i].strip()
-        try:
-            port = int(ports[i].strip()) if i < len(ports) else 0
-        except ValueError:
-            port = 0
-        if not host or not port:
-            continue  # an all-empty template row, or one without the essentials
-        n = {"host": host, "port": port}
-        if i < len(names) and names[i].strip():
-            n["name"] = names[i].strip()
-        if i < len(cookies) and cookies[i].strip():
-            n["cookie"] = cookies[i].strip()
-        else:
-            n["user"] = users[i].strip() if i < len(users) else ""
-            n["password"] = pws[i] if i < len(pws) else ""
-        nodes.append(n)
-    return nodes
+
 
 
 def _is_loopback(host):
@@ -1636,6 +1544,16 @@ def start_config_ui(price_server, host, port):
                                  "updated": srv.last_poll_ts, "publisher": srv.source_name,
                                  "format": "sequentia"}
                 self._send(200, json.dumps(data, indent=2), "application/json")
+            elif path == "/feewhitelist":
+                # The published list, for nodes to read: the rates and when
+                # they were made, nothing of the operator's. Not behind the
+                # public API's switch or rate limit: publishing it is what a
+                # price server is for, and every node connected here polls it.
+                if not srv.last_rates:
+                    self._send(503, json.dumps({"updated": None, "rates": {},
+                                                "error": "no list published yet"}), "application/json")
+                    return
+                self._send(200, json.dumps(_published_list(srv), indent=2), "application/json")
             elif path in ("/api/whitelist", "/status"):  # /status: legacy alias
                 if self._public_gate(ui_cfg().get("public_api")):
                     return
@@ -1714,13 +1632,6 @@ def start_config_ui(price_server, host, port):
             try:
                 if path == "/save":
                     srv.apply_config(**_ui_parse(srv, form))
-                elif path == "/nodes":
-                    nodes = _nodes_parse(form)
-                    if not nodes:
-                        self._send(200, _render_admin(srv, csrf_token,
-                                                      error="No valid node rows (each needs host + port)."))
-                        return
-                    srv.apply_config(nodes=nodes)
                 elif path == "/access":
                     ui = {"public_status": bool(g("public_status")),
                           "public_api": bool(g("public_api"))}
@@ -1772,7 +1683,7 @@ def main():
     parser.add_argument("--config", required=True, help="path to JSON config file")
     parser.add_argument("--once", action="store_true", help="poll once and exit")
     parser.add_argument("--dry-run", action="store_true",
-                        help="don't publish to the node, just log decisions")
+                        help="log every round's list in full (it is still published at /feewhitelist and in --publish-file)")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--ui-port", type=int, default=0,
                         help="serve the web UI/API on this port (0 = off)")
@@ -1782,6 +1693,11 @@ def main():
                         help="permit a non-loopback bind even without an admin password (NOT recommended)")
     parser.add_argument("--set-password", action="store_true",
                         help="prompt for an admin password, store its hash in the config, and exit")
+    parser.add_argument("--publish-file", default=None,
+                        help="after every round that makes a list, write it (the body of GET "
+                             "/feewhitelist: the rates and when they were made) to this file, for a "
+                             "web server to serve to the nodes connected to this price server "
+                             "(-feepriceserver). Written in --dry-run too.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -1813,7 +1729,8 @@ def main():
         print("Admin password set. Restart the price server to pick it up.")
         return 0
 
-    server = PriceServer(config, dry_run=args.dry_run, config_path=args.config)
+    server = PriceServer(config, dry_run=args.dry_run, config_path=args.config,
+                         publish_file=args.publish_file)
     if args.ui_port:
         if (not _is_loopback(args.ui_host)
                 and not config.get("ui", {}).get("password_hash")
@@ -1823,6 +1740,7 @@ def main():
                 "password: the config (and your node RPC details) would be writable by "
                 "anyone. Set one first with --set-password (or from the Access tab on "
                 "localhost). --ui-allow-remote overrides, at your own risk." % args.ui_host)
+        server.ui_port = args.ui_port
         start_config_ui(server, args.ui_host, args.ui_port)
     if args.once:
         print(json.dumps(server.poll_once(), indent=2))

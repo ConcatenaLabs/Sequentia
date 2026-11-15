@@ -128,6 +128,8 @@ BITCOIN_CORE_H = \
   assetsdir.h \
   assetregistry.h \
   referenceprices.h \
+  plainhttp.h \
+  feepriceserver.h \
   feeassets.h \
   addrman_impl.h \
   attributes.h \
@@ -406,6 +408,8 @@ libbitcoin_node_a_SOURCES = \
   wsclient.cpp \
   assetregistry.cpp \
   referenceprices.cpp \
+  plainhttp.cpp \
+  feepriceserver.cpp \
   feeassets.cpp \
   mapport.cpp \
   net.cpp \

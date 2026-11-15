@@ -101,6 +101,27 @@ static std::vector<CAsset> SubtractFeeFromAssets(const std::vector<CRecipient>& 
     return assets;
 }
 
+// SEQUENTIA: the fee whitelist can change while a transaction is built (a
+// connected node reads its price server's list every minute). At commit, under
+// the lock every writer of the whitelist takes, the transaction is judged
+// against the list in force now, as the mempool judges it: its fee asset still
+// accepted, and its fee at least what the current rate requires for its size.
+// If so it is committed, whatever else in the list changed, and the list cannot
+// change before the node has taken it; if not, nothing is committed or sent,
+// and the caller is told why. Building and signing, an external signer's
+// included, hold no lock a writer waits on.
+void CommitTransactionUnderFeeList(CWallet& wallet, CTransactionRef tx, mapValue_t map_value, BlindDetails* blind_details)
+{
+    if (const int64_t delay_ms = gArgs.GetIntArg("-testfeedecisiondelay", 0); delay_ms > 0) {
+        UninterruptibleSleep(std::chrono::milliseconds{delay_ms});
+    }
+    LOCK2(wallet.cs_wallet, g_fee_decision_mutex);
+    if (const std::optional<std::string> refused = FeeRefusalUnderList(wallet, tx)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, *refused);
+    }
+    wallet.CommitTransaction(std::move(tx), std::move(map_value), {} /* orderForm */, blind_details);
+}
+
 UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vector<CRecipient> &recipients, mapValue_t map_value, bool verbose, bool ignore_blind_fail)
 {
     EnsureWalletIsUnlocked(wallet);
@@ -122,11 +143,40 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
     FeeCalculation fee_calc_out;
     auto blind_details = g_con_elementsmode ? std::make_unique<BlindDetails>() : nullptr;
     if (blind_details) blind_details->ignore_blind_failure = ignore_blind_fail;
+    LOCK(wallet.cs_wallet);
     const bool fCreated = CreateTransaction(wallet, recipients, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, true, blind_details.get());
     if (!fCreated) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
     }
-    wallet.CommitTransaction(tx, std::move(map_value), {} /* orderForm */, blind_details.get());
+    // SEQUENTIA: judged against the fee whitelist in force at the commit.
+    CommitTransactionUnderFeeList(wallet, tx, std::move(map_value), blind_details.get());
+    // SEQUENTIA: the fee whitelist can change between building a transaction
+    // and offering it (a connected node reads its price server's list every
+    // minute), so this node may refuse what it just signed for its fee. Such a
+    // transaction was never relayed and never will be at that fee: it is
+    // abandoned, so its coins are spendable at once, and the caller is told
+    // rather than handed a txid that goes nowhere.
+    if (g_con_any_asset_fees && wallet.GetBroadcastTransactions()) {
+        bool in_mempool{false};
+        {
+            LOCK(wallet.cs_wallet);
+            const CWalletTx* wtx = wallet.GetWalletTx(tx->GetHash());
+            in_mempool = wtx && wtx->InMempool();
+        }
+        if (!in_mempool) {
+            const std::optional<interfaces::MempoolRefusal> refusal = wallet.chain().checkMempoolAccept(tx);
+            if (refusal && (refusal->reason == "min relay fee not met" || refusal->reason == "insufficient fee")) {
+                {
+                    LOCK(wallet.cs_wallet);
+                    wallet.AbandonTransaction(tx->GetHash());
+                }
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                    "This node refused the transaction for its fee (%s), so it was not sent and has been abandoned; "
+                    "its coins are spendable again. The fee asset's rate may have changed while it was built: try again.",
+                    refusal->reason));
+            }
+        }
+    }
     if (verbose) {
         UniValue entry(UniValue::VOBJ);
         entry.pushKV("txid", tx->GetHash().GetHex());
@@ -184,7 +234,7 @@ static uint256 SelectKeyAuthorization(CWallet& wallet, const CPubKey& key, CCoin
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf(
             "cannot fund the payment to the record's key that authorises it: %s", error.original));
     }
-    wallet.CommitTransaction(tx, {}, {}, blind_details.get());
+    CommitTransactionUnderFeeList(wallet, tx, {}, blind_details.get());
     for (uint32_t n = 0; n < tx->vout.size(); ++n) {
         if (tx->vout[n].scriptPubKey == script) {
             coin_control.Select(COutPoint(tx->GetHash(), n));
