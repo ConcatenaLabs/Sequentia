@@ -261,8 +261,10 @@ private:
     //! starting over from the first once every candidate has had a round;
     //! nullptr if no candidate is known. m_gossip_mutex held.
     std::shared_ptr<const CBlock> BackedForRound(int r) const;
-    //! Where the round schedule starts (ms): round 0's origin_ms; nullopt
-    //! with no candidates. m_gossip_mutex held.
+    //! Where the round schedule starts (ms): round 0's origin_ms, or the
+    //! earliest candidate's when none can be backed (every one left aside for
+    //! its anchor), so the collection still runs out; nullopt with no
+    //! candidates. m_gossip_mutex held.
     std::optional<int64_t> ScheduleOriginMs() const;
     //! Proposal collection window and round length (ms): local liveness timings
     //! scaled with the committee size, or the -poswindowms/-posroundms overrides.

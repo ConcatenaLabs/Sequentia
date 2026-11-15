@@ -177,6 +177,14 @@ the next block's announcement. One whose anchor is still not verifiable (the
 daemon reached the height on another branch) is left aside again until the next
 move.
 
+A proposal in the gossip committee whose anchor is not verifiable is left aside
+in the same way: no member signs it until this node's view of Bitcoin moves.
+When that leaves no proposal at a height that a member can back, as after a
+Bitcoin reorganization that replaced the anchor of every proposal there, the
+collection still runs out on its schedule, timed from the earliest proposal,
+and restarts. The members then propose again on Bitcoin's new branch within a
+few seconds, rather than at Bitcoin's next block.
+
 ### The reorg-following watcher
 
 A background watcher polls the Bitcoin daemon every `anchorpollinterval` seconds

@@ -1303,15 +1303,29 @@ int PosProducer::RoundsPerCollection() const
 std::optional<int64_t> PosProducer::RoundsExhaustedAtMs(int height) const
 {
     // m_gossip_mutex held.
-    if (m_round_height != height || m_candidates.empty()) return std::nullopt;
-    return *ScheduleOriginMs() + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
+    if (m_round_height != height) return std::nullopt;
+    const std::optional<int64_t> origin = ScheduleOriginMs();
+    if (!origin) return std::nullopt; // no candidate at all: nothing is scheduled yet
+    return *origin + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
 }
 
 std::optional<int64_t> PosProducer::ScheduleOriginMs() const
 {
     // m_gossip_mutex held.
     const std::shared_ptr<const CBlock> round0 = BackedForRound(0);
-    if (!round0) return std::nullopt;
+    if (!round0) {
+        // Every candidate is left aside (its anchor not verifiable on this
+        // node's view of Bitcoin, as after a Bitcoin reorganization that
+        // replaced the anchors of all of them) or excluded. No round can back
+        // anything, but the collection must still run out and restart, or this
+        // node would never propose again at this height: time it from the
+        // earliest candidate's stamp.
+        std::optional<int64_t> earliest;
+        for (const auto& [leader, cand] : m_candidates) {
+            if (!earliest || cand.origin_ms < *earliest) earliest = cand.origin_ms;
+        }
+        return earliest;
+    }
     for (const auto& [leader, cand] : m_candidates) {
         if (cand.block == round0) return cand.origin_ms;
     }
