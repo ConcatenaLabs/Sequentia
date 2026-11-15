@@ -245,24 +245,43 @@ The rule has two layers.
   branch. Its branch includes a block whose anchor is not on Bitcoin's best
   chain.
 - The branch leaves the active chain at its *fork point* F. a_L is L's anchor
-  height.
-- The *window* W is 6 Bitcoin blocks (`-poslostwindow`, a consensus value).
+  height and H_L its height.
+- The *window* W is 6 Bitcoin blocks, a consensus value. `-poslostwindow`
+  sets it on custom chains only (the functional tests); the testnet and
+  mainnet ignore it.
 - A lost block anchored more than W above its fork point's anchor is not
   carried: whatever forked that long ago left the window before it was lost.
   A holder does not take it as evidence (`fork-too-deep`), does not protect
   it, and a record of it is not valid.
+- *Certified* means a certificate that verifies, everywhere the rule reads
+  it: the BLS aggregate under the committee its parent's anchor seeds,
+  reaching the seat quorum. For a branch shown from outside the chain (a
+  record, or evidence), every block's certificate is verified in order from
+  F: block F+1's committee is seeded from F's anchor, on the chain, and each
+  later block's from its verified parent's anchor. No committee is seeded by
+  a value whoever shows the branch chooses.
+- *The lapse.* A transaction of L stays protected for a candidate B on a
+  chain containing F until B's chain has a block R at height H_L and B's
+  anchor is more than W above both a_L and R's anchor. This is a function of
+  B's chain alone. A transaction that is not yet valid (an `nLockTime`, a
+  relative lock, a maturity) is valid again by H_L at the latest, so it is
+  never left unprotected before it can return, however fast Bitcoin moves.
 - A node *holds* L when it connected L and saw it leave, or when it was shown
   L (P2P `poslost`, or `submitlostblock`) and judged it lost and certified.
-  It writes L to `lostblocks.dat` and syncs that file before the disconnect
-  releases the chain lock, so before it signs anything afterwards. It reads
-  the file back before it connects a block or meets a peer.
+  It appends L to `lostblocks.journal` and syncs it before the disconnect
+  releases the chain lock, so before it signs anything afterwards; the
+  maintenance pass folds the journal into `lostblocks.dat`. It reads both
+  back before it connects a block or meets a peer. A holder judges whether
+  L's anchor is off Bitcoin's best chain from its own Bitcoin daemon: the
+  best chain has another block at that height. The daemon need not have
+  seen the stale block.
 
 #### The duty of a holder
 
 A holder judges a candidate block B that extends its active tip, has no
-certified descendant it knows of, and arrives outside initial block download.
-The duty applies when B is built on a chain containing F and anchored at most
-a_L + W.
+descendant whose certificate verifies, and arrives outside initial block
+download. The duty applies when B is built on a chain containing F and L has
+not lapsed for B.
 
 The pending lost transactions are the non-coinbase transactions of every lost
 block whose fork point is in B's chain, in lost order: the loss they belong to
@@ -270,10 +289,12 @@ block whose fork point is in B's chain, in lost order: the loss they belong to
 against B's parent, with the lost block's own witnesses:
 
 - **due**: valid there (inputs, amounts, scripts, record rules, payment
-  proofs). Each due transaction is judged after the ones before it.
+  proofs, and the bindings of the records in B's chain). Each due transaction
+  is judged after the ones before it.
 - **later**: valid only later as it is. This covers an `nLockTime` or a
   relative lock that the shift made non-final, a coinbase spend not yet
-  mature, an unbonding output not yet unlocked, and the child of a later one.
+  mature, an unbonding output not yet unlocked, an input that a record of B's
+  chain binds to another transaction, and the child of a later one.
 - **failing**: not valid as it is. This covers a payment proof that names a
   stale Bitcoin block, an anchor floor not reached, a record rule bound to a
   height (a payout announced without its notice at the new height, a pot
@@ -281,6 +302,9 @@ against B's parent, with the lost block's own witnesses:
   of a failing one.
 - **gone**: an input is spent on B's chain, because the transaction is already
   mined there or something it conflicts with is.
+
+The classification uses validity's own checks, the records' bindings
+included, so a block that does what the duty asks is valid.
 
 The holder refuses B (`bad-lost-replay`) unless B begins, right after its
 coinbase, with the due transactions in lost order: the longest run of them,
@@ -301,20 +325,25 @@ outpoint that a pending lost transaction spends. Which of two conflicting lost
 transactions stands is decided by lost order alone.
 
 It refuses B (`bad-lost-unrecorded`) when B does not record the failing
-transactions it owes. A failing transaction can be recorded from the first
-block anchored at or above the lowest stale anchor of its lost branch; until
-it is recorded on B's chain, each such block owes the longest run of the
-failing transactions, in lost order, whose records fit the block's 25,000
-record bytes. The rest are owed by the next block.
+transactions it owes. A failing transaction is owed when a record of it would
+be valid in B, judged by the record check itself (below). Until it is
+recorded on B's chain, each block owes the longest run of the owed failing
+transactions, in lost order, whose records fit the block's 25,000 record
+bytes; the rest are owed by the next block. A failing transaction whose
+record cannot fit 25,000 bytes even alone is never owed. The holder logs it
+("can never be recorded"); the holders' refusal is its only protection, and
+the transactions after it are still owed.
 
 A later transaction is protected by the same refusal until it falls due, and
-needs no record: it becomes valid as it is, and the duty mines it then.
+needs no record: it becomes valid as it is by H_L at the latest, and the duty
+mines it then.
 
 The refusal is soft. No peer is punished, no mark that a restart keeps is
 written, and the refused block is judged again whenever the holder's evidence
-changes. The refusal lapses when the holder's Bitcoin daemon's best height
-passes a_L + W. The holder then drops L and judges every block it refused by
-validity alone.
+changes. The holder drops L once its active chain has lapsed for L (or, when
+its active chain no longer contains F, once Bitcoin is 2W above a_L: a bound on
+memory, not a rule), and then judges every block it refused by validity
+alone.
 
 A producer that holds L builds exactly what the duty asks. The due
 transactions go first, whatever its own fee list and floor say, and the
@@ -326,67 +355,90 @@ pending lost transaction (`txn-lost-conflict`).
 A record is a coinbase output `OP_RETURN 'SQLR' <record>`, value 0. The record
 contains:
 
-- a version;
-- the Bitcoin headers, parents first, that make a stale anchor of the branch
-  known to a daemon that never saw it;
+- a version (2);
 - the lost branch's headers from F's child, each with its certificate;
 - one entry per recorded transaction: the index of its lost block, its
   position, the merkle branch to that block's merkle root, and the transaction
   without its witness.
 
-A block carries at most 25,000 record bytes. The records count toward block
-weight like any coinbase output. The coinbase is under the block's merkle
-root, so the record needs no commitment of its own and the block format is
-unchanged.
+A block carries at most 25,000 record bytes, and a record at most 256 lost
+headers; both are consensus values. The records count toward block weight
+like any coinbase output. The coinbase is under the block's merkle root, so
+the record needs no commitment of its own and the block format is unchanged.
+A block that carries a record is marked in the block index, so the bindings
+are rebuilt after a restart from the marked blocks, however far back.
 
-A record is valid in a block B when all of the following hold. Otherwise B is
-invalid (`bad-lost-record`), or it is left aside when the Bitcoin daemon cannot
-answer (`lost-record-unverifiable`).
+A record is valid in a block B when all of the following hold:
 
 - Its first header's parent is the block of B's chain at that height, and the
   headers link one to the next at consecutive heights, with anchors that obey
-  R2 from F.
+  R2 from F and are at most W above F's anchor.
 - For each entry:
+  - its position is below 2 to the power of its branch's length, and not 0;
   - the merkle branch leads from the transaction id to its block's merkle
-    root, at a non-zero position;
-  - B is anchored at most W above that block's anchor;
-  - a header of the branch at or below it has an anchor that the Bitcoin
-    daemon knows and that is not the best chain's block at that height (at or
-    below B's anchor);
-  - its block's certificate carries a full quorum under the stake registry at
-    B's parent.
+    root;
+  - its lost block has not lapsed for B.
+- Every header up to the highest entry carries a certificate that verifies in
+  order from F under the registry at B's parent (see "Certified" above).
+- For each entry, a header at or below it has an anchor at a Bitcoin height
+  at most B's anchor height that is not B's anchor's ancestor at that height.
+  The node reads that ancestry by walking B's anchor's parents in its Bitcoin
+  daemon (at most 2W steps). It is a fact of Bitcoin's header tree: the same
+  on every node that knows B's anchor, whatever its daemon's best chain is at
+  the moment, and unchanged by any later reorganization.
+
+Otherwise B is invalid (`bad-lost-record`), on every node alike. The one
+exception is a daemon that does not know B's anchor, or does not answer: B is
+then left aside (`lost-record-unverifiable`), never marked invalid, and taken
+when the daemon can say.
 
 Once a record is in a chain, a later block of that chain, or B itself, is
-invalid (`bad-txns-recorded-respend`) if it is anchored at most a_L + W and
-spends an input of a recorded transaction through any other transaction. The
-same transaction id with another witness is that transaction. A record binds
-only coins still unspent: a spent coin cannot be spent again.
+invalid (`bad-txns-recorded-respend`) if the recorded transaction's lost block
+has not lapsed for it and it spends an input of the recorded transaction
+through any other transaction. The same transaction id with another witness is
+that transaction. A record binds only coins still unspent: a spent coin cannot
+be spent again.
 
 #### What this guarantees, and to whom
 
 - **With an honest quorum, a lost transaction stays protected even when the
   seller leads every height.** It comes back at the height it falls due, at
   the latest when the lost blocks' heights are rebuilt (about ten minutes per
-  stale Bitcoin block). It is then in the chain for good, not for W. A failing
-  transaction is bound for W from the first block above the stale anchor. A
-  payment-proof claim is the usual one, and it keeps its id when it is proven
-  again: the proof is in the peg-in witness slot. When its payment is mined
-  again, anyone can attach a fresh proof and mine it. When the payment is gone
-  for good, the lock is released at a_L + W and its refund path is open again.
+  stale Bitcoin block). It is then in the chain for good. A failing
+  transaction is bound from the first block whose anchor shows its branch
+  lost, until it lapses. A payment-proof claim is the usual one, and it keeps
+  its id when it is proven again: the proof is in the peg-in witness slot.
+  When its payment is mined again, anyone can attach a fresh proof and mine
+  it. When the payment is gone for good, the lock is released at the lapse
+  and its refund path is open again.
 - **A block that skips the duty cannot be certified unless at least two of
   the lost block's own signers sign against what they hold on disk.** Any two
   quorums share at least two members.
 - **A dishonest quorum can certify a block that skips the duty.** The holders
-  refuse it until the lapse. If the quorum stops certifying that chain, the
-  holders' chain wins by reconciliation (§6 of
-  [`04-proof-of-stake.md`](04-proof-of-stake.md)). If it goes on, the holders
-  take its chain at the lapse. A quorum that releases such a block together
-  with a certified child is accepted by holders at once. Against a dishonest
-  quorum the rule protects nothing and splits nothing for longer than W. That
-  is master's behaviour.
-- **A node that never held L judges only records.** A late node, or one
-  syncing from nothing, agrees with the nodes that were there on every block
-  of the chain they certified.
+  refuse it until it has a certified descendant whose certificate verifies,
+  and take its chain then: a quorum that goes on certifying is followed, and
+  one that stops is outrun by the holders' chain through reconciliation (§6
+  of [`04-proof-of-stake.md`](04-proof-of-stake.md)). Against a dishonest
+  quorum the rule protects nothing.
+- **A dishonest quorum can also make a spend invalid.** On a chain without
+  this rule a dishonest majority can only censor a spend: it refuses to
+  certify blocks carrying it, and escaping-stall blocks that carry it lose to
+  its certified siblings, but the spend is never invalid. With records, a
+  quorum can certify a fabricated lost branch on a fork point of the chain,
+  with an anchor it makes up, and record a transaction of its own choosing;
+  the coins that transaction spends can then be spent by nothing else, on
+  every node, until the record lapses. That is a new kind of power, bounded in
+  time, and the price of judging records from the chain alone. The same holds
+  for a coalition that holds a seat quorum at some height by the draw: besides
+  certifying that height alone, as it could anyway, it can record a fabricated
+  transaction and freeze a coin until the lapse. With a committee of 12 seats
+  and unequal stakes, such a coalition can hold about 39 % of the stake at
+  some heights. Below a seat quorum nothing can be recorded at all.
+- **Every node judges records alike.** A late node, one syncing from nothing
+  with a Bitcoin daemon that never saw the stale block, and one whose daemon
+  goes back and forth between a block's header and its body all reach the
+  verdict of the nodes that were there, because the record is judged against
+  the judged block's own anchor, not against what a daemon happens to know.
 - **Bitcoin stays supreme.** Nothing here keeps a block whose anchor Bitcoin
   replaced, delays the watcher, or undoes an accepted block. Evidence shown
   late never touches history. It binds only candidates for the tip, and only
@@ -420,7 +472,8 @@ only coins still unspent: a spent coin cannot be spent again.
   s × 10 blocks of its own transactions per stale Bitcoin block, at 60-second
   blocks. It cannot cause a stale Bitcoin block without mining Bitcoin.
 - **Honest conflicts wait.** A holder's own replacement of a pending lost
-  transaction (a fee bump, a refund) waits until it is due, or for W. The
+  transaction (a fee bump, a refund) waits until it is due, or until the
+  lapse. The
   holder's mempool refuses it (`txn-lost-conflict`). A wallet's `bumpfee`
   still records the replacement and returns its id: the wallet shows it
   unconfirmed and in conflict with the lost transaction until that is mined
@@ -429,19 +482,24 @@ only coins still unspent: a spent coin cannot be spent again.
 - **Throughput while replaying.** The lost transactions take back the space
   they had. A deep reorganization replays its blocks at their heights. While
   it does, a block full of due transactions carries nothing else.
-- **Stake changes in the lost branch.** A lost block whose certificate does
-  not verify under the registry at B's parent cannot be recorded, because
-  stake changed in its branch before it. Its failing transactions are then
+- **Stake changes in the lost branch.** A lost branch whose certificates do
+  not all verify under the registry at B's parent cannot be recorded, because
+  stake changed in its branch or since; the registry at a lost block's own
+  parent is not in B's chain until the lost stake transactions are replayed. Its failing transactions are then
   protected only by the holders' refusal until the lapse, never by nothing:
   the holders bind every outpoint of a lost block whatever its record. A
   stake change is itself a lost transaction, due and replayed in lost order,
   so the registry the next blocks are judged with converges on the lost
   branch's as the replay proceeds.
-- **The window's floor in time.** Six Bitcoin blocks can pass in minutes on
-  a test network's block storms. A floor of 3,600 seconds of Bitcoin median
-  time past above the lost block's anchor, read from the Bitcoin daemon as the
-  lapse is, would keep the window an hour long there; it is not part of the
-  rule.
+- **How long conflicts wait.** A holder's own replacement of a pending lost
+  transaction, and a refund after a claim that failed for good, wait until
+  the lapse: W Bitcoin blocks after the chain rebuilds the lost block's
+  height. For a shallow loss that is about W; for a deep one, W after the
+  replay ends.
+- **Record bytes and the check's cost.** A record carries no Bitcoin header.
+  Judging one walks B's anchor's parents (at most 2W header reads, cached per
+  anchor) and verifies one certificate per lost header up to its highest
+  entry.
 - **The holders' check per candidate.** The plan (the due run and the
   records owed) is computed once per parent on each holder and shared by the
   template, every proposal on that parent and the block's connection. It costs
@@ -461,7 +519,8 @@ only coins still unspent: a spent coin cannot be spent again.
 what the rule guarantees. A member running it holds every block it signs on
 disk (`lostsigned.dat`) before its signature leaves. When such a block's
 anchor goes stale and the block never certified, the member refuses, until
-Bitcoin's height passes its anchor plus W, a candidate that spends an
+the block lapses and at most until Bitcoin's height passes its anchor plus
+W, a candidate that spends an
 outpoint one of its transactions spends (`bad-txns-signed-respend`), and its
 mempool refuses such a spend. It owes no replay and no record, and it relays
 nothing. It narrows the case of two blocks certified at one height on two
@@ -476,14 +535,25 @@ also wait for the next Bitcoin block, and in some runs for the whole window.
 
 #### For a buyer's wallet
 
-The lock a buyer pays against must be certified and final. It must have stood
-the observation window (§6 of [`04-proof-of-stake.md`](04-proof-of-stake.md))
-with no competing certificate at its height (`getposfinality`). Bitcoin's tip
-must also be uncontested in the buyer's Bitcoin view: no other branch within
-the contest window (§5), as `getchaintips` shows it. Both answers are instant
-except during a live Bitcoin fork, which this waits out. They close the one
-case the duty cannot: two blocks certified at one height on two live Bitcoin
-branches, neither set of signers knowing of the other.
+The lock a buyer pays against must pass three checks, each instant except
+during a live Bitcoin fork:
+
+- It is certified and final: it has stood the observation window (§6 of
+  [`04-proof-of-stake.md`](04-proof-of-stake.md)) with no competing
+  certificate at its height (`getposfinality`).
+- Bitcoin's tip is uncontested in the buyer's Bitcoin view: no other branch
+  within the contest window (§5), as `getchaintips` shows it.
+- Its unburied ancestry holds no transaction that a reorganization can make
+  fail for good (`checklockancestry`). The unburied ancestry is the lock and
+  every ancestor confirmed in a block anchored fewer than W + 1 Bitcoin blocks
+  below the buyer's Bitcoin tip. A payment-proof claim, a peg-in, and a
+  transaction that creates or spends a stake record are never carried over a
+  reorganization, so nor is a lock funded from one: its seller could make
+  that parent fail by double-spending a Bitcoin payment it made to itself.
+
+The first two close the one case the duty cannot: two blocks certified at one
+height on two live Bitcoin branches, neither set of signers knowing of the
+other. The third closes a lock whose own funding can be made to fail.
 
 #### Activation
 
@@ -494,7 +564,10 @@ upgraded. A node on the old rules reads a record as an ordinary `OP_RETURN`
 output and follows the upgraded committee's chain. It parts from it only if
 a quorum certifies a block that breaks a binding.
 
-Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_autonomous.py`
+Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_attacks.py` (a
+transaction not yet due while Bitcoin outruns the window, a descendant whose
+certificate does not verify, a record whose first header carries no
+certificate), `feature_pos_lost_autonomous.py`
 (the autonomous committee at the testnet's round lengths: the gap, a deep
 replay, the member's switch), `feature_pos_lost_replay.py` (the
 due run and its floor, the producer's opt-out, a producer's own-asset block,

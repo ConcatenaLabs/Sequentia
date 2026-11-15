@@ -353,6 +353,11 @@ class LostAutonomousTest(LostReplayTest):
     # ---------------------------------------------------------------- mixT
     def case_mixT(self):
         assert self.base_nodes, "set LOST_BASE_NODES and LOST_BASE_BIN"
+        # The member on master's binary does not know the rule at all.
+        for i in sorted(self.base_nodes):
+            known = "unknown command" not in self.nodes[i].help("getlostblocks").lower()
+            self.record("mixT", "node %d runs the rule" % i, known)
+            assert not known, "node %d is not on master's binary" % i
         self.case_aT(case="mixT")
 
     def run_test(self):

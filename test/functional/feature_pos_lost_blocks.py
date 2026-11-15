@@ -199,6 +199,20 @@ class LostBlocksTest(BitcoinTestFramework):
             return {"error": last}
         raise AssertionError("no block on node %d: %s" % (node_i, last))
 
+    def pass_lapse(self, node_i=1, signers=ALL_KEYS):
+        """Rebuild every lost block's height on node_i's chain and return the
+        Bitcoin height above which every lost block has lapsed (doc 03: the
+        chain at the lost height, then W above that block's anchor and the
+        lost anchor)."""
+        n = self.nodes[node_i]
+        lost = [b for b in n.getlostblocks()["blocks"] if b["lost"]]
+        if not lost:
+            return None
+        top = max(b["height"] for b in lost)
+        while n.getblockcount() < top:
+            self.produce(node_i, signers)
+        return max(max(b["anchorheight"], n.getblockheader(n.getblockhash(b["height"]))["anchorheight"]) for b in lost) + W
+
     def block_of(self, txid, node):
         t = node.getblockcount()
         for h in range(t, max(0, t - 300), -1):
@@ -601,14 +615,32 @@ class LostBlocksTest(BitcoinTestFramework):
         a.sendrawtransaction(q_hex)
         xq = self.produce(SELLER, ALL_KEYS, leaders=[SELLER], txs_must=[q_id])
         self.assert_refused("f", HONEST, xq["hash"], sizes)
-        # The lapse: Bitcoin passes anchor(S) + W; the refusal ends, the block is judged again and taken.
-        need = q + 1 + W + 1
-        if self.btc().getblockcount() < need:
-            self.btc_mine(need - self.btc().getblockcount())
+        # The lapse (doc 03): the honest chain is already past S's height, at
+        # H1 (anchor q), so S lapses for a block anchored above
+        # max(q + 1, q) + W. X_Q, anchored inside the window, stays refused; a
+        # block carrying Q anchored past the lapse is taken.
+        end = max(q + 1, h1["block"]["anchorheight"]) + W
+        if self.btc().getblockcount() <= end:
+            self.btc_mine(end + 1 - self.btc().getblockcount())
         t0 = time.time()
-        self.wait_until(lambda: all(self.in_chain(self.nodes[i], xq["hash"]) for i in HONEST), timeout=60)
-        self.record("f", "lapse", "Bitcoin at %d > anchor(S)+W = %d: every honest node took the block with Q in %.1f s; S dropped: %s" %
-                    (self.btc().getblockcount(), q + 1 + W, time.time() - t0, all(s["hash"] not in self.lost(i) for i in HONEST)))
+        a.invalidateblock(xq["hash"])
+        self.wait_until(lambda: a.getbestblockhash() == self.nodes[1].getbestblockhash(), timeout=60)
+        if q_id not in a.getrawmempool():
+            a.sendrawtransaction(q_hex)
+        xq2 = self.produce(SELLER, ALL_KEYS, leaders=[SELLER], txs_must=[q_id])
+        assert xq2["block"]["anchorheight"] > end, (xq2["block"]["anchorheight"], end)
+        # Every honest chain now carries Q, in X_Q2 or in X_Q: once S has
+        # lapsed for the active chain the holders drop it and judge X_Q by
+        # validity alone, and two certified siblings are ordered by the fork
+        # choice's own tie-break.
+        def q_mined():
+            return all(self.in_chain(self.nodes[i], xq2["hash"]) or self.in_chain(self.nodes[i], xq["hash"]) for i in HONEST)
+        self.wait_until(q_mined, timeout=60)
+        self.wait_until(lambda: all(s["hash"] not in self.lost(i) for i in HONEST), timeout=60)
+        kept = "X_Q2" if self.in_chain(self.nodes[1], xq2["hash"]) else "X_Q"
+        self.record("f", "lapse", "past the lapse (anchor %d > max(anchor(S), anchor at S's height) + W = %d) every honest node mined Q (%s kept) in %.1f s; S dropped" %
+                    (xq2["block"]["anchorheight"], end, kept, time.time() - t0))
+        a.reconsiderblock(xq["hash"])
         self.realign()
 
     def sub(self, node, *args):
