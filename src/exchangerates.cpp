@@ -259,7 +259,7 @@ bool ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmo
                           int64_t published, int64_t now)
 {
     LOCK(g_fee_list_source_mutex);
-    if (!g_fee_list_source.connected || g_fee_list_source.url != url) return false;
+    if (!g_fee_list_source.connected || g_fee_list_source.via_rpc || g_fee_list_source.url != url) return false;
     ExchangeRateMap::GetInstance().SetRates(rates);
     g_fee_list_source.have_list = true;
     g_fee_list_source.last_written = now;

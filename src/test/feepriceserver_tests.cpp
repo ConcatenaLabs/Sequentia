@@ -49,6 +49,9 @@ BOOST_AUTO_TEST_CASE(a_price_feed_is_not_a_price_server)
     BOOST_CHECK(error.find("not a price server") != std::string::npos);
     BOOST_CHECK(!Parse("{\"" + ID_A + "\": [\"sequentia.io\", \"tSEQ\", \"Sequence\", 8, 1, 0]}", error));
     BOOST_CHECK(error.find("not a price server") != std::string::npos);
+    // A price server whose first poll has not completed: a price server, not yet publishing.
+    BOOST_CHECK(!Parse("{\"updated\": null, \"rates\": {}, \"decisions\": []}", error));
+    BOOST_CHECK(error.find("has not published a list yet") != std::string::npos);
     // A feed that happens to have a "rates" key still lacks the publication time.
     BOOST_CHECK(!Parse("{\"rates\": {\"" + ID_A + "\": 1}}", error));
     BOOST_CHECK(error.find("not a price server") != std::string::npos);

@@ -88,7 +88,8 @@ file is loaded.
 
 An empty whitelist is a state the operator can also return to on any chain, by
 writing `{}`. The node then behaves as an unconfigured mainnet node does, and an
-emptied list stays empty: writing it disconnects the node from any price server.
+emptied list stays empty: writing it by hand makes the whitelist static, which
+ends any connection to a price server.
 
 A rate of `0` reads as "refuse this asset": it is a valid stored value that flows
 through to the conversion as "not accepted". Setting a rate accepts any
@@ -107,11 +108,10 @@ singleton. There are no static and dynamic layers inside it and no per-asset
 "source" or provenance: static or dynamic says who writes the table, not how it
 is stored.
 
-The table has **one writer at a time**: the operator, by hand or through a price
-server of their own that writes to the node over RPC, or the price server the
-node is connected to ([§5](#5-the-price-server)). While a node is connected to a
-price server, that server is the only writer; the first write by anyone else
-disconnects it for good, so the two never take turns. A node may also fetch
+The table has two states. It is **static** when the operator writes it by hand,
+and **dynamic** when the node is connected to a price server, its operator's own
+or another operator's ([§5](#5-the-price-server)), which is then the table's
+only writer. There is no third state. A node may also fetch
 market prices for display (`-referencepricesurl`, used to show amounts in a
 reference currency); they never enter the whitelist, so an asset is accepted
 only because the operator, or a price server, listed it.
@@ -230,22 +230,32 @@ from its price relative to the reference unit, and publishes the resulting
 third-party HTTP, API keys and JSON parsing from the node; it is independently
 restartable and testable.
 
-A node's whitelist is dynamic when a price server updates it, its operator's own
-or another operator's. There are two ways for that to happen, and to the user
-both are being connected to a price server:
+A node's whitelist is dynamic exactly when the node is connected to a price
+server, its operator's own or another operator's. A node is connected in one of
+two ways, and `getfeepriceserver` says which (`connection`):
 
-- **The node is connected to it** (`-feepriceserver=<address>`,
-  `src/feepriceserver.{h,cpp}`). The node asks for the list the price server
-  publishes, the body of its `GET /api/whitelist` or the file it writes with
-  `--publish-file`, at startup and every `-feepriceserverpoll` seconds (60), and
-  makes it the whitelist. This is how the testnet works by default, and how any
-  node uses another operator's price server.
-- **The price server writes to the node**, through `setfeeexchangerates` with
-  `persist=false`: the node's own operator runs one with the node's RPC
-  credentials (the desktop wallet's Settings → Price server does this).
+- **By address** (`-feepriceserver=<address>`, `src/feepriceserver.{h,cpp}`). The
+  node asks for the list the price server publishes, the body of its
+  `GET /api/whitelist` or the file it writes with `--publish-file`, at startup
+  and every `-feepriceserverpoll` seconds (60), and makes it the whitelist. This
+  is how the testnet works by default, how a node uses another operator's price
+  server, and how it uses its operator's own: the desktop wallet's "Run my own
+  price server" starts the bundled one publishing on this machine and connects
+  the node to `http://127.0.0.1:8089/api/whitelist`, so that price server needs
+  no RPC login to the node.
+- **By RPC.** The price server writes to the node with `setfeeexchangerates`
+  and `persist=false`, using the node's RPC credentials; the network's price
+  server writes to the public nodes this way. The node tells such a write from a
+  hand write by that flag alone: `persist=false` is how a price server writes,
+  and `persist=true`, the default, is what a person and the desktop wallet use.
+  The node shows the whitelist as dynamic, connected by RPC, with when it was
+  last written; it knows no address for that price server. Someone passing
+  `persist=false` by hand is shown the same way, since the node cannot tell
+  them apart. A list written this way is not persisted, so after a restart the
+  node shows its static file until the price server writes again.
 
-A node connected to a price server takes that server's published list and
-nothing else:
+A node connected by address takes that server's published list and nothing
+else:
 
 - **Only a price server's list.** The answer must be the published shape,
   `{"updated": <time>, "rates": {"<asset id>": <rate>, ...}}`. A price feed API's
@@ -264,15 +274,15 @@ nothing else:
   written and the last error. It is never cleared, and nothing falls back to one
   asset. Each list taken is cached in `feepriceserver.json` in the data directory,
   so a restart has it at once.
-- **One writer.** The first write by anyone else (`setfeeexchangerates`, by hand
-  or by a price server pushing over RPC, or an edit in the desktop wallet)
-  disconnects the node for good: it records `-nofeepriceserver` in its
-  `settings.json`, and from then on the whitelist is exactly what is written to
-  it, an empty one included. `setfeepriceserver "<address>"` (or Connect in the
-  desktop wallet's Fee acceptance dialog) connects it again;
-  `setfeepriceserver ""` disconnects it and keeps the list in force as a static
-  whitelist. An address given on the command line is connected at every start,
-  as any command-line setting wins.
+- **One writer.** Any write over RPC ends a connection by address for good, and
+  the node records `-nofeepriceserver` in its `settings.json`: a hand write
+  (`setfeeexchangerates`, or an edit in the desktop wallet) makes the whitelist
+  static, an empty one included, and a price server's write connects the node
+  to that price server by RPC instead. `setfeepriceserver "<address>"` (or
+  Connect in the desktop wallet's Fee acceptance dialog) connects it by address
+  again; `setfeepriceserver ""` disconnects it and keeps the list in force as a
+  static whitelist. An address given on the command line is connected at every
+  start, as any command-line setting wins.
 - **Plain HTTP.** The node links no TLS library, so the list is not authenticated
   in transit: someone on the network path can answer in the price server's
   place. The bounds above limit what such an answer can carry, not who sent it;
@@ -281,10 +291,10 @@ nothing else:
 
 | RPC | Purpose |
 |---|---|
-| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`, disconnecting the node from its price server if it is connected to one. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it, which leaves the node accepting **no** fee asset at all, SEQ included, and empties its mempool. |
+| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`. With `persist=true` (the default) it is a hand write: the whitelist is static, and the table is also written to `exchangerates.json` so it survives a restart. With `persist=false` it is how a price server writes: the node is connected to that price server by RPC, its whitelist dynamic, and only the in-memory whitelist changes. Either ends a connection by address. Pass `{}` to clear it, which leaves the node accepting **no** fee asset at all, SEQ included, and empties its mempool. |
 | `getfeeexchangerates` | Return the current whitelist as `{asset: rate}`. |
 | `getfeeacceptancepolicy` | Return the current acceptance set. |
-| `getfeepriceserver` | Whether the node is connected to a price server (its whitelist then `dynamic`, else `static`), the address, whether it is the network's default, when the list in force was taken and published, the last request and its error, and why the node disconnected if it did. |
+| `getfeepriceserver` | Whether the node is connected to a price server (its whitelist then `dynamic`, else `static`) and how (`address` or `rpc`), the address, whether it is the network's default, when the list in force was taken and published, the last request and its error, and why the node disconnected if it did. |
 | `setfeepriceserver "<address>"` | Connect to a price server, after taking its list (nothing changes if the address does not answer with one). `""` disconnects and keeps the list in force as a static whitelist. Both are recorded in `settings.json`. |
 | `getfeeassetinfo [asset]` | Per asset: whether this node accepts it (`accepted`, plus `listed`/`rate` so a refusal written down as rate 0 is distinguishable from an asset nobody configured), whether the Asset Registry publishes it (`registry_listed`), and whether the reference feed prices it (`market_price`). |
 

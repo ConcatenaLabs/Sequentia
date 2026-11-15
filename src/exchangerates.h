@@ -157,14 +157,22 @@ public:
  * server of its operator's pushes to it over RPC, which to the node is a write
  * like any other.
  *
- * Exactly one writer at a time. While the node is connected to a price server,
- * that server is the whitelist's only writer; the first write by anyone else
- * ends the connection for good (see feepriceserver.h). The display
- * reference-price feed (-referencepricesurl) never writes the whitelist.
+ * There are two states. Static: written by hand. Dynamic: connected to a price
+ * server, which is the whitelist's only writer, in either of two ways: by
+ * address (the node asks for the server's published list), or by RPC (the
+ * server writes to the node with setfeeexchangerates and persist=false, which
+ * is how a price server writes; a write with persist=true, the default the
+ * desktop wallet and hand use, is a hand write). A hand write ends either kind
+ * of connection (see feepriceserver.h). The display reference-price feed
+ * (-referencepricesurl) never writes the whitelist.
  */
 struct FeeListSource {
-    //! Connected to a price server: it is the whitelist's only writer.
+    //! Connected to a price server, which is the whitelist's only writer:
+    //! the whitelist is dynamic. Not connected: static, written by hand.
     bool connected{false};
+    //! Connected by RPC: a price server writes to this node, and the node knows
+    //! no address for it. Otherwise, when connected, by address (url).
+    bool via_rpc{false};
     //! The address of the price server's published list (when connected).
     std::string url;
     //! The address came from the chain's default rather than from the operator.

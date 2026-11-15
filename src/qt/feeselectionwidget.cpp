@@ -615,7 +615,11 @@ void FeeSelectionWidget::updateWarning()
                 state = m_model->node().executeRpc("getfeepriceserver", UniValue(UniValue::VARR), std::string());
             } catch (...) {}
             m_warning->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
-            m_warning->setText(state.isObject() && state["connected"].isTrue()
+            const bool by_rpc = state.isObject() && state["connection"].isStr() && state["connection"].get_str() == "rpc";
+            m_warning->setText(by_rpc
+                ? tr("This node's price server, which writes to it over RPC, has written an empty fee whitelist, "
+                     "so nothing can be sent until it writes one that lists an asset. Receiving is not affected.")
+                : state.isObject() && state["connected"].isTrue()
                 ? tr("This node is connected to the price server at %1, which has not sent a fee whitelist "
                      "yet, so nothing can be sent until it does. Receiving is not affected.")
                       .arg(QString::fromStdString(state["url"].get_str()))

@@ -184,9 +184,10 @@ asset. An asset that is **not listed is not accepted** - the policy asset
 included. There is no exception and no implicit entry: the table is the whole
 truth.
 
-The whitelist is **static** when you write it by hand, and **dynamic** when a
-price server updates it: one you connect the node to, another operator's or your
-own, or one of your own that writes to the node over RPC.
+The whitelist is **static** when you write it by hand, and **dynamic** when the
+node is connected to a price server, another operator's or your own: by address,
+the node asking for the list the price server publishes, or by RPC, the price
+server writing to the node. There is no third state.
 
 **On the testnet the node is connected to the network's price server.** It
 asks for that server's list as it starts, so its whitelist is populated before
@@ -230,14 +231,16 @@ API, or of the registry, is refused and nothing is written. In a configuration
 file, `feepriceserver=<address>` connects at every start and `nofeepriceserver=1`
 keeps the whitelist static.
 
-While connected, that price server is the whitelist's only writer. The first
-write by anyone else, by hand with `setfeeexchangerates`, from an edit in the
-desktop wallet, or by your own price server pushing to the node, disconnects the
-node for good; the node records it in `settings.json`, so a restart keeps it
-disconnected, and the whitelist is from then on what is written to it, an
-emptied one included. To connect again, use `setfeepriceserver` or Connect in the
-desktop wallet. An address given on the command line is connected at every
-start whatever `settings.json` says.
+While connected, that price server is the whitelist's only writer. Any write
+over RPC ends a connection by address for good; the node records it in
+`settings.json`, so a restart keeps it ended. A write by hand, with
+`setfeeexchangerates` or from an edit in the desktop wallet, makes the whitelist
+static, an emptied one included. A price server's write, with
+`setfeeexchangerates` and `persist=false`, connects the node to that price
+server by RPC instead, and the whitelist stays dynamic; that flag is the only
+thing that tells the two apart. To connect by address again, use
+`setfeepriceserver` or Connect in the desktop wallet. An address given on the
+command line is connected at every start whatever `settings.json` says.
 
 If the price server cannot be reached, the node keeps the list it last took, for
 as long as that lasts, and shows its age and the error. A list it refuses (empty,
@@ -256,9 +259,10 @@ would expect:
 - any other `exchangerates.json`, or one named with
   `-initialexchangeratesjsonfile`, is a static whitelist you wrote: it is kept,
   and the node does not connect until you tell it to;
-- a node your own price server writes to connects to the network's price server
-  at startup, and the first push of yours disconnects it, for good. Put
-  `nofeepriceserver=1` in its configuration to skip that.
+- a node your own price server writes to over RPC connects to the network's
+  price server at startup, and your price server's first write connects it to
+  yours instead, by RPC, for good. Put `nofeepriceserver=1` in its configuration
+  to skip that, or connect it to your price server by address.
 
 ### Running your own price server
 
@@ -266,10 +270,11 @@ The price server in [`contrib/price-server/`](../../contrib/price-server) turns
 the prices a price feed API reports into a whitelist: it polls the market-data
 source you configure, applies your admission thresholds (market cap, 24h
 volume, source agreement, price clamps) and manual prices, and publishes the
-whole whitelist, either by writing it to your node over RPC or for nodes that
-connect to it (see its [README](../../contrib/price-server/README.md)). The
-desktop wallet's Settings → Price server starts the bundled copy, writing to
-this node.
+whole whitelist for the nodes connected to it (see its
+[README](../../contrib/price-server/README.md)). The desktop wallet's "Run my own
+price server" (Settings → Price server, or Fee acceptance) starts the bundled
+copy publishing on this machine and connects the node to it by address, with no
+RPC login. By hand:
 
 ```
 cp contrib/price-server/config.example.json config.json
@@ -277,16 +282,24 @@ cp contrib/price-server/config.example.json config.json
 python3 contrib/price-server/price_server.py --config config.json            # poll loop
 python3 contrib/price-server/price_server.py --config config.json --once     # single poll, print, exit
 python3 contrib/price-server/price_server.py --config config.json --dry-run  # decisions only
-python3 contrib/price-server/price_server.py --config config.json --publish-file /srv/feewhitelist.json  # publish for nodes that connect
+python3 contrib/price-server/price_server.py --config config.json --publish-file /srv/feewhitelist.json  # publish as a file for a web server
+python3 contrib/price-server/price_server.py --config config.json --ui-port 8090  # publish at /api/whitelist
+sequentia-cli setfeepriceserver "http://127.0.0.1:8090/api/whitelist"           # connect the node by address
 ```
+
+A price server needs no node RPC login for nodes connected to it by address;
+leave `node_rpc` out of its config. With no admin password set its API answers
+this machine; with one, switch its public JSON API on.
 
 A rate is `round(price_in_reference × 1e8 × 10^(8 − precision))`: the
 `10^(8 − d)` factor carries the asset's denomination (`asset-denomination.md`
 §6a), so for an 8-decimal asset it is `round(price × 1e8)`, and one trading at
 exactly one reference unit has rate `100000000`.
 
-The price server writes to a node through `setfeeexchangerates` with
-`persist=false`, which updates the whitelist in memory but does **not** write
+A price server can also write to a node by RPC, as the network's price server
+does for the public nodes: give it the node's RPC login (`node_rpc`). It writes
+with `setfeeexchangerates` and `persist=false`, which updates the whitelist in
+memory but does **not** write
 `exchangerates.json` (a running price server re-pushes after a node restart;
 persisting would leave its last rates in force across a restart instead of the
 operator's static whitelist). Two consequences to know:
@@ -302,7 +315,8 @@ operator's static whitelist). Two consequences to know:
   at the price server's next poll.
 
 Manual kill-switch: `sequentia-cli setfeeexchangerates '{}'` (empties the
-whitelist, and disconnects the node from any price server it is connected to).
+whitelist by hand: it is static and empty, and any connection to a price server
+ends).
 ⚠ This means the node accepts **no fee asset at all** and will relay nothing,
 rather than falling back to the policy asset. Restore a working table before
 leaving the node unattended.

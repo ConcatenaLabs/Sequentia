@@ -35,14 +35,22 @@ struct CAsset;
  * as "not a price server", so nothing ever goes from a price feed API to the
  * whitelist without one.
  *
- * One writer. While the node is connected, the price server is the whitelist's
- * only writer. The first write by anyone else, the operator by hand
- * (setfeeexchangerates, the desktop wallet's Fee acceptance dialog) or a price
- * server of the operator's pushing over RPC, disconnects the node for good: it
- * records -nofeepriceserver in its settings.json, and from then on the list is
- * exactly what is written to it, an empty one included. To connect again:
- * setfeepriceserver "<address>", or the dialog. An address given on the command
- * line is connected at every start, as any command-line setting wins.
+ * Two states. Static: the whitelist is written by hand. Dynamic: the node is
+ * connected to a price server, the whitelist's only writer, either by address
+ * (above) or by RPC: a price server writes to the node with setfeeexchangerates
+ * and persist=false, which is how a price server writes. A write with
+ * persist=true, the default that hand use and the desktop wallet make, is a
+ * hand write; someone passing persist=false by hand is shown as a price server,
+ * which the node cannot tell apart. A list written by RPC is not persisted, so
+ * after a restart the node shows its static file until the price server
+ * writes again.
+ *
+ * One writer. Any write over RPC ends a connection by address for good (the
+ * node records -nofeepriceserver in its settings.json): a hand write makes the
+ * whitelist static, an empty one included, and a price server's write
+ * connects the node by RPC to that server instead. To connect by address
+ * again: setfeepriceserver "<address>", or the dialog. An address given on the
+ * command line is connected at every start, as any command-line setting wins.
  *
  * What the node does with an answer:
  *  - A list is taken whole or not at all. It is refused, and the list in force
@@ -102,9 +110,12 @@ void StartFeePriceServer(CScheduler& scheduler, CTxMemPool* mempool);
 /** Ask the price server once and take its list. @return true if one was taken. */
 bool RefreshFeePriceServer(int timeout_secs);
 
-/** Someone other than the price server is about to write the whitelist:
- *  disconnect, if connected, and record that in settings.json. */
-void NoteOperatorFeeListWrite(const std::string& how);
+/** The whitelist is about to be written over RPC (setfeeexchangerates).
+ *  by_price_server (persist=false, how a price server writes) leaves the node
+ *  connected by RPC to that price server, dynamic; otherwise (a hand write) it
+ *  is static. Either way a connection by address ends for good, recorded in
+ *  settings.json, since the address's server is no longer the only writer. */
+void NoteFeeListWrite(bool by_price_server);
 
 /** Connect to the price server at url ("" = disconnect, keeping the list in
  *  force as the operator's), and record that in settings.json. Connecting

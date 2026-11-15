@@ -154,6 +154,12 @@ bool ParsePriceServerFeeList(const std::string& body, std::map<CAsset, CAmount>&
     // what applies admission rules to a feed, and skipping it is not possible.
     const UniValue& r = doc["rates"];
     const UniValue& updated = doc["updated"];
+    if (r.isObject() && updated.isNull() && doc.exists("updated")) {
+        // GET /api/whitelist of a price server whose first poll has not
+        // completed: a price server, with nothing to publish yet.
+        error = "the price server has not published a list yet";
+        return false;
+    }
     if (!r.isObject() || !updated.isNum()) {
         error = "the address is not a price server: its answer is not a published fee list "
                 "(\"updated\" and \"rates\"), and a price feed API's answer is never taken as a whitelist";
@@ -359,13 +365,38 @@ void StartFeePriceServer(CScheduler& scheduler, CTxMemPool* mempool)
     scheduler.scheduleFromNow([] { tick(); }, std::chrono::seconds{first});
 }
 
-void NoteOperatorFeeListWrite(const std::string& how)
+void NoteFeeListWrite(bool by_price_server)
 {
     const FeeListSource src = GetFeeListSource();
-    if (!DisconnectFeePriceServer(strprintf("the fee whitelist was written by %s", how))) return;
-    RecordChoice("");
-    LogPrintf("FeePriceServer: the fee whitelist was written by %s, so this node is no longer connected to the price server at %s. From now on the whitelist is what is written to it; setfeepriceserver connects it again\n",
-              how, src.url);
+    const bool by_address = src.connected && !src.via_rpc;
+    const std::string how = by_price_server ? "a price server writing to this node over RPC" : "hand";
+    if (by_address && DisconnectFeePriceServer(strprintf("the fee whitelist was written by %s", how))) {
+        RecordChoice("");
+        if (by_price_server) {
+            LogPrintf("FeePriceServer: a price server wrote the fee whitelist over RPC, so this node is connected to that price server by RPC instead of to the one at %s; setfeepriceserver connects it by address again\n", src.url);
+        } else {
+            LogPrintf("FeePriceServer: the fee whitelist was written by hand, so it is static and this node is no longer connected to the price server at %s; setfeepriceserver connects it again\n", src.url);
+        }
+    }
+    const int64_t now = GetTime();
+    UpdateFeeListSource([&](FeeListSource& s) {
+        const std::string ended = s.ended;
+        if (by_price_server) {
+            // Dynamic: connected by RPC to the price server that wrote it.
+            s = FeeListSource{};
+            s.connected = true;
+            s.via_rpc = true;
+            s.have_list = true;
+            s.last_written = now;
+            s.ended = ended;
+        } else if (s.connected) {
+            // A hand write while a price server wrote by RPC: static now, and
+            // dynamic again at that server's next write.
+            s.connected = false;
+            s.via_rpc = false;
+            s.ended = "the fee whitelist was written by hand";
+        }
+    });
 }
 
 bool SetFeePriceServer(const std::string& url, std::string& error)
@@ -373,6 +404,7 @@ bool SetFeePriceServer(const std::string& url, std::string& error)
     if (url.empty()) {
         const FeeListSource src = GetFeeListSource();
         if (DisconnectFeePriceServer("disconnected with setfeepriceserver")) {
+            UpdateFeeListSource([](FeeListSource& s) { s.via_rpc = false; });
             LogPrintf("FeePriceServer: disconnected from %s; the list in force is kept as a static whitelist\n", src.url);
         }
         RecordChoice("");

@@ -787,5 +787,29 @@ class ThePublishFileIsTheWhitelistNodesConnectTo(unittest.TestCase):
         srv = self.poll_into(None, LIVE_PRICES)
         self.assertIsNone(srv.publish_file)
 
+
+class AServerThatOnlyPublishesNeedsNoNodeLogin(unittest.TestCase):
+    """A node connected to this server takes its /api/whitelist, so a config
+    with no node RPC at all is a whole config: it polls and publishes, and
+    writes to no node."""
+
+    def test_no_node_rpc_is_a_valid_config(self):
+        cfg = base_cfg()
+        cfg.pop("node_rpc", None)
+        cfg.pop("node_rpcs", None)
+        srv = ps.PriceServer(cfg, dry_run=False)
+        self.assertEqual(srv.rpcs, [])
+        registry = {tk.upper(): (asset_id(tk), "example.test", 8) for tk in LIVE_PRICES}
+        feed = {tk.upper(): {"price": p, "market_cap": None, "volume_24h": None} for tk, p in LIVE_PRICES.items()}
+        real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
+        ps.fetch_registry = lambda url, timeout: dict(registry)
+        ps.fetch_prices = lambda source, timeout: dict(feed)
+        try:
+            rates = srv.poll_once()
+        finally:
+            ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
+        self.assertTrue(rates)
+        self.assertEqual(ps._whitelist_payload(srv)["rates"], rates)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

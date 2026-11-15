@@ -12,15 +12,23 @@ it under its own configuration. Each poll it:
 2. **fetches prices** for those assets from one price feed API;
 3. applies your **admission rules** to decide which assets are allowed to pay
    transaction fees, and at what rate;
-4. **publishes** the resulting whitelist, in either or both of two ways:
-   - **to your own node(s)**, written over the `setfeeexchangerates` RPC with
-     `persist=false`;
-   - **to nodes that connect to it**: a node started with
-     `-feepriceserver=<address>` (or told `setfeepriceserver "<address>"`) asks
-     for the list this server publishes, at its `GET /api/whitelist` or in the
-     file it writes with `--publish-file`, and takes it as its whitelist. That
-     is how a node uses another operator's price server, and how every testnet
-     node uses the network's, at `http://sequentiatestnet.com/feewhitelist`.
+4. **publishes** the resulting whitelist to the nodes connected to it, in
+   either or both of two ways:
+   - **by address**: a node started with `-feepriceserver=<address>` (or told
+     `setfeepriceserver "<address>"`) asks for the list this server publishes,
+     at its `GET /api/whitelist` or in the file it writes with `--publish-file`,
+     and takes it as its whitelist. This needs no RPC login to the node. It is
+     how a node uses its operator's own price server (the desktop wallet's
+     "Run my own price server" connects the node to this server's
+     `/api/whitelist` on the same machine), another operator's, and the
+     network's: every testnet node is connected by default to
+     `http://sequentiatestnet.com/feewhitelist`;
+   - **by RPC**: written to each node in `node_rpc` / `node_rpcs` with the
+     `setfeeexchangerates` RPC and `persist=false`, as the network's price server
+     does for the public nodes. The node shows that as connected by RPC.
+
+A node connected to a price server either way has a dynamic whitelist; one
+written by hand has a static one.
 
 Nothing goes from a price feed API to a node's whitelist without a price
 server: a node refuses an answer that is not a price server's published list.
@@ -46,8 +54,13 @@ python3 price_server.py --config config.json --publish-file /srv/feewhitelist/fe
 
 Copy `config.example.json` to `config.json` as a starting point; its defaults
 point at the public Sequentia testnet demo feed, so a fresh install works out
-of the box. From the desktop node GUI, **Settings → Price server** launches the
-bundled copy with a UI on localhost — no setup at all.
+of the box. Leave `node_rpc` out to publish without writing to any node, then
+connect your node to it: `sequentia-cli setfeepriceserver
+"http://127.0.0.1:8090/api/whitelist"` (with no admin password set the API
+answers this machine; with one, switch the public JSON API on). From the
+desktop node GUI, **Settings → Price server** does all of this: it launches the
+bundled copy with a UI on localhost and connects the node to it, with no setup
+at all.
 
 ## The web UI: one port, two audiences
 

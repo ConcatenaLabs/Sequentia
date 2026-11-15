@@ -23,9 +23,13 @@ What must hold:
     not a price server;
   * the server unreachable: the last list is kept, and so is its cache across a
     restart;
-  * one writer: the first write by anyone else ends the connection for good,
-    across restarts, and an emptied list stays empty; setfeepriceserver connects
-    again, or disconnects keeping the list;
+  * two states: dynamic is connected to a price server, by address or by RPC (a
+    write with persist=false, how a price server writes); static is written by
+    hand. Any write over RPC ends a connection by address for good, across
+    restarts, and an emptied list stays empty; setfeepriceserver connects again,
+    or disconnects keeping the list;
+  * your own price server, the real one with no login to the node, is connected
+    by address like any other;
   * upgrades: a data directory holding only the old seed connects; one whose
     operator wrote a list keeps it, static; an operator's own price server
     pushing to the node takes over at its first push;
@@ -252,25 +256,38 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         self.wait_until(lambda: self.standin.hits.get("/prices", 0) >= 2, timeout=20)
         assert_equal(self.rates(), list2)
 
-        self.log.info("One writer: the first write by the operator ends the connection, for good")
+        self.log.info("One writer: a price server writing over RPC connects the node to it instead, still dynamic")
         self.standin.publish("/feewhitelist", self.list1)
         self.wait_until(lambda: self.rates() == self.list1, timeout=20)
-        mine = {self.policy: 70000000}
-        self.n1().setfeeexchangerates(mine, False)  # as an operator's own price server pushes
+        assert_equal(self.n1().getfeepriceserver()["connection"], "address")
+        pushed = {self.policy: 70000000}
+        self.n1().setfeeexchangerates(pushed, False)  # persist=false: how a price server writes
+        state = self.n1().getfeepriceserver()
+        assert_equal(state["connected"], True)
+        assert_equal(state["whitelist"], "dynamic")
+        assert_equal(state["connection"], "rpc")
+        assert "url" not in state
+        assert state["list_written"] > 0
+        assert "disconnected_because" not in state  # connected, so nothing to say it is not
+        hits = self.standin.hits.get("/feewhitelist", 0)
+        time.sleep(3)
+        assert_equal(self.standin.hits.get("/feewhitelist", 0), hits)  # the address is no longer asked
+        assert_equal(self.rates(), pushed)
+
+        self.log.info("A hand write is static, and the connection by address stays ended across a restart")
+        mine = {self.policy: 80000000}
+        self.n1().setfeeexchangerates(mine)  # persist=true: by hand, kept in exchangerates.json
         state = self.n1().getfeepriceserver()
         assert_equal(state["connected"], False)
         assert_equal(state["whitelist"], "static")
-        assert "written by" in state["disconnected_because"]
-        hits = self.standin.hits.get("/feewhitelist", 0)
-        time.sleep(3)
-        assert_equal(self.standin.hits.get("/feewhitelist", 0), hits)  # it no longer asks
-        assert_equal(self.rates(), mine)
-
-        self.log.info("...and stays ended across a restart")
-        self.n1().setfeeexchangerates(mine)  # by hand, kept in exchangerates.json
         self.restart1()
         assert_equal(self.n1().getfeepriceserver()["connected"], False)
         assert_equal(self.rates(), mine)
+
+        self.log.info("A price server writing over RPC after a restart makes it dynamic again")
+        self.n1().setfeeexchangerates(pushed, False)
+        assert_equal(self.n1().getfeepriceserver()["connection"], "rpc")
+        self.n1().setfeeexchangerates(mine)
 
         self.log.info("setfeepriceserver connects it again; its list replaces the operator's")
         self.n1().setfeepriceserver(self.standin.url("/feewhitelist"))
@@ -342,6 +359,56 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         self.restart1(["-feepriceserver=%s" % self.standin.url("/feewhitelist")])
         assert_equal(self.n1().getfeepriceserver()["connected"], True)
         assert_equal(self.rates(), self.list1)
+
+        self.log.info("Your own price server: the real one, with no login to the node, connected by address")
+        self.own_price_server()
+
+    def own_price_server(self):
+        """Run contrib/price-server/price_server.py against the stand-in's feed
+        and registry, with no node RPC in its config, and connect the node to
+        its /api/whitelist, as the desktop wallet's "Run my own price server"
+        and the documented way do."""
+        import subprocess
+        gold = "33" * 32
+        self.standin.routes["/registry"] = (200, json.dumps({
+            self.policy: ["example.test", "SEQ", "Sequence", 8, 1, 0],
+            gold: ["example.test", "GOLD", "Gold", 8, 1, 0]}))
+        self.standin.routes["/feed"] = (200, json.dumps({
+            "SEQ": {"price": 0.5, "market_cap": 1e9, "volume_24h": 1e7},
+            "GOLD": {"price": 3000.0, "market_cap": 1e9, "volume_24h": 1e7}}))
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        config = os.path.join(self.options.tmpdir, "own-price-server.json")
+        with open(config, "w", encoding="utf8") as f:
+            json.dump({"poll_interval_secs": 2, "registry_url": self.standin.url("/registry"),
+                       "source": {"url": self.standin.url("/feed"), "quote_currency": "USD", "format": "sequentia"},
+                       "feed_aliases": {}, "default_thresholds": {"require": "all"}, "exceptions": {},
+                       "ui": {"public_api": True}}, f)
+        script = os.path.join(self.config["environment"]["SRCDIR"], "contrib", "price-server", "price_server.py")
+        log = open(os.path.join(self.options.tmpdir, "own-price-server.log"), "w", encoding="utf8")
+        proc = subprocess.Popen(["python3", "-I", script, "--config", config, "--ui-port", str(port)],
+                                stdout=log, stderr=subprocess.STDOUT)
+        try:
+            url = "http://127.0.0.1:%d/api/whitelist" % port
+
+            def connects():
+                try:
+                    self.n1().setfeepriceserver(url)
+                    return True
+                except Exception:
+                    return False
+            self.wait_until(connects, timeout=60)
+            state = self.n1().getfeepriceserver()
+            assert_equal(state["connected"], True)
+            assert_equal(state["whitelist"], "dynamic")
+            assert_equal(state["connection"], "address")
+            assert_equal(state["url"], url)
+            assert_equal(self.rates(), {self.policy: 50000000, gold: 300000000000})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            log.close()
 
     def reset_datadir_fee_state(self):
         """Forget every fee-list choice node1 has made, as a fresh data directory

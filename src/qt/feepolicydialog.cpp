@@ -28,6 +28,7 @@
 #include <QHeaderView>
 #include <QDoubleValidator>
 #include <QIntValidator>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -45,6 +46,7 @@
 #include <QVBoxLayout>
 
 #include <climits>
+#include <memory>
 
 static QTableWidgetItem* roItem(const QString& text)
 {
@@ -68,8 +70,9 @@ FeePolicyDialog::FeePolicyDialog(const PlatformStyle* platformStyle, QWidget* pa
                                 "each is worth. A fee is only worth what the asset it is paid in is "
                                 "worth, so this is what lets fees in different assets be compared. "
                                 "An asset that is not listed is not accepted. The whitelist is static "
-                                "when you write it by hand here, and dynamic when a price server "
-                                "updates it: connect to one below, another operator's or your own."),
+                                "when you write it by hand here, and dynamic when this node is "
+                                "connected to a price server: connect to one below, another "
+                                "operator's or your own."),
                              this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
@@ -165,9 +168,23 @@ void FeePolicyDialog::showPriceServerState()
     const bool connected = s["connected"].isTrue();
     const QString network = s["network_price_server"].isStr() ? QString::fromStdString(s["network_price_server"].get_str()) : QString();
     m_ps_disconnect->setEnabled(connected);
+    if (connected && s["connection"].isStr() && s["connection"].get_str() == "rpc") {
+        // Connected by RPC: a price server writes to this node, and the node
+        // knows no address for it, so there is nothing here to change.
+        m_ps_disconnect->setEnabled(false);
+        m_ps_disconnect->setToolTip(tr("A price server that writes to this node over RPC is stopped where it runs, "
+                                       "or this node removed from its configuration."));
+        m_ps_status->setStyleSheet(QString());
+        m_ps_status->setText(tr("Connected to a price server that writes to this node over RPC. The whitelist is "
+                                "dynamic: that server writes it. Last written %1.")
+                                 .arg(timeText(s["list_written"].get_int64())));
+        if (m_ps_url->text().isEmpty()) m_ps_url->setText(network);
+        return;
+    }
+    m_ps_disconnect->setToolTip(tr("Keep the list in force as a static whitelist and stop taking updates."));
     if (!connected) {
-        QString text = tr("Not connected to a price server. The whitelist is static: it is what is written "
-                          "to it, by hand here or by a price server of yours that writes to this node.");
+        QString text = tr("Not connected to a price server. The whitelist is static: it is what you write "
+                          "to it by hand.");
         if (s["disconnected_because"].isStr()) {
             text += " " + tr("Disconnected because %1.").arg(QString::fromStdString(s["disconnected_because"].get_str()));
         }
@@ -199,6 +216,13 @@ void FeePolicyDialog::showPriceServerState()
 bool FeePolicyDialog::confirmHandWrite()
 {
     if (!m_ps_state.isObject() || !m_ps_state["connected"].isTrue()) return true;
+    if (m_ps_state["connection"].isStr() && m_ps_state["connection"].get_str() == "rpc") {
+        return QMessageBox::question(this, tr("Write the whitelist by hand?"),
+                   tr("A price server writes this node's whitelist over RPC. Writing it by hand makes it static "
+                      "until that server writes again, at its next poll, which replaces what you write here.\n\n"
+                      "Write it by hand?"),
+                   QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes;
+    }
     const QString url = QString::fromStdString(m_ps_state["url"].get_str());
     return QMessageBox::question(this, tr("Write the whitelist by hand?"),
                tr("This node is connected to the price server at %1, which writes its whitelist. Writing it by "
@@ -285,76 +309,60 @@ std::map<std::string, int64_t> FeePolicyDialog::currentRates(bool& ok, QString& 
     return out;
 }
 
-bool FeePolicyDialog::nodeRpcEndpoint(QJsonObject& out) const
+QString LocalPriceServer::ListUrl()
 {
-    // Where THIS node listens, and how the sidecar should authenticate to it.
-    // Prefer the cookie: it is what the node writes for its own tools, and it
-    // keeps an rpcpassword out of a second file on disk. The sidecar re-reads
-    // the cookie on every call, so a node restart rotating it is harmless.
-    const uint16_t port = static_cast<uint16_t>(gArgs.GetIntArg("-rpcport", BaseParams().RPCPort()));
-    out = QJsonObject();
-    out["host"] = QStringLiteral("127.0.0.1");
-    out["port"] = int(port);
+    return QStringLiteral("http://127.0.0.1:%1/api/whitelist").arg(UI_PORT);
+}
 
-    const std::string user = gArgs.GetArg("-rpcuser", "");
-    const std::string pass = gArgs.GetArg("-rpcpassword", "");
-    if (!user.empty() && !pass.empty()) {
-        out["user"] = QString::fromStdString(user);
-        out["password"] = QString::fromStdString(pass);
-        return true;
-    }
-    const fs::path cookie = AbsPathForConfigVal(fs::PathFromString(gArgs.GetArg("-rpccookiefile", ".cookie")));
-    out["cookie"] = QString::fromStdString(fs::PathToString(cookie));
+bool LocalPriceServer::PrepareConfig(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QJsonParseError perr{};
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &perr);
+    f.close();
+    if (perr.error != QJsonParseError::NoError || !doc.isObject()) return false;
+    QJsonObject root = doc.object();
+    // The node connects to this server by address; a server that also wrote
+    // to it over RPC would be a second writer, and needs a login it should not
+    // hold. A config from an older copy of the wallet carries one: drop it.
+    root.remove("node_rpc");
+    root["node_rpcs"] = QJsonArray();
+    QJsonObject ui = root.value("ui").toObject();
+    ui["public_api"] = true; // /api/whitelist, on loopback only: the UI binds to 127.0.0.1
+    root["ui"] = ui;
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
     return true;
 }
 
-void FeePolicyDialog::writeNodeRpcInto(const QString& path) const
+void LocalPriceServer::ConnectWhenPublished(interfaces::Node& node, QObject* context, std::function<void(bool, const QString&)> done)
 {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) return;
-    const QByteArray raw = f.readAll();
-    f.close();
-
-    QJsonParseError perr{};
-    QJsonDocument doc = QJsonDocument::fromJson(raw, &perr);
-    if (perr.error != QJsonParseError::NoError || !doc.isObject()) return;
-
-    QJsonObject root = doc.object();
-    QJsonObject rpc;
-    if (!nodeRpcEndpoint(rpc)) return;
-    // Keep the file's own explanation of the field; only the values are ours.
-    const QJsonObject existing = root.value("node_rpc").toObject();
-    if (existing.contains("_comment")) rpc["_comment"] = existing.value("_comment");
-    root["node_rpc"] = rpc;
-
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    f.close();
-}
-
-QString FeePolicyDialog::nodeRpcMismatch(const QString& path) const
-{
-    // An EXISTING config can point somewhere else entirely -- an older copy of
-    // the example, or a node that has since moved port. The sidecar will not
-    // complain in any way the operator sees: it polls, prices, pushes, and the
-    // pushes are refused. Say so here, where they are about to start it.
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) return QString();
-    const QByteArray raw = f.readAll();
-    f.close();
-    QJsonParseError perr{};
-    const QJsonDocument doc = QJsonDocument::fromJson(raw, &perr);
-    if (perr.error != QJsonParseError::NoError || !doc.isObject()) return QString();
-
-    const QJsonObject rpc = doc.object().value("node_rpc").toObject();
-    if (rpc.isEmpty()) return QString();
-    const int configured = rpc.value("port").toInt();
-    const uint16_t actual = static_cast<uint16_t>(gArgs.GetIntArg("-rpcport", BaseParams().RPCPort()));
-    if (configured == int(actual)) return QString();
-    return tr("The price server config at %1 publishes to port %2, but this node listens on %3. "
-              "Nothing will reach it until that is corrected — the sidecar reports the refusals "
-              "only in its own log.")
-        .arg(path).arg(configured).arg(int(actual));
+    auto* timer = new QTimer(context);
+    auto attempts = std::make_shared<int>(0);
+    auto last = std::make_shared<QString>();
+    QObject::connect(timer, &QTimer::timeout, context, [&node, timer, attempts, last, done]() {
+        UniValue params(UniValue::VARR);
+        params.push_back(ListUrl().toStdString());
+        try {
+            node.executeRpc("setfeepriceserver", params, std::string());
+            timer->stop();
+            timer->deleteLater();
+            done(true, ListUrl());
+            return;
+        } catch (const UniValue& e) {
+            *last = e.isObject() && e.exists("message") ? QString::fromStdString(e["message"].get_str()) : QString::fromStdString(e.write());
+        } catch (const std::exception& e) {
+            *last = QString::fromStdString(e.what());
+        }
+        if (++(*attempts) >= 45) { // ~90 s: its first poll fetches the registry and the feed
+            timer->stop();
+            timer->deleteLater();
+            done(false, *last);
+        }
+    });
+    timer->start(2000);
 }
 
 void FeePolicyDialog::refresh()
@@ -524,19 +532,14 @@ void FeePolicyDialog::onLaunchPriceServer()
             setStatus(tr("Could not create a default price-server config at %1.").arg(cfg), true);
             return;
         }
-        // The example ships a placeholder RPC endpoint, and copying it verbatim
-        // was a trap: the sidecar starts, polls, prices everything correctly and
-        // pushes it all at a port with no node behind it, for as long as nobody
-        // reads its log. We know exactly where this node listens and how to
-        // authenticate to it, so write that in rather than leave it to be
-        // discovered later by its absence.
         QFile::setPermissions(cfg, QFile::ReadOwner | QFile::WriteOwner);
-        writeNodeRpcInto(cfg);
+    }
+    if (!LocalPriceServer::PrepareConfig(cfg)) {
+        setStatus(tr("Could not prepare the price-server config at %1.").arg(cfg), true);
+        return;
     }
 
-    const QString mismatch = nodeRpcMismatch(cfg);
-
-    const int uiPort = 8089;
+    const int uiPort = LocalPriceServer::UI_PORT;
     const QStringList args{script, "--config", cfg, "--ui-port", QString::number(uiPort), "--ui-host", "127.0.0.1"};
     if (!QProcess::startDetached(python, args, sdir)) {
         setStatus(tr("Failed to start the price server using '%1'. Ensure Python is available.").arg(python), true);
@@ -546,15 +549,11 @@ void FeePolicyDialog::onLaunchPriceServer()
     // Give the sidecar a moment to bind, then open its configuration UI in the browser.
     const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
     QTimer::singleShot(1500, this, [url]{ QDesktopServices::openUrl(QUrl(url)); });
-    if (!mismatch.isEmpty()) {
-        setStatus(mismatch, true);
-        return;
-    }
-    const bool connected = m_ps_state.isObject() && m_ps_state["connected"].isTrue();
-    setStatus(connected
-        ? tr("Your price server is starting; its configuration page will open at %1. Its first write to this "
-             "node disconnects it from %2, and from then on your price server keeps the whitelist up to date.")
-              .arg(url, QString::fromStdString(m_ps_state["url"].get_str()))
-        : tr("Your price server is starting; its configuration page will open at %1. "
-             "It keeps the whitelist up to date; Refresh to see updates.").arg(url));
+    setStatus(tr("Your price server is starting; its configuration page will open at %1. This node connects "
+                 "to it as soon as it publishes its first list.").arg(url));
+    if (!m_wallet_model) return;
+    LocalPriceServer::ConnectWhenPublished(m_wallet_model->node(), this, [this](bool ok, const QString& msg) {
+        if (ok) { setStatus(tr("Connected to your price server at %1. The whitelist is dynamic.").arg(msg)); refresh(); }
+        else { setStatus(tr("Your price server did not publish a list this node could take: %1").arg(msg), true); }
+    });
 }

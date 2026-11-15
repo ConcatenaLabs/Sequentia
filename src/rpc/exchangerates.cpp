@@ -59,9 +59,10 @@ static RPCHelpMan setfeeexchangerates()
                 "whitelist survives a restart. A price server that pushes to this node should pass persist=false:\n"
                 "it re-pushes every poll, so persisting would only churn the file and, worse, leave a dead price\n"
                 "server's last rates in force across a restart instead of the static whitelist.\n"
-                "\nIf this node is connected to a price server (getfeepriceserver), that server is the whitelist's\n"
-                "only writer, so this call disconnects it, for good: the node records that in settings.json and\n"
-                "from then on the whitelist is what is written to it. setfeepriceserver connects it again.\n",
+                "\nThe whitelist is static when written by hand and dynamic when the node is connected to a price\n"
+                "server. A write with persist=false is how a price server writes, so it leaves the node connected by\n"
+                "RPC to that price server (dynamic); a write with persist=true, the default, is a hand write (static).\n"
+                "Either ends a connection by address (setfeepriceserver) for good, recorded in settings.json.\n",
                 {
                     {"rates", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::NO, "",
                         {
@@ -92,8 +93,7 @@ static RPCHelpMan setfeeexchangerates()
     // One writer: anyone writing the whitelist ends the node's connection to
     // a price server before the write lands, so a list in flight from that
     // server can never overwrite this one.
-    NoteOperatorFeeListWrite(persist ? "hand (setfeeexchangerates)"
-                                     : "a price server pushing to this node (setfeeexchangerates, persist=false)");
+    NoteFeeListWrite(/*by_price_server=*/!persist);
     exchangeRateMap.SetRates(rates);
     if (persist && !exchangeRateMap.SaveToJSONFile(errors)) {
         throw JSONRPCError(RPC_DATABASE_ERROR, strprintf("Error saving exchange rates to JSON file %s: \n%s\n", exchange_rates_config_file, MakeUnorderedList(errors)));
@@ -244,7 +244,11 @@ static UniValue FeePriceServerToJSON()
     UniValue out(UniValue::VOBJ);
     out.pushKV("connected", src.connected);
     out.pushKV("whitelist", src.connected ? "dynamic" : "static");
-    if (src.connected) {
+    if (src.connected && src.via_rpc) {
+        out.pushKV("connection", "rpc");
+        out.pushKV("list_written", src.last_written);
+    } else if (src.connected) {
+        out.pushKV("connection", "address");
         out.pushKV("url", src.url);
         out.pushKV("default", src.by_default);
         out.pushKV("has_list", src.have_list);
@@ -262,11 +266,12 @@ static UniValue FeePriceServerToJSON()
 
 static const std::vector<RPCResult> FEE_PRICE_SERVER_RESULT{
     {RPCResult::Type::BOOL, "connected", "Whether this node is connected to a price server, which is then its whitelist's only writer"},
-    {RPCResult::Type::STR, "whitelist", "\"dynamic\" when connected to a price server; \"static\" otherwise, meaning written by hand, or by a price server pushing to this node over setfeeexchangerates"},
-    {RPCResult::Type::STR, "url", /*optional=*/true, "The address of the price server's published list"},
+    {RPCResult::Type::STR, "whitelist", "\"dynamic\" when connected to a price server, \"static\" when written by hand"},
+    {RPCResult::Type::STR, "connection", /*optional=*/true, "How it is connected: \"address\", asking for the list the price server publishes at url; or \"rpc\", the price server writing to this node (setfeeexchangerates with persist=false), whose address the node does not know"},
+    {RPCResult::Type::STR, "url", /*optional=*/true, "The address of the price server's published list (connection \"address\")"},
     {RPCResult::Type::BOOL, "default", /*optional=*/true, "Whether the address is the network's default rather than one the operator chose"},
     {RPCResult::Type::BOOL, "has_list", /*optional=*/true, "Whether a list from this price server is in force"},
-    {RPCResult::Type::NUM_TIME, "list_written", /*optional=*/true, "When the list in force was taken from the price server (" + UNIX_EPOCH_TIME + "), 0 if never"},
+    {RPCResult::Type::NUM_TIME, "list_written", /*optional=*/true, "When the price server last wrote the list in force (" + UNIX_EPOCH_TIME + "), 0 if never"},
     {RPCResult::Type::NUM_TIME, "list_published", /*optional=*/true, "When the price server says it published that list (" + UNIX_EPOCH_TIME + ")"},
     {RPCResult::Type::NUM_TIME, "last_attempt", /*optional=*/true, "When this node last asked the price server (" + UNIX_EPOCH_TIME + ")"},
     {RPCResult::Type::STR, "last_error", /*optional=*/true, "Why the last answer was refused or did not arrive; empty after a list was taken. The list in force is kept meanwhile"},
@@ -278,8 +283,9 @@ static const std::vector<RPCResult> FEE_PRICE_SERVER_RESULT{
 static RPCHelpMan getfeepriceserver()
 {
     return RPCHelpMan{"getfeepriceserver",
-                "\nWhether this node is connected to a price server, which one, and when its fee whitelist was last written.\n"
-                "A whitelist is static when written by hand, and dynamic when a price server updates it.\n",
+                "\nWhether this node is connected to a price server, how, and when its fee whitelist was last written.\n"
+                "The whitelist is static when written by hand, and dynamic when the node is connected to a price server:\n"
+                "by address, asking for the list the server publishes, or by RPC, the server writing to the node.\n",
                 {},
                 RPCResult{RPCResult::Type::OBJ, "", "", FEE_PRICE_SERVER_RESULT},
                 RPCExamples{

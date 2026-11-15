@@ -8,6 +8,7 @@
 #include <qt/clientmodel.h>
 #include <qt/createwalletdialog.h>
 #include <qt/guiconstants.h>
+#include <qt/feepolicydialog.h>
 #include <qt/guiutil.h>
 #include <qt/modaloverlay.h>
 #include <qt/networkstyle.h>
@@ -1195,9 +1196,8 @@ void BitcoinGUI::launchPriceServer()
         const UniValue state = feePriceServerState();
         if (state["connected"].isTrue() &&
             QMessageBox::question(this, tr("Run your own price server?"),
-                tr("This node is connected to the price server at %1. Your own price server writes this "
-                   "node's whitelist instead, and its first write disconnects the node from %1.\n\n"
-                   "Run your own price server?").arg(QString::fromStdString(state["url"].get_str())),
+                tr("This node is connected to a price server. Running your own connects it to yours "
+                   "instead.\n\nRun your own price server?"),
                 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
             return;
         }
@@ -1257,8 +1257,14 @@ void BitcoinGUI::launchPriceServer()
             return;
         }
     }
+    // Your own price server publishes its list on this machine and the node
+    // connects to it there, as to any price server: no RPC login to the node.
+    if (!LocalPriceServer::PrepareConfig(cfg)) {
+        QMessageBox::warning(this, tr("Price server"), tr("Could not prepare the price-server config at %1.").arg(cfg));
+        return;
+    }
 
-    const int uiPort = 8089;
+    const int uiPort = LocalPriceServer::UI_PORT;
     const QString url = QString("http://127.0.0.1:%1/").arg(uiPort);
 
     // Already running (from an earlier click)? Just reopen the page — never spawn a
@@ -1326,6 +1332,14 @@ void BitcoinGUI::launchPriceServer()
             pollTimer->stop();
             pollTimer->deleteLater();
             QDesktopServices::openUrl(QUrl(url));
+            LocalPriceServer::ConnectWhenPublished(m_node, this, [this](bool ok, const QString& msg) {
+                if (ok) {
+                    if (statusBar()) statusBar()->showMessage(tr("Connected to your price server; the fee whitelist is dynamic."), 8000);
+                } else {
+                    QMessageBox::warning(this, tr("Price server"),
+                        tr("Your price server is running, but this node could not connect to it: %1").arg(msg));
+                }
+            });
         } else if (++(*attempts) >= 30) { // ~9s of 300ms polls
             pollTimer->stop();
             pollTimer->deleteLater();

@@ -6,10 +6,12 @@
 #define BITCOIN_QT_FEEPOLICYDIALOG_H
 
 #include <QDialog>
+#include <QString>
 
 #include <univalue.h>
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 
@@ -18,6 +20,7 @@ class PlatformStyle;
 
 QT_BEGIN_NAMESPACE
 class QTableWidget;
+namespace interfaces { class Node; }
 class QComboBox;
 class QJsonObject;
 class QLineEdit;
@@ -67,12 +70,6 @@ private:
     UniValue m_ps_state;                 // getfeepriceserver, as of the last refresh
     bool m_remove_selection_connected{false};
 
-    //! This node's own RPC endpoint and credentials, as the sidecar's config wants them.
-    bool nodeRpcEndpoint(QJsonObject& out) const;
-    //! Replace node_rpc in a freshly seeded config with this node's real endpoint.
-    void writeNodeRpcInto(const QString& path) const;
-    //! Empty unless an existing config publishes somewhere this node is not listening.
-    QString nodeRpcMismatch(const QString& path) const;
 
     UniValue callRpc(const std::string& method, const UniValue& params, bool& ok, QString& error);
     void setStatus(const QString& msg, bool error = false);
@@ -85,5 +82,22 @@ private:
     //! The price-server section's text, from m_ps_state.
     void showPriceServerState();
 };
+
+/** SEQUENTIA: running your own price server, from the desktop wallet. To the
+ *  node that is being connected to it, like any price server: the bundled
+ *  price server publishes its list on this machine and the node connects to
+ *  that address, so the price server needs no RPC login to the node. */
+namespace LocalPriceServer {
+//! The port the bundled price server's web UI and API listen on, on loopback.
+static constexpr int UI_PORT = 8089;
+//! The address of its published list.
+QString ListUrl();
+//! Make a config publish its list for this node and write to no node over RPC:
+//! no node RPC login, the JSON API on (the UI binds to loopback only).
+bool PrepareConfig(const QString& path);
+//! Connect node to it once its first list is published, retrying for up to
+//! 90 s while it starts; done(ok, message) is called once.
+void ConnectWhenPublished(interfaces::Node& node, QObject* context, std::function<void(bool, const QString&)> done);
+} // namespace LocalPriceServer
 
 #endif // BITCOIN_QT_FEEPOLICYDIALOG_H

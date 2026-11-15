@@ -6,7 +6,7 @@
   "source_name": "sequentia-price-server",
 
   "node_rpc": {
-    "_comment": "Your LOCAL Sequentia node's RPC, where the whitelist is published. The node GUI fills this in from the node it is running when it creates your copy of this file, so it matches by construction; set it by hand only when running the sidecar yourself. Use either user+password from your node conf, or \"cookie\": \"<datadir>/<network>/.cookie\" -- the cookie is re-read on every call, so it survives a node restart rotating it. 18776 is the chain=test default (the testnet is the default chain). Getting this wrong does not stop the server: it keeps polling and every push is refused, so watch the log after the first poll for \"published N rate(s) to 0/1 node(s)\".",
+    "_comment": "Optional: a node this server writes its whitelist to by RPC (setfeeexchangerates, persist=false). Leave it out when your nodes connect to this server by address instead (-feepriceserver / setfeepriceserver pointing at its /api/whitelist), which needs no login; the desktop wallet's Run my own price server removes it and connects the node that way. Use either user+password from your node conf, or \"cookie\": \"<datadir>/<network>/.cookie\" -- the cookie is re-read on every call, so it survives a node restart rotating it. 18776 is the chain=test default (the testnet is the default chain). Getting this wrong does not stop the server: it keeps polling and every push is refused, so watch the log after the first poll for \"published N rate(s) to 0/1 node(s)\".",
     "host": "127.0.0.1",
     "port": 18776,
     "cookie": "~/.elements/testnet3/.cookie"

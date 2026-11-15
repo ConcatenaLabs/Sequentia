@@ -1132,6 +1132,10 @@ static bool CreateTransactionInternal(
         // every asset in turn. Say what is actually missing.
         if (!ExchangeRateMap::GetInstance().HasAcceptedAsset()) {
             const FeeListSource source = GetFeeListSource();
+            if (source.connected && source.via_rpc) {
+                error = _("This node's price server, which writes to it over RPC, has written an empty fee whitelist, so nothing can be sent until it writes one that lists an asset. Receiving is not affected.");
+                return false;
+            }
             if (source.connected) {
                 // Waiting for the price server is not the operator's mistake,
                 // and telling them to write the list would end the connection.

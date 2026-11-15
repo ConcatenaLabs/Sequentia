@@ -341,8 +341,12 @@ class PriceServer:
             self.rpcs = []
         elif "node_rpcs" in config:
             self.rpcs = [NodeRPC(n) for n in config["node_rpcs"]]
-        else:
+        elif "node_rpc" in config:
             self.rpcs = [NodeRPC(config["node_rpc"])]
+        else:
+            # A server that only publishes: nodes connect to it (-feepriceserver)
+            # and take its /api/whitelist, so it needs no node's RPC login.
+            self.rpcs = []
         self.source_name = config.get("source_name", "price-server")
         self.stopping = False
 
