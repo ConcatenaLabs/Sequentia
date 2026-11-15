@@ -519,6 +519,65 @@ void PosRefreshCertifiedKeys(ChainstateManager& chainman, CBlockIndex* registry_
     }
 }
 
+bool PosIndexCertifies(const CBlockIndex* pindex)
+{
+    // Connected here at least once: ConnectBlock verified the certificate the
+    // block carries (a fuller one adopted later was verified on arrival).
+    // A body that has only been measured is not enough: the block hash leaves
+    // the certificate out, so a fake aggregate on a real leader's block would
+    // otherwise count.
+    return pindex->IsValid(BLOCK_VALID_SCRIPTS) && pindex->PosCarriesQuorum();
+}
+
+void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route)
+{
+    if (!g_con_pos || !PosIndexCertifies(pindex)) return;
+    PosCertifiedBlock b;
+    b.hash = pindex->GetBlockHash();
+    b.height = pindex->nHeight;
+    b.anchor_height = pindex->m_anchor_height;
+    b.anchor_hash = pindex->m_anchor_hash;
+    PosSigningNoteCertificate(b, route);
+}
+
+void PosSigningNoteIndexAtStart(ChainstateManager& chainman)
+{
+    AssertLockHeld(::cs_main);
+    if (!g_con_pos) return;
+    const CChain& active = chainman.ActiveChain();
+    const CBlockIndex* tip = active.Tip();
+    if (!tip) return;
+    // The window the check keeps (POS_SIGNING_RECORD_WINDOW): below it a
+    // block binds nothing, so nothing older is loaded.
+    const uint64_t ref = g_con_bitcoin_anchor ? tip->m_anchor_height : (uint64_t)tip->nHeight;
+    const auto in_window = [&](const CBlockIndex* p) {
+        const uint64_t key = g_con_bitcoin_anchor ? p->m_anchor_height : (uint64_t)p->nHeight;
+        return ref <= key + POS_SIGNING_RECORD_WINDOW;
+    };
+    const int64_t t0 = GetTimeMicros();
+    size_t noted = 0;
+    // The active chain from the tip down to the window's edge.
+    int lowest = tip->nHeight + 1;
+    for (const CBlockIndex* p = tip; p && in_window(p); p = p->pprev) {
+        lowest = p->nHeight;
+        if (!PosIndexCertifies(p)) continue;
+        PosNoteVerifiedCertificate(p, PosCertRoute::INDEX_AT_START_ACTIVE);
+        ++noted;
+    }
+    // Blocks off the active chain: only at heights the window reaches. The
+    // index has no height order, so this is one pass over its entries that
+    // reads two integers for each block below the window.
+    for (const auto& [hash, pindex] : chainman.m_blockman.m_block_index) {
+        if (pindex->nHeight < lowest || active.Contains(pindex) || !in_window(pindex) || !PosIndexCertifies(pindex)) continue;
+        PosNoteVerifiedCertificate(pindex, (pindex->nStatus & BLOCK_FAILED_MASK) ? PosCertRoute::INDEX_AT_START_INVALID
+                                                                                 : PosCertRoute::INDEX_AT_START);
+        ++noted;
+    }
+    LogPrintf("Signing record: %u block(s) with a verified full certificate in the window, read from the block index "
+              "of %u entries in %.1f ms\n", (unsigned)noted, (unsigned)chainman.m_blockman.m_block_index.size(),
+              (GetTimeMicros() - t0) / 1000.0);
+}
+
 bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
                                 const Consensus::Params& params, std::string& reason)
 {
@@ -4262,10 +4321,9 @@ bool CChainState::FlushStateToDisk(
                 // holds in memory; the signing record drops what it knows.
                 if (g_con_pos && this == &m_chainman.ActiveChainstate() && m_chain.Tip()) {
                     PosSigningRecordIndexWritten(m_chain.Height(), m_chain.Tip()->m_anchor_height,
-                        [this](int h) -> std::optional<std::pair<uint256, bool>> {
-                            const CBlockIndex* at = m_chain[h];
-                            if (!at) return std::nullopt;
-                            return std::make_pair(at->GetBlockHash(), at->PosCarriesQuorum());
+                        [this](const uint256& hash) {
+                            const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
+                            return pindex && PosIndexCertifies(pindex);
                         });
                 }
 
@@ -4615,6 +4673,12 @@ bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& head
     // on arrival; PosSetCertified keeps the candidate sets ordered.
     (void)PosRecordCertified(chainman, pindex, PosQuorumAfter(pindex->pprev));
     chainman.m_blockman.MarkBlockIndexDirty(pindex);
+    // A block that connected here has had a certificate verified; the fuller
+    // one was verified on arrival (PosVerifyCertificate). A block that never
+    // connected is noted by the certificate message's route, not here.
+    if (pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
+        PosNoteVerifiedCertificate(pindex, chainman.ActiveChain().Contains(pindex) ? PosCertRoute::CONNECTED : PosCertRoute::UPGRADE);
+    }
 
     // Serve the fuller certificate with the body from now on. Only a block
     // that has never been connected here is moved: its undo data, once
@@ -5008,6 +5072,11 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
     }
 
     m_chain.SetTip(pindexDelete->pprev);
+    // SEQUENTIA: the signing check follows the active chain on a node that
+    // cannot judge anchors (pos_signing_record.h).
+    if (g_con_pos && this == &m_chainman.ActiveChainstate()) {
+        PosSigningNoteDisconnected(pindexDelete->GetBlockHash(), pindexDelete->nHeight);
+    }
 
     UpdateTip(pindexDelete->pprev);
 
@@ -5281,6 +5350,11 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     }
     // Update m_chain & related variables.
     m_chain.SetTip(pindexNew);
+    // SEQUENTIA: ConnectBlock has just verified this block's certificate, so
+    // the signing check holds it as certified if it carries its parent's
+    // quorum. Every block route (a peer, submitblock, submitposblock,
+    // generateposblock, the gossip assembly, a reindex) connects here.
+    if (g_con_pos && this == &m_chainman.ActiveChainstate()) PosNoteVerifiedCertificate(pindexNew, PosCertRoute::CONNECTED);
     // SEQUENTIA immediate finality: a quorum block's observation window opens
     // when it joins the active chain. Not during the initial block download,
     // whose blocks the network settled long ago: they become final as soon as

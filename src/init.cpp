@@ -1983,6 +1983,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         return false;
     }
 
+    // SEQUENTIA: with the chain loaded, the signing check learns every block
+    // in its window that the block index holds a verified full certificate
+    // for (pos_signing_record.h), before RPC, peers or the producer can ask
+    // it to sign. From here on, every certificate is noted as it arrives.
+    {
+        LOCK(cs_main);
+        PosSigningNoteIndexAtStart(chainman);
+    }
+
     // ********************************************************* Step 8: start indexers
     if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
         if (const auto error{CheckLegacyTxindex(*Assert(chainman.m_blockman.m_block_tree_db))}) {

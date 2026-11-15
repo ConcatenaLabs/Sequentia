@@ -1173,9 +1173,17 @@ A member may hold signatures for X and for Y at one height on two Bitcoin
 branches: that is following Bitcoin, never a fault. The same block again is
 always free.
 
-A block whose certificate the node holds, whether it assembled the certificate
-itself (`generateposblock`, or as the gossip round that certified it) or received
-it from a peer, binds its height for good while its anchor stands. Such a block
+A block the node holds a full certificate for binds its height for good while
+its anchor stands, whether or not this member signed it, and however the
+certificate arrived: the block connected here (from a peer, `submitblock`,
+`submitposblock`, `generateposblock`, or the gossip round that certified it;
+`ConnectBlock` checks the certificate), a peer's certificate message
+(`poscert`, checked on arrival), or a fuller certificate for a block that
+connected here. Only a checked certificate counts: a block body whose
+certificate has not been checked yet binds nothing, since the block hash leaves
+the certificate out and a leader could otherwise freeze a height with a fake
+one. Nothing is then signed at that height but the certified block itself: no
+share, no proposal, no leader's signature, no partial signature. Such a block
 leaves the node's chain at its height only when Bitcoin replaces its anchor or
 when the operator invalidates it (`invalidateblock`, on the block or an
 ancestor). After an invalidation on this node, the member is released after one
@@ -1259,12 +1267,25 @@ certificate query; the same call succeeds once a round has passed with no
 certificate. These hold a height: a share, a block the node signed whole, led
 or recertified, and a MuSig2 partial signature whose block the node knows. A
 proposal does not, since every member proposes at every height and a proposal
-certifies only with the shares of others. `musigpartialsign` signs a bare hash,
-so it takes the block as its optional `block` argument. A hash the node does not
-know cannot be placed at a height, so it is refused while any block the member
-signed above the active tip (or a rival of the tip) still binds, until it is
-given the block. A host that signed at a height whose anchor stands never
-produces alone there.
+certifies only with the shares of others; a proposal is still refused at a
+height a certified block holds, and during the hold for an unreadable entry
+(below), and the producer proposes as soon as the check lets it.
+`musigpartialsign` signs a bare hash, so it takes the block as its `block`
+argument, which a proof-of-stake chain requires in practice: a hash the node
+does not know cannot be told from a rival at the active tip's height, so it is
+refused while any block at or above that height binds, the certified tip
+included. A host that signed at a height whose anchor stands never produces
+alone there.
+
+What binds a height is decided in one place, from two sources kept apart
+because they bind differently: the record's entries (this member's signatures,
+binding by the escape) and the blocks the node holds a full certificate for
+(binding for good). The second comes from the block index: at the start the
+node reads every certified block in the record's window from it, before any
+signing path can run, and while it runs every certificate is noted as it
+arrives, by every route above. Neither source can be lost to the other: an
+entry is dropped only once the block index on disk carries its block with a
+checked certificate.
 
 At a restart the record restores the share-lock: every entry that holds a
 height binds again as the share-lock binds, each with a new query and a new
@@ -1289,15 +1310,24 @@ either, so it could not sign at that height anyway. A committee whose members
 all restart in that state resumes as soon as their daemons answer.
 
 A node that does not watch Bitcoin (`-validateanchor=0` on an anchored chain)
-cannot judge an anchor: there a block signed in the running process binds as
-the share-lock always has, and an entry loaded at a restart binds nothing. On a
-chain without anchors no anchor can be replaced, and every entry binds.
+cannot judge an anchor, but it follows a Bitcoin reorganization through its own
+active chain. There a certified block binds while it is on the node's active
+chain (and, if its certificate arrived in the running process, before it
+connects), and binds nothing once the node leaves it; a block signed in the
+running process binds as the share-lock always has; anything else known only
+from the disk binds nothing. On a chain without anchors no anchor can be
+replaced, and every entry binds.
 
-An entry is dropped once the block index on disk carries its block on the
-active chain (the index then keeps that knowledge), once a quorum-certified
-sibling on the active chain has taken its height, or once its anchor is more
-than 144 Bitcoin blocks (a day) below the tip's (on a chain without anchors,
-144 blocks below the tip). The file is append-only and is rewritten without the
+An entry is dropped once the block index on disk carries its block with a
+checked full certificate (the index then answers for it, at once and after a
+restart), or once its anchor is more than 144 Bitcoin blocks (a day) below the
+tip's (on a chain without anchors, 144 blocks below the tip). Nothing else
+drops one: a signature on a block that lost its height to a certified sibling
+stays, since it binds again if Bitcoin replaces the sibling's anchor and not
+its own. Certified blocks are kept in memory for the same window; reading them
+from the block index at the start takes about 25 ms on an index of 214,000
+blocks, and a node that never signs pays a few microseconds per connected
+block and writes no file. The file is append-only and is rewritten without the
 dropped entries whenever they make up more than half of it, so it holds about
 what was signed since the last index write. An entry is about 150 bytes plus 68
 per input the block spends.
@@ -1326,9 +1356,13 @@ and says what to do. At the start:
 - damage anywhere else stops the start, as starting without the record could
   sign a rival.
 
-`getsigningrecord` (hidden) lists the entries, the blocks the check holds and
-their state, and what the appends cost. Tested in
-`feature_pos_signing_record*.py`.
+`getsigningrecord` (hidden) lists the entries, the blocks the check holds
+(signed, certified, or both) and their state, and what the appends cost. Tested
+in `feature_pos_signing_record*.py`; every same-height path against a certified
+block (after an index write, a restart, `submitposblock` and block relay, and
+without the anchor watcher) in `feature_pos_signing_record_certified.py`, and
+the hold for an unreadable entry on proposals in
+`feature_pos_signing_record_proposal.py`.
 
 #### Restoring a member's data directory
 

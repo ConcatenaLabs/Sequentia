@@ -563,7 +563,7 @@ older coordinator model, where each slot's certificate is assembled by hand
    ```
 4. **Round 2** - each member, given all the public nonces:
    ```
-   sequentia-cli musigpartialsign "<sid>" "<member-WIF>" '[<members>]' '[<pubnonces>]' "<signhash>"
+   sequentia-cli musigpartialsign "<sid>" "<member-WIF>" '[<members>]' '[<pubnonces>]' "<signhash>" "<block>"
    ```
 5. **Aggregate** (coordinator, public data only) and submit:
    ```
@@ -576,12 +576,14 @@ triple. This manual flow is only needed under the `-posbls=0` fallback; with the
 default autonomous committee the nodes perform the equivalent share exchange and
 aggregation themselves over gossip.
 
-Pass the block to `musigpartialsign` (its optional `block` argument, the
-`block` field of `getposblocktemplate`): the node checks every signature against
-what its keys already signed at that height (the share-lock) and records it
-before answering, and a hash it does not know is refused while one of its
-signatures there may still be certified. A refusal names the block that holds
-the height; the same call succeeds once a round has passed with no certificate.
+Pass the block to `musigpartialsign` (its `block` argument, the `block` field
+of `getposblocktemplate`): the node checks every signature against what its
+keys already signed at that height and every block it holds a certificate for
+there (the share-lock), and records it before answering. A hash it does not
+know cannot be placed at a height and is refused while the active tip, or any
+block above it, binds, which in practice is always. A refusal names the block
+that holds the height; the same call succeeds once a round has passed with no
+certificate, unless that block is certified.
 
 ### The signing record: never restore a member from an old copy
 

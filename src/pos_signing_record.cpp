@@ -42,17 +42,34 @@ struct Stored {
     bool dropped{false};
 };
 
-//! A block the signing check holds: one per block hash, for every live entry
-//! that locks its height (PosSigningEntry::Locks).
+//! A block that may bind its height in the signing check: one per block hash.
+//! It binds for either of two reasons, kept apart because they bind
+//! differently and come from different places:
+//!  - signed_here: a live record entry that locks its height
+//!    (PosSigningEntry::Locks). Source: possigned.dat at the start, then every
+//!    PosSigningGate::Record. Binds by the escape (query, one grace round).
+//!  - certified: this node holds a verified full certificate for it. Source:
+//!    the block index, scanned at the start (PosSigningNoteIndexAtStart in
+//!    validation.cpp) and, while the node runs, every route by which a
+//!    verified certificate reaches it, all through PosSigningNoteCertificate.
+//!    Binds for as long as its anchor stands, unless invalidated here.
+//! A block leaves only when neither reason holds: the record drops an entry
+//! only once the index on disk carries its block with a verified full
+//! certificate (so the start scan restores the certified reason), and a
+//! certified block leaves only past the window (POS_SIGNING_RECORD_WINDOW).
+//! Compacting the record therefore never weakens the check.
 struct Held {
     int height{0};
     uint32_t anchor_height{0};
     uint256 anchor_hash;
-    bool from_disk{false};       //!< loaded at the start, not signed in this run
+    bool signed_here{false};     //!< a live record entry locks the height with it
+    bool from_disk{false};       //!< known from the disk at the start (record or index), not in this run
     int64_t grace_start_ms{0};   //!< when its escape's round began (0: not begun)
     bool queried{false};         //!< its certificate was asked for in this grace
     bool escaped{false};         //!< the round passed with no certificate while its anchor stood
-    bool certified{false};       //!< a certificate for it reached this node
+    bool certified{false};       //!< this node holds a verified full certificate for it
+    bool on_active{false};       //!< on this node's active chain (certified blocks: set at connect and at the start)
+    bool left_active{false};     //!< was on the active chain in this run, and the node left it
     bool invalidated{false};     //!< the operator invalidated it (or an ancestor) on this node
     std::string state{"not judged"};
 };
@@ -196,26 +213,45 @@ int64_t SteadyUs()
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+//! The block `hash` at `height` in the check, created if new.
+Held& HeldFor(const uint256& hash, int height, uint32_t anchor_height, const uint256& anchor_hash, bool from_disk)
+    EXCLUSIVE_LOCKS_REQUIRED(g_mutex)
+{
+    auto& at = g_held[height];
+    auto it = at.find(hash);
+    if (it == at.end()) {
+        Held h;
+        h.height = height;
+        h.anchor_height = anchor_height;
+        h.anchor_hash = anchor_hash;
+        h.from_disk = from_disk;
+        it = at.emplace(hash, h).first;
+    } else if (!from_disk) {
+        it->second.from_disk = false; // known again in this run
+    }
+    return it->second;
+}
+
 //! Hold `e`'s block in the signing check (it locks its height).
 void HoldEntry(const PosSigningEntry& e, bool from_disk) EXCLUSIVE_LOCKS_REQUIRED(g_mutex)
 {
     if (!e.Locks()) return;
-    auto& at = g_held[e.height];
-    auto it = at.find(e.block_hash);
-    if (it == at.end()) {
-        Held h;
-        h.height = e.height;
-        h.anchor_height = e.anchor_height;
-        h.anchor_hash = e.anchor_hash;
-        h.from_disk = from_disk;
-        at.emplace(e.block_hash, h);
-    } else if (!from_disk) {
-        it->second.from_disk = false; // signed again in this run
-    }
+    HeldFor(e.block_hash, e.height, e.anchor_height, e.anchor_hash, from_disk).signed_here = true;
 }
 
-//! The blocks the record's live entries still hold; forget the others.
-void PruneHeld() EXCLUSIVE_LOCKS_REQUIRED(g_mutex)
+//! Whether a block anchored at `anchor_height` at `height` is past the window
+//! below the reference point `ref` (the tip's anchor, or with no anchoring,
+//! the tip's height).
+bool PastWindow(uint64_t ref, uint32_t anchor_height, int height)
+{
+    const uint64_t key = (g_con_bitcoin_anchor || height < 0) ? anchor_height : (uint64_t)height;
+    return ref > key + POS_SIGNING_RECORD_WINDOW;
+}
+
+//! After the record dropped entries: a block keeps binding while a live entry
+//! signs it or while it is certified (the index answers for it); a certified
+//! block alone leaves only past the window below `ref`.
+void PruneHeld(uint64_t ref) EXCLUSIVE_LOCKS_REQUIRED(g_mutex)
 {
     std::set<uint256> live;
     for (const Stored& s : g_entries) {
@@ -223,7 +259,10 @@ void PruneHeld() EXCLUSIVE_LOCKS_REQUIRED(g_mutex)
     }
     for (auto h = g_held.begin(); h != g_held.end();) {
         for (auto b = h->second.begin(); b != h->second.end();) {
-            b = live.count(b->first) ? std::next(b) : h->second.erase(b);
+            Held& held = b->second;
+            held.signed_here = live.count(b->first) > 0;
+            const bool keep = held.signed_here || (held.certified && !PastWindow(ref, held.anchor_height, held.height));
+            b = keep ? std::next(b) : h->second.erase(b);
         }
         h = h->second.empty() ? g_held.erase(h) : std::next(h);
     }
@@ -236,10 +275,17 @@ PosAnchorStanding Judge(const PosAnchorJudge& judge, const Held& h, bool& ignore
     if (!g_con_bitcoin_anchor || h.anchor_hash.IsNull()) return PosAnchorStanding::STANDS;
     const std::optional<PosAnchorStanding> v = judge ? judge(h.anchor_height, h.anchor_hash) : std::nullopt;
     if (!v) {
-        // No watcher: a block signed in this run stands, as the share-lock
-        // always held it; one loaded from the disk binds nothing, since this
-        // node cannot tell whether Bitcoin has since replaced its anchor.
-        ignored = h.from_disk;
+        // No watcher: this node cannot judge an anchor, but it follows a
+        // Bitcoin reorganization through its own active chain. So a certified
+        // block binds while it is on the active chain, and while it is not
+        // yet connected if its certificate came in this run; once the node
+        // leaves it, it binds nothing. A block signed in this run stands, as
+        // the share-lock always held it. Anything else known only from the
+        // disk binds nothing: this node cannot tell whether Bitcoin has since
+        // replaced its anchor.
+        const bool certified_binds = h.certified && (h.on_active || (!h.from_disk && !h.left_active));
+        const bool signed_binds = h.signed_here && !h.from_disk;
+        ignored = !certified_binds && !signed_binds;
         return PosAnchorStanding::STANDS;
     }
     return *v;
@@ -300,9 +346,14 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
 {
     PosSignCheck out;
     out.height = entry.height;
-    // A proposal binds nothing (a proposal certifies only with the shares of
-    // others, who each run this check), and nothing else is checked for it.
-    if (entry.kind == (uint8_t)PosSignKind::PROPOSAL) return out;
+    // A proposal binds nothing (it certifies only with the shares of others,
+    // who each run this check), and an uncertified block this member signed
+    // does not stop it (every member proposes at every height). It is still
+    // refused by the hold for an unreadable last entry, and by a block at its
+    // height that this node holds a verified full certificate for: that
+    // height is decided, and a proposal there is a leader's signature on a
+    // rival of a certified block.
+    const bool proposal = entry.kind == (uint8_t)PosSignKind::PROPOSAL;
 
     PosAnchorJudge judge;
     std::vector<std::pair<uint256, Held>> held;
@@ -323,16 +374,20 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
             auto at = g_held.find(entry.height);
             if (at != g_held.end()) {
                 for (const auto& [hash, h] : at->second) {
-                    if (hash != entry.block_hash) held.emplace_back(hash, h);
+                    if (hash == entry.block_hash) continue;
+                    if (proposal && !h.certified) continue;
+                    held.emplace_back(hash, h);
                 }
             }
         } else {
             // A bare hash: the block's height is unknown, so it could be a
-            // rival of any block this member signed that is not settled.
+            // rival of any block at or above the active tip's height that
+            // binds, the tip itself included: a hash this node does not know
+            // cannot be told from a rival of a certified tip at its height.
             for (const auto& [height, at] : g_held) {
                 if (height < tip_height) continue;
                 for (const auto& [hash, h] : at) {
-                    if (hash != entry.block_hash && !(height == tip_height && hash == tip_hash)) held.emplace_back(hash, h);
+                    if (hash != entry.block_hash) held.emplace_back(hash, h);
                 }
             }
         }
@@ -344,6 +399,7 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
         verdicts.emplace_back(v, ignored);
     }
     const int64_t round_ms = PosSigningRoundMs();
+    bool refused_for_good = false;
     LOCK(g_mutex);
     for (size_t i = 0; i < held.size(); ++i) {
         auto at = g_held.find(held[i].second.height);
@@ -358,8 +414,8 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
         }
         if (v == PosAnchorStanding::GONE) {
             if (h.state != "anchor gone") {
-                LogPrintf("Signing record: signed %s at height %d; Bitcoin replaced its anchor %s at %u, so it binds nothing\n",
-                          held[i].first.GetHex(), h.height, h.anchor_hash.GetHex(), h.anchor_height);
+                LogPrintf("Signing record: %s %s at height %d; Bitcoin replaced its anchor %s at %u, so it binds nothing\n",
+                          h.signed_here ? "signed" : "certified", held[i].first.GetHex(), h.height, h.anchor_hash.GetHex(), h.anchor_height);
             }
             h.state = "anchor gone";
             h.escaped = false;
@@ -368,9 +424,12 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
             continue;
         }
         // Every block that binds is judged and has its grace started, so that
-        // they all escape together; the first refusal is the one returned.
+        // they all escape together; the refusal returned is the first, or the
+        // first by a certified block, which binds for good.
+        const bool binds_for_good = h.certified && !h.invalidated && v == PosAnchorStanding::STANDS;
         const auto refuse = [&](std::string why) {
-            if (!out.ok) return;
+            if (!out.ok && !(binds_for_good && !refused_for_good)) return;
+            refused_for_good = binds_for_good;
             out.ok = false;
             out.bound = held[i].first;
             out.height = h.height;
@@ -378,9 +437,9 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
         };
         if (entry.height < 0) {
             if (v == PosAnchorStanding::STANDS && h.escaped && !h.certified) continue;
-            refuse(strprintf("msg is a block this node does not know, and this member signed %s at height %d, which "
-                             "may still be certified: give the block (the block argument) so that the signing "
-                             "record can check its height", held[i].first.GetHex(), h.height));
+            refuse(strprintf("msg is a block this node does not know, and %s %s at height %d binds that height: give "
+                             "the block (the block argument) so that the signing record can check its height",
+                             h.signed_here ? "this member signed" : "the certified block", held[i].first.GetHex(), h.height));
             continue;
         }
         if (v == PosAnchorStanding::UNDECIDED) {
@@ -389,14 +448,18 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
                           h.height, held[i].first.GetHex(), h.anchor_hash.GetHex(), h.anchor_height);
             }
             h.state = "undecided";
-            refuse(strprintf("this member signed %s at height %d, and the parent chain's daemon has not judged its "
+            refuse(strprintf("%s %s at height %d, and the parent chain's daemon has not judged its "
                              "Bitcoin anchor %s at %u: it signs nothing else at that height until it does",
-                             held[i].first.GetHex(), h.height, h.anchor_hash.GetHex(), h.anchor_height));
+                             h.signed_here ? "this member signed" : "this node holds a full certificate for", held[i].first.GetHex(), h.height, h.anchor_hash.GetHex(), h.anchor_height));
             continue;
         }
         if (h.certified && !h.invalidated) {
             h.state = "certified";
-            refuse(strprintf("this member signed %s at height %d, and that block is certified", held[i].first.GetHex(), h.height));
+            refuse(h.signed_here
+                       ? strprintf("this member signed %s at height %d, and this node holds a full certificate for it whose "
+                                   "Bitcoin anchor stands", held[i].first.GetHex(), h.height)
+                       : strprintf("this node holds a full certificate for %s at height %d, and its Bitcoin anchor stands",
+                                   held[i].first.GetHex(), h.height));
             continue;
         }
         if (h.escaped) {
@@ -425,8 +488,9 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
             h.state = "escaped";
             continue;
         }
-        refuse(strprintf("this member signed %s at height %d, and its Bitcoin anchor stands: it asked its peers for "
+        refuse(strprintf("%s %s at height %d, and its Bitcoin anchor stands: it asked its peers for "
                          "that block's certificate and signs no other block there for %d ms more",
+                         h.signed_here ? "this member signed" : "this node holds a certificate for the invalidated block",
                          held[i].first.GetHex(), h.height, (int)(h.grace_start_ms + round_ms - now_ms)));
     }
     if (out.ok) {
@@ -777,15 +841,49 @@ void PosSigningParentMoved(int unchanged_height)
     }
 }
 
-void PosSigningNoteCertificate(const uint256& block_hash, int height)
+void PosSigningNoteCertificate(const PosCertifiedBlock& block, PosCertRoute route)
+{
+    if (block.height < 0) return;
+    const bool at_start = route == PosCertRoute::INDEX_AT_START || route == PosCertRoute::INDEX_AT_START_ACTIVE ||
+                          route == PosCertRoute::INDEX_AT_START_INVALID;
+    LOCK(g_mutex);
+    g_certified_heights.insert(block.height);
+    while (g_certified_heights.size() > 1000) g_certified_heights.erase(g_certified_heights.begin());
+    Held& h = HeldFor(block.hash, block.height, block.anchor_height, block.anchor_hash, at_start);
+    if (!h.certified) {
+        LogPrint(BCLog::VALIDATION, "Signing record: holds a full certificate for %s at height %d (%s)\n",
+                 block.hash.GetHex(), block.height, PosCertRouteName(route));
+    }
+    h.certified = true;
+    if (route == PosCertRoute::CONNECTED || route == PosCertRoute::INDEX_AT_START_ACTIVE) {
+        h.on_active = true;
+        h.left_active = false;
+    }
+    if (route == PosCertRoute::INDEX_AT_START_INVALID) h.invalidated = true;
+}
+
+void PosSigningNoteDisconnected(const uint256& block_hash, int height)
 {
     LOCK(g_mutex);
-    g_certified_heights.insert(height);
-    while (g_certified_heights.size() > 1000) g_certified_heights.erase(g_certified_heights.begin());
     auto at = g_held.find(height);
     if (at == g_held.end()) return;
     auto it = at->second.find(block_hash);
-    if (it != at->second.end()) it->second.certified = true;
+    if (it == at->second.end() || !it->second.on_active) return;
+    it->second.on_active = false;
+    it->second.left_active = true;
+}
+
+const char* PosCertRouteName(PosCertRoute route)
+{
+    switch (route) {
+    case PosCertRoute::CONNECTED: return "connected";
+    case PosCertRoute::CERTIFICATE: return "certificate message";
+    case PosCertRoute::UPGRADE: return "fuller certificate";
+    case PosCertRoute::INDEX_AT_START: return "block index, off the active chain";
+    case PosCertRoute::INDEX_AT_START_ACTIVE: return "block index, active chain";
+    case PosCertRoute::INDEX_AT_START_INVALID: return "block index, invalid here";
+    }
+    return "?";
 }
 
 void PosSigningNoteInvalidated(const std::vector<uint256>& hashes, bool invalidated)
@@ -848,7 +946,7 @@ std::optional<PosBoundBlock> PosSigningBoundAt(int height, const uint256& except
         auto at = g_held.find(height);
         if (at == g_held.end()) return std::nullopt;
         for (const auto& [hash, h] : at->second) {
-            if (hash != except) held.emplace_back(hash, h);
+            if (hash != except && h.signed_here) held.emplace_back(hash, h);
         }
     }
     std::vector<std::pair<PosAnchorStanding, bool>> verdicts;
@@ -907,7 +1005,9 @@ bool PosSigningSignedAt(int height)
         judge = g_judge;
         auto at = g_held.find(height);
         if (at == g_held.end()) return false;
-        for (const auto& [hash, h] : at->second) held.push_back(h);
+        for (const auto& [hash, h] : at->second) {
+            if (h.signed_here) held.push_back(h);
+        }
     }
     for (const Held& h : held) {
         bool ignored;
@@ -941,12 +1041,12 @@ PosSigningDamagedHold PosSigningGetDamagedHold()
     return g_hold;
 }
 
-void PosSigningRecordIndexWritten(int tip_height, uint32_t tip_anchor_height, const PosActiveAt& active_at)
+void PosSigningRecordIndexWritten(int tip_height, uint32_t tip_anchor_height, const PosIndexHoldsCertificate& index_certifies)
 {
     bool abort = false;
     {
         LOCK(g_mutex);
-        if (g_failed || g_entries.empty()) return;
+        if (g_failed) return;
         const uint64_t ref = g_con_bitcoin_anchor ? tip_anchor_height : (uint64_t)std::max(0, tip_height);
         size_t dropped = 0;
         for (Stored& s : g_entries) {
@@ -954,23 +1054,28 @@ void PosSigningRecordIndexWritten(int tip_height, uint32_t tip_anchor_height, co
             const PosSigningEntry& e = s.entry;
             // The stand-in for an unreadable entry goes only when its hold ends.
             if (e.kind == (uint8_t)PosSignKind::UNREADABLE) continue;
+            // Dropped only where something else answers for it: the index
+            // just written carries its block with a verified full certificate
+            // (the check holds that block as certified now, and the scan at
+            // the next start finds it there again), or it is past the window.
+            // An entry whose block is uncertified, or known only as a
+            // proposal or a sibling, stays: nothing else would hold it.
             bool drop = false;
-            if (e.height >= 0 && e.height <= tip_height) {
-                if (const auto at = active_at(e.height)) {
-                    // On the active chain, and in the index just written; or
-                    // lost to a quorum-certified sibling the index now carries.
-                    drop = at->first == e.block_hash || at->second;
+            if (e.height >= 0 && index_certifies(e.block_hash)) {
+                const auto at = g_held.find(e.height);
+                if (at != g_held.end()) {
+                    const auto it = at->second.find(e.block_hash);
+                    drop = it != at->second.end() && it->second.certified;
                 }
             }
-            const uint64_t key = (g_con_bitcoin_anchor || e.height < 0) ? e.anchor_height : (uint64_t)e.height;
-            if (!drop && ref > key + POS_SIGNING_RECORD_WINDOW) drop = true;
+            if (!drop && PastWindow(ref, e.anchor_height, e.height)) drop = true;
             if (!drop) continue;
             s.dropped = true;
             g_dropped_bytes += s.bytes;
             ++dropped;
         }
+        PruneHeld(ref);
         if (dropped > 0) {
-            PruneHeld();
             LogPrint(BCLog::VALIDATION, "Signing record: %u entr%s dropped after the block index write\n",
                      (unsigned)dropped, dropped == 1 ? "y" : "ies");
         }
@@ -1013,6 +1118,10 @@ std::vector<PosSigningHeld> PosSigningHeldBlocks()
             o.anchor_height = h.anchor_height;
             o.anchor_hash = h.anchor_hash;
             o.from_disk = h.from_disk;
+            o.signed_here = h.signed_here;
+            o.certified = h.certified;
+            o.on_active = h.on_active;
+            o.invalidated = h.invalidated;
             o.state = h.certified && !h.invalidated ? "certified" : h.state;
             out.push_back(o);
         }

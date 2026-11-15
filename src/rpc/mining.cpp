@@ -1795,8 +1795,10 @@ static RPCHelpMan musigpartialsign()
                     {"pubnonces", RPCArg::Type::ARR, RPCArg::Optional::NO, "Every member's round-1 pubnonce.",
                         {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "pubnonce"}}},
                     {"msg", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte message (must match round 1)."},
-                    {"block", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED_NAMED_ARG, "The unsigned block whose hash msg is. With it, the signing record "
-                        "names the block's height, parent, anchor and spends; without it, only what this node knows of msg "
+                    {"block", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED_NAMED_ARG, "The unsigned block whose hash msg is. Required in practice on a "
+                        "proof-of-stake chain: a msg this node does not know cannot be placed at a height, so without the block it is "
+                        "refused while any block at or above the active tip's height binds (the certified tip itself included). With "
+                        "it, the signing record names the block's height, parent, anchor and spends "
                         "(doc/sequentia/04-proof-of-stake.md, \"The signing record\")."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::STR_HEX, "partialsig", "this member's 32-byte partial signature"}}},
@@ -1862,7 +1864,7 @@ static RPCHelpMan getsigningrecord()
 {
     return RPCHelpMan{"getsigningrecord",
                 "\nThe entries of this node's signing record: every block its keys signed that the block index on disk "
-                "does not carry yet (doc/sequentia/04-proof-of-stake.md, \"The signing record\").\n",
+                "does not carry yet with a verified full certificate (doc/sequentia/04-proof-of-stake.md, \"The signing record\").\n",
                 {},
                 RPCResult{RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::ARR, "entries", "", {{RPCResult::Type::OBJ, "", "", {
@@ -1877,12 +1879,16 @@ static RPCHelpMan getsigningrecord()
                         {RPCResult::Type::NUM, "time", "when it was signed"},
                     }}}},
                     {RPCResult::Type::STR_HEX, "chain", "the genesis hash of the chain the record belongs to"},
-                    {RPCResult::Type::ARR, "held", "the blocks the signing check holds: one per block signed at a height still open", {{RPCResult::Type::OBJ, "", "", {
-                        {RPCResult::Type::STR_HEX, "hash", "the block signed"},
+                    {RPCResult::Type::ARR, "held", "the blocks that may bind a height in the signing check: one per block this member signed, or that this node holds a verified full certificate for, within the window", {{RPCResult::Type::OBJ, "", "", {
+                        {RPCResult::Type::STR_HEX, "hash", "the block"},
                         {RPCResult::Type::NUM, "height", "its height"},
                         {RPCResult::Type::NUM, "anchorheight", "its Bitcoin anchor's height"},
                         {RPCResult::Type::STR_HEX, "anchorhash", "its Bitcoin anchor"},
-                        {RPCResult::Type::BOOL, "restored", "loaded from the disk at the start, not signed since"},
+                        {RPCResult::Type::BOOL, "restored", "known from the disk at the start (the record or the block index), not since"},
+                        {RPCResult::Type::BOOL, "signed", "a record entry of this member's signature holds it"},
+                        {RPCResult::Type::BOOL, "certified", "this node holds a verified full certificate for it"},
+                        {RPCResult::Type::BOOL, "active", "a certified block on this node's active chain"},
+                        {RPCResult::Type::BOOL, "invalidated", "invalidated on this node (it, or a block below it)"},
                         {RPCResult::Type::STR, "state", "at the last judgement: binds, escaped (a round passed with no certificate while its anchor stood), anchor gone, undecided (no verdict from the parent chain), certified, or not judged"},
                     }}}},
                     {RPCResult::Type::OBJ, "unreadable", /*optional=*/true, "present while an unreadable last entry found at a start holds a height", {
@@ -1927,6 +1933,10 @@ static RPCHelpMan getsigningrecord()
         o.pushKV("anchorheight", (uint64_t)h.anchor_height);
         o.pushKV("anchorhash", h.anchor_hash.GetHex());
         o.pushKV("restored", h.from_disk);
+        o.pushKV("signed", h.signed_here);
+        o.pushKV("certified", h.certified);
+        o.pushKV("active", h.on_active);
+        o.pushKV("invalidated", h.invalidated);
         o.pushKV("state", h.state);
         held.push_back(o);
     }

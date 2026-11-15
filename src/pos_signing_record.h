@@ -38,6 +38,16 @@
 //    waits for a new query and a new round.
 // The same block again is always free, and blocks signed on two Bitcoin
 // branches never refuse each other: that is following Bitcoin, not a fault.
+// A block this node holds a verified full certificate for binds its height for
+// good while its anchor stands, whether or not this member signed it, unless
+// it is invalidated here (then it escapes as above). What binds a height is
+// decided in RunCheck from one map fed by two sources: the record's entries
+// (this member's signatures) and every verified certificate, which comes from
+// the block index (read at the start for the record's window,
+// PosSigningNoteIndexAtStart, then noted at each connect) and from the
+// certificate message, all through PosSigningNoteCertificate. The record drops
+// an entry only once the index on disk carries its block with a verified
+// certificate, so no compaction weakens the check.
 // All of this is local signing policy, never a validity rule.
 //
 // The file names its chain (its first entry carries the genesis hash), is
@@ -148,8 +158,37 @@ void PosSigningSetNetwork(std::function<void(const uint256& block_hash)> query_c
  *  so a block anchored there loses its escape. */
 void PosSigningParentMoved(int unchanged_height);
 
-/** A verified quorum certificate for `block_hash` at `height` reached this node. */
-void PosSigningNoteCertificate(const uint256& block_hash, int height);
+/** A block this node holds a verified full certificate for. */
+struct PosCertifiedBlock {
+    uint256 hash;
+    int height{-1};
+    uint32_t anchor_height{0};
+    uint256 anchor_hash;
+};
+
+/** How a verified full certificate reached this node. */
+enum class PosCertRoute {
+    CONNECTED,              //!< its block connected here (ConnectBlock checked the certificate): any block route, RPC or peer
+    CERTIFICATE,            //!< a certificate message, verified (PosVerifyCertificate); the block may not be here yet
+    UPGRADE,                //!< a fuller certificate adopted for a block that connected here
+    INDEX_AT_START,         //!< the block index at the start: connected here once, now off the active chain
+    INDEX_AT_START_ACTIVE,  //!< the block index at the start: on the active chain
+    INDEX_AT_START_INVALID, //!< the block index at the start: invalid here (invalidateblock, or below such a block)
+};
+const char* PosCertRouteName(PosCertRoute route);
+
+/** The one function by which every verified full certificate reaches the
+ *  signing check, whatever its route: the check then holds the block as
+ *  certified, which binds its height for as long as its anchor stands (on a
+ *  node that does not watch Bitcoin: while it is on the active chain), unless
+ *  it is invalidated here. A certificate that has not been verified (a header,
+ *  a body not yet connected) is not passed here: binding on one would let any
+ *  leader freeze a height with a fake aggregate. Takes the record's lock;
+ *  cs_main may be held. */
+void PosSigningNoteCertificate(const PosCertifiedBlock& block, PosCertRoute route);
+
+/** A certified block left this node's active chain (DisconnectTip). */
+void PosSigningNoteDisconnected(const uint256& block_hash, int height);
 
 /** The operator invalidated these held blocks on this node (invalidateblock,
  *  the block or an ancestor), or revived them (reconsiderblock). A certified
@@ -244,15 +283,17 @@ struct PosSigningDamagedHold {
 PosSigningDamagedHold PosSigningGetDamagedHold();
 
 /** The block index has just been written (cs_main held): drop every entry whose
- *  block it now carries on the active chain, every entry superseded at its
- *  height by a quorum-certified block the index carries on the active chain,
- *  and every entry more than POS_SIGNING_RECORD_WINDOW Bitcoin blocks (or, with
- *  no anchoring, Sequentia blocks) below the tip; rewrite the file once dropped
- *  entries are more than half of it. */
-//! What the active chain holds at a height: its block and whether that block
-//! carries a quorum certificate; nullopt above the tip.
-using PosActiveAt = std::function<std::optional<std::pair<uint256, bool>>(int height)>;
-void PosSigningRecordIndexWritten(int tip_height, uint32_t tip_anchor_height, const PosActiveAt& active_at);
+ *  block the index carries with a verified full certificate (the check holds
+ *  it as certified, and the scan at the next start finds it in the index
+ *  again), and every entry more than POS_SIGNING_RECORD_WINDOW Bitcoin blocks
+ *  (or, with no anchoring, Sequentia blocks) below the tip; forget certified
+ *  blocks past the same window; rewrite the file once dropped entries are more
+ *  than half of it. Nothing else is dropped: an entry is dropped only where
+ *  something else answers for it, so compaction never weakens the check. */
+//! Whether the block index carries `hash` with a verified full certificate
+//! (connected here at least once, carrying its parent's quorum).
+using PosIndexHoldsCertificate = std::function<bool(const uint256& hash)>;
+void PosSigningRecordIndexWritten(int tip_height, uint32_t tip_anchor_height, const PosIndexHoldsCertificate& index_certifies);
 
 /** How far below the tip an entry is kept at most, in Bitcoin blocks (one day). */
 static constexpr uint32_t POS_SIGNING_RECORD_WINDOW = 144;
@@ -272,6 +313,10 @@ struct PosSigningHeld {
     uint32_t anchor_height{0};
     uint256 anchor_hash;
     bool from_disk{false};
+    bool signed_here{false};  //!< a record entry of this member's signature holds it
+    bool certified{false};    //!< this node holds a verified full certificate for it
+    bool on_active{false};
+    bool invalidated{false};
     std::string state;
 };
 std::vector<PosSigningHeld> PosSigningHeldBlocks();

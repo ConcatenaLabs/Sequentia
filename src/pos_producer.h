@@ -235,7 +235,8 @@ private:
     //! sign it, and flood it as a proposal. Every eligible member proposes, so
     //! the candidate set (and thus the round-robin leader order) is complete and
     //! common to all nodes.
-    void ProposeGossip(const CKey& leader_key);
+    //! Returns false when the signing check refused the proposal (the caller tries again).
+    bool ProposeGossip(const CKey& leader_key);
     //! Drive the active gossip round on the worker thread: sign the round's
     //! backed proposal (the round-robin leader), collect/flood shares, and — on a
     //! quorum — assemble and submit. The round index advances with time so a
@@ -372,6 +373,7 @@ private:
     uint256 m_backed_hash;                             //!< hash of the proposal we are signing/collecting for
     int m_signed_round{-1};                            //!< highest round index we have signed for
     int m_proposed_height{0};                          //!< height we have already proposed our own block at
+    int m_proposal_refused_height{-1};                 //!< height whose proposal refusal by the signing check was logged
     int m_propose_at_height{0};                        //!< height m_propose_at_ms is for
     //! The tip this producer last scheduled from, and when it first saw it
     //! (PosProposalStartMs). Producer thread only.
