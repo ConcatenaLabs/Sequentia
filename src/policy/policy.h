@@ -91,7 +91,8 @@ static constexpr unsigned int STANDARD_SCRIPT_VERIFY_FLAGS = MANDATORY_SCRIPT_VE
                                                              SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS |
                                                              SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE |
                                                              SCRIPT_VERIFY_SIMPLICITY |
-                                                             SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT;
+                                                             SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT |
+                                                             SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ;
 
 
 /** For convenience, standard but not mandatory verify flags. */

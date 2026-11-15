@@ -1089,4 +1089,6 @@ def taproot_construct(pubkey, scripts=None):
     return TaprootInfo(CScript([OP_1, tweaked]), pubkey, negated + 0, tweak, leaves, h, tweaked)
 
 def is_op_success(o):
-    return o == 80 or o == 98 or (o >= 137 and o <= 138) or (o >= 141 and o <= 142) or (o >= 149 and o <= 151) or (o >= 187 and o <= 191) or (o >= 229 and o <= 254)
+    # SEQUENTIA: 0xe5-0xe7 are the bitcoin-payment opcodes on every chain where
+    # that rule is active (from genesis on regtest and custom chains).
+    return o == 80 or o == 98 or (o >= 137 and o <= 138) or (o >= 141 and o <= 142) or (o >= 149 and o <= 151) or (o >= 187 and o <= 191) or (o >= 232 and o <= 254)

@@ -173,6 +173,14 @@ private:
     //! whether due lost transactions filled the block.
     std::vector<CTxOut> m_lost_records;
     bool m_lost_cut{false};
+    //! SEQUENTIA: the anchor this block carries, chosen before its transactions
+    //! so bitcoin-payment claims and anchor floors are taken only when it meets them.
+    uint32_t m_anchor_height{0};
+    uint256 m_anchor_hash;
+    bool m_btcpay_active{false};
+    //! SEQUENTIA: the anchor height of the block BtcPayment::FLOOR_DEPTH below
+    //! this one, which an anchor floor is judged against; -1 when there is none.
+    int64_t m_floor_anchor_height{-1};
     //! Build a coinbase-only block: the fallback when a full template fails
     //! TestBlockValidity (CreateNewBlock).
     bool m_coinbase_only{false};

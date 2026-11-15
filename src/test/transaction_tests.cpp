@@ -66,6 +66,7 @@ static std::map<std::string, unsigned int> mapFlagNames = {
     {std::string("DISCOURAGE_UPGRADABLE_TAPROOT_VERSION"), (unsigned int)SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION},
     {std::string("SIMPLICITY"), (unsigned int)SCRIPT_VERIFY_SIMPLICITY},
     {std::string("SIMPLICITY_ANNEX_EXACT"), (unsigned int)SCRIPT_VERIFY_SIMPLICITY_ANNEX_EXACT},
+    {std::string("BTCPAYMENT_RECORDS_READ"), (unsigned int)SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ},
 };
 
 unsigned int ParseScriptFlags(std::string strFlags)

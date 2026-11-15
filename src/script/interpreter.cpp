@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <script/interpreter.h>
+#include <script/btcpayment.h>
 
 #include <consensus/consensus.h>
 #include <crypto/ripemd160.h>
@@ -2247,6 +2248,80 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 }
                 break;
 
+                // SEQUENTIA: proof of a bitcoin payment. Reachable only on a
+                // tapscript leaf under SCRIPT_VERIFY_BTCPAYMENT (otherwise the
+                // opcode is OP_SUCCESS and the script never runs). The records
+                // are re-parsed and their proof re-checked here, so the script is
+                // sound on its own; validation checks them against the chain.
+                case OP_INSPECTBTCPAYMENT:
+                case OP_INSPECTBTCTX:
+                case OP_CHECKANCHORHEIGHTVERIFY:
+                {
+                    if (sigversion != SigVersion::TAPSCRIPT || !(flags & SCRIPT_VERIFY_BTCPAYMENT))
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+                    const BtcPayment::Records* rec = checker.GetBtcPaymentRecords();
+                    const bool parsed = rec != nullptr;
+                    if (opcode == OP_CHECKANCHORHEIGHTVERIFY) {
+                        if (stack.size() < 1)
+                            return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                        const CScriptNum required(stacktop(-1), /*fRequireMinimal=*/true);
+                        if (!parsed || !rec->floor)
+                            return set_error(serror, SCRIPT_ERR_ANCHORLOCK_MISSING);
+                        rec->floor_read = true;
+                        if (required < 0 || (int64_t)*rec->floor != (int64_t)required.getint())
+                            return set_error(serror, SCRIPT_ERR_ANCHORLOCK_UNSATISFIED);
+                        break;
+                    }
+                    if (!parsed || !rec->proof)
+                        return set_error(serror, SCRIPT_ERR_BTCPAY_MISSING);
+                    rec->proof_read = true;
+                    const BtcPayment::Proof& proof = *rec->proof;
+                    if (opcode == OP_INSPECTBTCPAYMENT) {
+                        stack.push_back(CScriptNum((int64_t)proof.height).getvch());
+                        stack.push_back(CScriptNum((int64_t)proof.coin_anchor).getvch());
+                        break;
+                    }
+                    // OP_INSPECTBTCTX: <index> <selector>, or <selector> alone
+                    // for the transaction id. The selector is a script number
+                    // the leaf writes; an index taken from the witness can
+                    // only ever address the field the leaf chose.
+                    if (stack.size() < 1)
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    const int64_t field = (int64_t)CScriptNum(stacktop(-1), /*fRequireMinimal=*/true).getint();
+                    if (field == BtcPayment::FIELD_TXID) {
+                        popstack(stack);
+                        const uint256 txid = proof.tx->GetHash();
+                        stack.emplace_back(txid.begin(), txid.end());
+                        break;
+                    }
+                    if (field != BtcPayment::FIELD_OUTPUT && field != BtcPayment::FIELD_INPUT)
+                        return set_error(serror, SCRIPT_ERR_BTCPAY_FIELD);
+                    if (stack.size() < 2)
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    const int64_t idx = (int64_t)CScriptNum(stacktop(-2), /*fRequireMinimal=*/true).getint();
+                    if (field == BtcPayment::FIELD_INPUT) {
+                        if (idx < 0 || (uint64_t)idx >= proof.tx->vin.size())
+                            return set_error(serror, SCRIPT_ERR_BTCPAY_INPUT);
+                        popstack(stack);
+                        popstack(stack);
+                        // As Elements' OP_INSPECTINPUTOUTPOINT and the outpoint's
+                        // own serialization: the index as 4 bytes little-endian,
+                        // so OP_CAT of the two items is the serialized outpoint.
+                        const auto& prevout = proof.tx->vin[idx].prevout;
+                        stack.emplace_back(prevout.hash.begin(), prevout.hash.end());
+                        push4_le(stack, prevout.n);
+                        break;
+                    }
+                    if (idx < 0 || (uint64_t)idx >= proof.tx->vout.size())
+                        return set_error(serror, SCRIPT_ERR_BTCPAY_OUTPUT);
+                    popstack(stack);
+                    popstack(stack);
+                    const auto& out = proof.tx->vout[idx];
+                    push8_le(stack, (uint64_t)out.nValue);
+                    pushspk(stack, out.scriptPubKey, proof.spk_hashes[idx]);
+                }
+                break;
+
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
@@ -3256,7 +3331,9 @@ static bool ExecuteWitnessScript(const Span<const valtype>& stack_span, const CS
                 return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
             // New opcodes will be listed here. May use a different sigversion to modify existing opcodes.
-            if (IsOpSuccess(opcode)) {
+            const bool btcpay_op = (flags & SCRIPT_VERIFY_BTCPAYMENT) &&
+                (opcode == OP_INSPECTBTCPAYMENT || opcode == OP_INSPECTBTCTX || opcode == OP_CHECKANCHORHEIGHTVERIFY);
+            if (IsOpSuccess(opcode) && !btcpay_op) {
                 if (flags & SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS) {
                     return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_SUCCESS);
                 }
@@ -3467,6 +3544,11 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const C
         if (!EvalScript(stack, scriptPubKey, record_flags, checker, SigVersion::WITNESS_V0, serror)) return false;
         if (stack.size() != 1) return set_error(serror, SCRIPT_ERR_CLEANSTACK);
         if (!CastToBool(stack.back())) return set_error(serror, SCRIPT_ERR_EVAL_FALSE);
+        // SEQUENTIA (relay policy): as below, a record no executed opcode read.
+        if ((flags & SCRIPT_VERIFY_BTCPAYMENT) && (flags & SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ) &&
+            checker.BtcPaymentRecordsUnread()) {
+            return set_error(serror, SCRIPT_ERR_BTCPAY_UNREAD);
+        }
         return set_success(serror);
     }
 
@@ -3576,6 +3658,13 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const C
         if (!hadWitness && !witness->IsNull()) {
             return set_error(serror, SCRIPT_ERR_WITNESS_UNEXPECTED);
         }
+    }
+
+    // SEQUENTIA (relay policy): a bitcoin-payment record that this input's
+    // script did not read is not the spender's to add, whoever added it.
+    if ((flags & SCRIPT_VERIFY_BTCPAYMENT) && (flags & SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ) &&
+        checker.BtcPaymentRecordsUnread()) {
+        return set_error(serror, SCRIPT_ERR_BTCPAY_UNREAD);
     }
 
     return set_success(serror);
