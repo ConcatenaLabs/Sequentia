@@ -96,6 +96,12 @@ class PosSigningRecordReturnTest(PosSigningRecordAnchorTest):
             assert "no certificate for %s" % b in before, "%s: M signed a rival before %s's grace round passed" % (phase, b[:16])
 
     def must_not_have_waited(self, phase, before, blocks):
+        # Until M's anchor watcher polls the parent (once a second here), M still
+        # judges by its last verdict and may end a grace it began: that is the
+        # poll's lag, not a hold. Judge from the moment M saw the move.
+        seen = before.find("Anchor: parent chain reorganized")
+        if seen >= 0:
+            before = before[seen:]
         for b in blocks:
             assert "no certificate for %s" % b not in before, "%s: %s held M though Bitcoin replaced its anchor" % (phase, b[:16])
 
@@ -146,12 +152,17 @@ class PosSigningRecordReturnTest(PosSigningRecordAnchorTest):
         pos = self.resume(restart)
         z, before = self.first_new(pos, h, set(self.shares_at(h)))
         self.must_have_asked("%s A'" % tag, before, sa)
-        self.must_not_have_waited("%s A'" % tag, before, sb)
+        # Only blocks anchored above the fork changed side: one anchored below
+        # it (the producer backs its anchor off a contested tip) stands on both.
+        self.must_not_have_waited("%s A'" % tag, before, {b for b in sb if self.shares_at(h)[b]["anchorheight"] >= top - 1})
         assert m.getblockcount() + 1 == h
         self.record("%s A'" % tag, "Bitcoin back on A: M asked for the certificates of A's %d block(s), waited a round, then signed %s at %d, %.1f s after the move" %
                     (len(sa), z[:16], h, time.time() - t0))
         time.sleep(2)
-        sz = {b for b, e in self.shares_at(h).items() if b not in sa and b not in sb}
+        # A' blocks: anchored on A's branch above the fork. A block M signed on B's
+        # branch before its watcher saw the return to A is B's, not A''s.
+        sz = {b for b, e in self.shares_at(h).items()
+              if b not in sa and b not in sb and e["anchorheight"] >= top - 1 and self.on_best_chain(e)}
 
         # B'': Bitcoin goes back to B's branch.
         self.bounce(restart)
