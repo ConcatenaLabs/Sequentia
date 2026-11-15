@@ -573,7 +573,7 @@ bool SetFeePriceServer(const std::string& url, std::string& error)
     if (g_stopped) { error = "the node is shutting down"; return false; }
     if (url.empty()) {
         const FeeListSource src = GetFeeListSource();
-        if (DisconnectFeePriceServer("disconnected with setfeepriceserver")) {
+        if (DisconnectFeePriceServer("the operator disconnected it (setfeepriceserver, or Disconnect in the desktop wallet)")) {
             LogPrintf("FeePriceServer: disconnected from %s; the list in force is kept as a static whitelist\n", src.url);
         }
         UpdateFeeListSource([](FeeListSource& s) { s.decided_by = "settings"; });

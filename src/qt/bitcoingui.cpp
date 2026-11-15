@@ -1133,7 +1133,8 @@ void BitcoinGUI::promptFeeSetupIfNeeded()
                        "send or relay transactions. You can receive in the meantime.\n\n"
                        "Its fee whitelist says which assets it accepts and what each is worth. Write "
                        "it by hand, and it is static; or connect to a price server, another "
-                       "operator's or your own, and it is dynamic: the price server keeps it updated."),
+                       "operator's or your own, and it is dynamic: the node reads the list that server "
+                       "publishes and keeps it current."),
                     QMessageBox::NoButton, this);
     QPushButton* by_hand = box.addButton(tr("Write it by hand"), QMessageBox::AcceptRole);
     QPushButton* connect_to = box.addButton(tr("Connect to a price server…"), QMessageBox::AcceptRole);
@@ -1178,7 +1179,7 @@ void BitcoinGUI::connectToPriceServer(QString suggestion)
         if (statusBar()) statusBar()->clearMessage();
         if (connected) {
             QMessageBox::information(this, tr("Connected to a price server"),
-                tr("This node is connected to the price server at %1, and its whitelist is that server's.").arg(url));
+                tr("This node is connected to the price server at %1 and reads the whitelist that server publishes.").arg(url));
             return;
         }
         if (QMessageBox::warning(this, tr("Connect to a price server"), why,
@@ -1216,8 +1217,8 @@ void BitcoinGUI::launchPriceServer()
                             "source tree. Looked in:") + "\n" + searched.join("\n");
         text += "\n\n" + (feed.isEmpty()
             ? tr("This node has no price feed configured (-referencepricesurl), so amounts show no reference value.")
-            : tr("Note: this node reads its prices from %1. Running the sidecar here is only needed to "
-                 "publish your own feed.").arg(feed));
+            : tr("Note: the reference prices this node shows come from %1 and never enter its fee "
+                 "whitelist. Your own price server makes a whitelist of your own, which this node then reads.").arg(feed));
         QMessageBox box(QMessageBox::Warning, tr("Price server"), text, QMessageBox::Cancel, this);
         QPushButton* locate = box.addButton(tr("Locate…"), QMessageBox::AcceptRole);
         box.exec();
