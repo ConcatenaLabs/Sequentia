@@ -318,6 +318,34 @@ class LostReplayTest(LostBlocksTest):
                 if d:
                     node.prioritisetransaction(txid=t, fee_delta=d)
 
+    def kill_check(self, case, when, lost_hashes, i=3):
+        """kill -9 of holder `i`; it comes back holding the lost blocks, on the honest tip."""
+        self.kill9(i)
+        held = self.lost(i)
+        assert all(h in held for h in lost_hashes), held.keys()
+        self.sync_tips(HONEST + [LATE])
+        self.record(case, "kill -9 of node %d %s" % (i, when), "restarted holding %d lost block(s), back on the honest tip %s" %
+                    (len(held), self.nodes[i].getbestblockhash()[:12]))
+
+    def case_zflake(self):
+        """PV22's r2 set-up failure: does a wallet send pick a coin fund() handed out before?"""
+        a = self.nodes[SELLER]
+        hits = 0
+        for _ in range(8):
+            c1 = self.fund(lock=False)
+            c2 = self.fund(lock=False)
+            vin = [(i["txid"], i["vout"]) for i in a.getrawtransaction(c2["txid"], 1)["vin"]]
+            hits += (c1["txid"], c1["vout"]) in vin
+        self.record("zflake", "unlocked", "in %d of 8 pairs, the second fund() spent the first's coin" % hits)
+        hits = 0
+        for _ in range(8):
+            c1 = self.fund()
+            c2 = self.fund()
+            vin = [(i["txid"], i["vout"]) for i in a.getrawtransaction(c2["txid"], 1)["vin"]]
+            hits += (c1["txid"], c1["vout"]) in vin
+        self.record("zflake", "locked", "in %d of 8 pairs, the second fund() spent the first's coin" % hits)
+        assert_equal(hits, 0)
+
     def case_r5(self):
         self.log.info("(r5) more due transactions than one block holds (signature operations): the longest prefix, and nothing else")
         a = self.nodes[SELLER]
@@ -362,6 +390,9 @@ class LostReplayTest(LostBlocksTest):
         self.record("r5", "lost branch", "%d blocks %s holding %d transactions of 3,940 signature operations each (%s per block); one block holds 80,000" %
                     (len(Ls), [L["height"] for L in Ls], n, [len(self.tx_ids(n1, L["hash"])) - 1 for L in Ls]))
         since = self.lose("r5", [L["hash"] for L in Ls])
+        # kill -9 of a holder between the disconnect and the first block.
+        self.kill_check("r5", "between the disconnect and the first block", [L["hash"] for L in Ls])
+        since = [self.log_size(i) for i in range(N)]
         # A leader that carries none of them.
         x = self.seller_block(ALL_KEYS, exclude=order)
         self.refused_by("r5", HONEST, x["hash"], since, "bad-lost-replay")
@@ -392,11 +423,18 @@ class LostReplayTest(LostBlocksTest):
         self.refused_by("r5", HONEST, z["hash"], since, "carries other transactions while due lost transactions did not fit")
         self.realign()
         # The honest assembler: the prefix alone, then the rest, then ordinary transactions.
+        self.kill_check("r5", "after three refused blocks", [L["hash"] for L in Ls])
         n1.sendrawtransaction(o_hex)
         h1 = self.produce(1, ALL_KEYS, leaders=[SELLER])
         t1 = self.tx_ids(n1, h1["hash"])
         assert_equal(t1[1:], order[:k])
         self.sync_tips(HONEST + [LATE])
+        # kill -9 between the two blocks of the replay: the holder still refuses a block without the rest.
+        self.kill_check("r5", "between F+1 and F+2", [L["hash"] for L in Ls])
+        since = [self.log_size(i) for i in range(N)]
+        w = self.seller_block(ALL_KEYS, exclude=order[k:])
+        self.refused_by("r5", HONEST, w["hash"], since, "(0 of %d in place" % (n - k))
+        self.realign()
         h2 = self.produce(1, ALL_KEYS, leaders=[SELLER])
         t2 = self.tx_ids(n1, h2["hash"])
         assert_equal(t2[1:1 + n - k], order[k:])

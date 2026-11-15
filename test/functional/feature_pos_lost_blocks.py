@@ -251,12 +251,17 @@ class LostBlocksTest(BitcoinTestFramework):
         self.produce(SELLER, ALL_KEYS, txs_must=[txid])
         self.sync_tips(range(N))
 
-    def fund(self, amount=Decimal("1"), online=None):
+    def fund(self, amount=Decimal("1"), online=None, lock=True):
+        """A coin of the seller's for a case to spend by hand. It is locked in the
+        seller's wallet, so that a later wallet send (the next fund()) cannot pick
+        it as an input and leave the case spending a coin already spent."""
         a = self.nodes[SELLER]
         txid = a.sendtoaddress(address=a.getnewaddress(), amount=amount, fee_asset_label="bitcoin")
         self.produce(SELLER, ALL_KEYS, txs_must=[txid])
         self.sync_tips(online if online is not None else range(N))
         vout = [o for o in a.getrawtransaction(txid, 1)["vout"] if o["value"] == amount][0]["n"]
+        if lock:
+            a.lockunspent(False, [{"txid": txid, "vout": vout}])
         return {"txid": txid, "vout": vout, "amount": amount}
 
     def sync_mempools_of(self, idx, txid, timeout=30):
