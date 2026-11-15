@@ -37,6 +37,7 @@
 #include <bls.h>
 #include <musig.h>
 #include <pos.h>
+#include <pos_signing_record.h>
 #include <vrf.h>
 #include <policy/value.h>
 #include <primitives/block.h>
@@ -4256,6 +4257,16 @@ bool CChainState::FlushStateToDisk(
                 if (g_con_pos && this == &m_chainman.ActiveChainstate() &&
                     !m_blockman.m_block_tree_db->WritePosFinalized(PosFinalizedHashForDisk())) {
                     return AbortNode(state, "Failed to write the finalized point to the block index database");
+                }
+                // SEQUENTIA: the index on disk now carries every block it
+                // holds in memory; the signing record drops what it knows.
+                if (g_con_pos && this == &m_chainman.ActiveChainstate() && m_chain.Tip()) {
+                    PosSigningRecordIndexWritten(m_chain.Height(), m_chain.Tip()->m_anchor_height,
+                        [this](int h) -> std::optional<std::pair<uint256, bool>> {
+                            const CBlockIndex* at = m_chain[h];
+                            if (!at) return std::nullopt;
+                            return std::make_pair(at->GetBlockHash(), at->PosCarriesQuorum());
+                        });
                 }
 
                 // This should be done inside WriteBatchSync, but CBlockIndex is const there

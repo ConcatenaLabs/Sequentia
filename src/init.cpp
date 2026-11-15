@@ -15,6 +15,7 @@
 #include <pos.h>
 #include <supervision.h>
 #include <pos_producer.h>
+#include <pos_signing_record.h>
 #include <key_io.h>
 #include <blockfilter.h>
 #include <chain.h>
@@ -1760,6 +1761,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         gArgs.GetIntArg("-posreconcilepatience", DEFAULT_POS_RECONCILE_PATIENCE), 60, 86400);
     g_pos_reconcile_min_depth = (int)std::clamp<int64_t>(
         gArgs.GetIntArg("-posreconcilemindepth", DEFAULT_POS_RECONCILE_MIN_DEPTH), 1, 1000);
+
+    // SEQUENTIA: the signing record (pos_signing_record.h), read before any
+    // signing path can run: the share-lock it rebuilds holds from the first
+    // round, and every signature appends to it.
+    {
+        std::string record_error;
+        if (!PosSigningRecordLoad(record_error)) return InitError(Untranslated(record_error));
+    }
 
     // ********************************************************* Step 7: load block chain
 

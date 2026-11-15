@@ -21,6 +21,7 @@
 #include <bls.h>
 #include <pos.h>
 #include <pos_producer.h>
+#include <pos_signing_record.h>
 #include <vrf.h>
 #include <node/context.h>
 #include <node/miner.h>
@@ -1794,6 +1795,9 @@ static RPCHelpMan musigpartialsign()
                     {"pubnonces", RPCArg::Type::ARR, RPCArg::Optional::NO, "Every member's round-1 pubnonce.",
                         {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "pubnonce"}}},
                     {"msg", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte message (must match round 1)."},
+                    {"block", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED_NAMED_ARG, "The unsigned block whose hash msg is. With it, the signing record "
+                        "names the block's height, parent, anchor and spends; without it, only what this node knows of msg "
+                        "(doc/sequentia/04-proof-of-stake.md, \"The signing record\")."},
                 },
                 RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::STR_HEX, "partialsig", "this member's 32-byte partial signature"}}},
                 RPCExamples{HelpExampleCli("musigpartialsign", "\"slot42\" \"cV...\" '[\"02...\"]' '[\"<nonce>\"]' \"<blockhash>\"")},
@@ -1807,10 +1811,97 @@ static RPCHelpMan musigpartialsign()
     std::vector<unsigned char> msg = ParseHexV(request.params[4], "msg");
     if (msg.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg must be 32 bytes");
     std::string err;
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    // The signing record (pos_signing_record.h): what this partial signature
+    // is for, synced before the answer leaves.
+    PosSigningEntry entry;
+    {
+        const uint256 hash{msg};
+        if (!request.params[5].isNull()) {
+            CBlock block;
+            if (!DecodeHexBlk(block, request.params[5].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+            if (block.GetHash() != hash) throw JSONRPCError(RPC_INVALID_PARAMETER, "msg is not the hash of block");
+            LOCK(cs_main);
+            const CBlockIndex* prev = chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock);
+            entry = PosSigningEntryFor(PosSignKind::PARTIAL, block, prev ? prev->nHeight + 1 : -1, {key.GetPubKey()});
+        } else {
+            entry.kind = (uint8_t)PosSignKind::PARTIAL;
+            entry.block_hash = hash;
+            entry.time = GetTime();
+            entry.signers = {key.GetPubKey()};
+            LOCK(cs_main);
+            if (const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(hash)) {
+                entry.height = pindex->nHeight;
+                entry.parent_hash = pindex->pprev ? pindex->pprev->GetBlockHash() : uint256();
+                entry.anchor_height = pindex->m_anchor_height;
+                entry.anchor_hash = pindex->m_anchor_hash;
+            } else if (const CBlockIndex* tip = chainman.ActiveChain().Tip()) {
+                entry.anchor_height = g_con_bitcoin_anchor ? tip->m_anchor_height : (uint32_t)tip->nHeight;
+            }
+        }
+    }
     auto partial = MuSigSessionPartialSign(session_id, key, pubkeys, pubnonces, msg, err);
     if (!partial) throw JSONRPCError(RPC_MISC_ERROR, err);
+    if (!PosSigningRecordAppend(entry)) throw JSONRPCError(RPC_MISC_ERROR, POS_SIGNING_RECORD_WRITE_ERROR);
     UniValue result(UniValue::VOBJ);
     result.pushKV("partialsig", HexStr(*partial));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan getsigningrecord()
+{
+    return RPCHelpMan{"getsigningrecord",
+                "\nThe entries of this node's signing record: every block its keys signed that the block index on disk "
+                "does not carry yet (doc/sequentia/04-proof-of-stake.md, \"The signing record\").\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::ARR, "entries", "", {{RPCResult::Type::OBJ, "", "", {
+                        {RPCResult::Type::STR, "kind", "share, proposal, certified, leader, partial or recertify"},
+                        {RPCResult::Type::STR_HEX, "hash", "the block signed"},
+                        {RPCResult::Type::NUM, "height", "its height, -1 when unknown"},
+                        {RPCResult::Type::STR_HEX, "parent", "its parent"},
+                        {RPCResult::Type::NUM, "anchorheight", "its Bitcoin anchor's height"},
+                        {RPCResult::Type::STR_HEX, "anchorhash", "its Bitcoin anchor"},
+                        {RPCResult::Type::NUM, "signers", "how many of this node's keys signed"},
+                        {RPCResult::Type::NUM, "spends", "how many inputs the block spends"},
+                        {RPCResult::Type::NUM, "time", "when it was signed"},
+                    }}}},
+                    {RPCResult::Type::NUM, "file_bytes", "the record's size on disk"},
+                    {RPCResult::Type::NUM, "appends", "entries appended since the start"},
+                    {RPCResult::Type::NUM, "last_append_us", "how long the last append took to reach the disk"},
+                    {RPCResult::Type::NUM, "max_append_us", "the slowest append since the start"},
+                    {RPCResult::Type::NUM, "total_append_us", "every append since the start"},
+                    {RPCResult::Type::NUM, "rewrites", "rewrites without the dropped entries since the start"},
+                }},
+                RPCExamples{HelpExampleCli("getsigningrecord", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    static const char* const kinds[] = {"?", "share", "proposal", "certified", "leader", "partial", "recertify"};
+    UniValue entries(UniValue::VARR);
+    for (const PosSigningEntry& e : PosSigningRecordEntries()) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("kind", kinds[e.kind < 7 ? e.kind : 0]);
+        o.pushKV("hash", e.block_hash.GetHex());
+        o.pushKV("height", e.height);
+        o.pushKV("parent", e.parent_hash.GetHex());
+        o.pushKV("anchorheight", (uint64_t)e.anchor_height);
+        o.pushKV("anchorhash", e.anchor_hash.GetHex());
+        o.pushKV("signers", (uint64_t)e.signers.size());
+        o.pushKV("spends", (uint64_t)e.spends.size());
+        o.pushKV("time", e.time);
+        entries.push_back(o);
+    }
+    const PosSigningRecordStats st = PosSigningRecordGetStats();
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("entries", entries);
+    result.pushKV("file_bytes", st.file_bytes);
+    result.pushKV("appends", st.appends);
+    result.pushKV("last_append_us", st.last_append_us);
+    result.pushKV("max_append_us", st.max_append_us);
+    result.pushKV("total_append_us", st.total_append_us);
+    result.pushKV("rewrites", st.rewrites);
     return result;
 },
     };
@@ -2165,6 +2256,18 @@ static RPCHelpMan submitposblock()
         throw JSONRPCError(RPC_MISC_ERROR, "Leader signature or committee aggregate signature did not satisfy the challenge");
     }
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    {
+        // The signing record (pos_signing_record.h): the leader's signature is
+        // recorded before the block leaves.
+        int height = -1;
+        {
+            LOCK(cs_main);
+            if (const CBlockIndex* prev = chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock)) height = prev->nHeight + 1;
+        }
+        if (!PosSigningRecordAppend(PosSigningEntryFor(PosSignKind::LEADER, block, height, {key.GetPubKey()}))) {
+            throw JSONRPCError(RPC_MISC_ERROR, POS_SIGNING_RECORD_WRITE_ERROR);
+        }
+    }
     std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
     if (!chainman.ProcessNewBlock(chainparams, shared_pblock, true, nullptr)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
@@ -2558,6 +2661,7 @@ static const CRPCCommand commands[] =
     { "hidden",              &generatetoaddress,       },
     { "hidden",              &generatetodescriptor,    },
     { "hidden",              &generateblock,           },
+    { "hidden",              &getsigningrecord,        },
 
     { "util",                &estimatesmartfee,        },
 

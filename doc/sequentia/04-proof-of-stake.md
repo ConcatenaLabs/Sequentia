@@ -1196,6 +1196,65 @@ members. The lock state lives in `PosProducer` (`m_lock_hash`,
 `src/pos_producer.{h,cpp}`); the certificate query is exercised in
 `feature_pos_cert_gossip.py`.
 
+### The signing record
+
+The share-lock is in memory, and the block index reaches the disk only at a
+chainstate flush or at the periodic write, every few minutes. Without more, a
+member killed, crashed or cut from power shortly after it signed would restart
+as if it never had, and could sign a rival at a height it had already signed. A
+producer that holds a quorum by itself would then certify two blocks at one
+height on its own.
+
+So every signature a member's keys make on a block goes first into the signing
+record, `possigned.dat` in the data directory, and is synced to the disk before
+it leaves the process: before a share is flooded or assembled into a
+certificate, before a proposal is sent, before a block the node signed whole
+(`generateposblock`, the leader-only producer) or led (`submitposblock`) is
+submitted, and before `musigpartialsign` answers. One entry names the block,
+its height, parent and Bitcoin anchor, the keys that signed, and what the block
+spends (each input's outpoint and the spending transaction). `musigpartialsign`
+signs a bare hash, so it takes the block as its optional `block` argument to
+fill the entry; without it the entry holds what the node itself knows of that
+hash. If the write fails, nothing leaves: the share is dropped, the RPC fails
+with `cannot write the signing record`, and the node shuts down with "Failed to
+write the signing record", as it does when it cannot write its chainstate. A
+member that cannot record must not sign.
+
+At a restart the entries rebuild the share-lock. For the next height, and for
+the tip's height when the tip is a rival of what the member signed there, the
+latest entry that locks the height (a share, or a block the node signed whole
+or led; a proposal does not, since every member proposes at every height) holds
+it exactly as the in-memory share-lock does, with the same escape: the
+certificate query and the grace in the gossip round, and no leader-only block of
+the node's own at that height. Bitcoin anchoring decides first. Before the
+entry holds anything, the node asks the parent chain's daemon about the signed
+block's anchor:
+
+- the anchor stands (it is on Bitcoin's best chain): the entry holds the height;
+- Bitcoin replaced it: the entry holds nothing, and the member signs a new
+  block at that height as soon as one is proposed;
+- the daemon has not answered yet, or is still syncing and does not know the
+  anchor: the member signs nothing at that height until it does, for as long
+  as that takes. It loses nothing by waiting, since it cannot verify any
+  proposal's anchor meanwhile either.
+
+A node that does not watch Bitcoin (`-validateanchor=0` on an anchored chain)
+cannot judge an anchor, so there the in-memory share-lock is the only one. On a
+chain without anchors no anchor can be replaced, and the entries always hold.
+
+An entry is dropped once the block index on disk carries its block on the
+active chain (the index then keeps that knowledge), once a quorum-certified
+sibling on the active chain has taken its height, or once its anchor is more
+than 144 Bitcoin blocks (a day) below the tip's (on a chain without anchors,
+144 blocks below the tip). The file is append-only and is rewritten without the
+dropped entries whenever they make up more than half of it, so it holds about
+what was signed since the last index write. An entry is about 150 bytes plus 68
+per input the block spends. A torn last entry, left by a write that never
+completed, is dropped at the start, since its signature never left; damage
+anywhere else stops the start, as starting without the record could sign a
+rival. `getsigningrecord` (hidden) lists the entries and what the appends cost.
+Tested in `feature_pos_signing_record.py`.
+
 Operating a producer and the surrounding tooling are covered in
 [`05-operating-sequentia.md`](05-operating-sequentia.md); the security model and
 audit findings in [`07-security-and-audit.md`](07-security-and-audit.md).

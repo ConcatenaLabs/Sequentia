@@ -17,6 +17,7 @@
 #include <netmessagemaker.h>
 #include <node/miner.h>
 #include <pos.h>
+#include <pos_signing_record.h>
 #include <primitives/block.h>
 #include <protocol.h>
 #include <random.h>
@@ -162,6 +163,12 @@ int PosRecertifyBlock(ChainstateManager& chainman, CBlock& block, const CKey& le
         return -1;
     }
     block.proof.solution = BuildPublicCertificate(leader_sig, *agg, reg, seed, height, signers);
+    std::vector<CPubKey> signed_by{leader_key.GetPubKey()};
+    signed_by.insert(signed_by.end(), signers.begin(), signers.end());
+    if (!PosSigningRecordAppend(PosSigningEntryFor(PosSignKind::RECERTIFY, block, height, std::move(signed_by)))) {
+        error = POS_SIGNING_RECORD_WRITE_ERROR;
+        return -1;
+    }
     return PublicSeatsOf(reg, seed, height, signers);
 }
 
@@ -605,6 +612,18 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         return false;
     }
 
+    // The signing record (pos_signing_record.h): durable before the block
+    // leaves this function, or nothing leaves.
+    {
+        std::vector<CPubKey> signed_by{pubkey};
+        signed_by.insert(signed_by.end(), vrf_committee.begin(), vrf_committee.end());
+        if (!PosSigningRecordAppend(PosSigningEntryFor(PosSignKind::CERTIFIED, block, tip->nHeight + 1, std::move(signed_by)))) {
+            error = POS_SIGNING_RECORD_WRITE_ERROR;
+            err_kind = PosProduceError::INTERNAL;
+            return false;
+        }
+    }
+
     std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
     if (!chainman.ProcessNewBlock(chainparams, shared_pblock, /*force_processing=*/true, nullptr)) {
         error = "ProcessNewBlock, block not accepted";
@@ -753,6 +772,67 @@ void PosProducer::ThreadLoop()
     }
 }
 
+bool PosProducer::RestoreLockFromRecord(const CBlockIndex* tip)
+{
+    // A node that does not watch Bitcoin cannot judge an anchor: there the
+    // in-memory share-lock is the only one, as it was before the record (a
+    // chain without anchors has none to replace, so its entries always hold).
+    if (g_con_bitcoin_anchor && !g_validate_anchor) return false;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (!m_lock_hash.IsNull() && (m_lock_height == tip->nHeight + 1 || m_lock_height == tip->nHeight)) return false;
+    }
+    for (const int h : {tip->nHeight + 1, tip->nHeight}) {
+        const std::optional<PosRestoredLock> restored = PosSigningRecordRestoredLock(h);
+        if (!restored) continue;
+        if (h == tip->nHeight && restored->block_hash == tip->GetBlockHash()) {
+            PosSigningRecordClearRestoredLock(h); // on it: nothing to hold
+            continue;
+        }
+        if (g_con_bitcoin_anchor) {
+            // Bitcoin anchoring is supreme: a signed block whose anchor left
+            // Bitcoin's best chain never holds its height. Only a definitive
+            // verdict counts: while the daemon cannot answer (or is still
+            // syncing and does not know the anchor yet), the member waits. It
+            // could not sign there meanwhile anyway: it cannot verify any
+            // proposal's anchor either.
+            const AnchorCheckResult verdict = CheckMainchainAnchor(restored->anchor_height, restored->anchor_hash);
+            bool replaced = verdict == AnchorCheckResult::STALE || verdict == AnchorCheckResult::HEIGHT_MISMATCH;
+            bool undecided = verdict == AnchorCheckResult::NO_CONNECTION;
+            if (verdict == AnchorCheckResult::NOT_FOUND) {
+                const MainchainSyncSnapshot sync = GetMainchainSyncSnapshot();
+                if (sync.reachable && !sync.initial_download) replaced = true; else undecided = true;
+            }
+            if (undecided) {
+                if (m_record_wait_height != h) {
+                    m_record_wait_height = h;
+                    LogPrintf("PoS producer: holding height %d: signed %s there before the restart; waiting for the parent chain to judge its anchor %s at %u\n",
+                              h, restored->block_hash.GetHex(), restored->anchor_hash.GetHex(), restored->anchor_height);
+                }
+                return true;
+            }
+            if (replaced) {
+                LogPrintf("PoS producer: signed %s at height %d before the restart; Bitcoin replaced its anchor %s at %u, so it does not hold the height\n",
+                          restored->block_hash.GetHex(), h, restored->anchor_hash.GetHex(), restored->anchor_height);
+                PosSigningRecordClearRestoredLock(h);
+                continue;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            m_lock_hash = restored->block_hash;
+            m_lock_height = h;
+            m_lock_grace_start_ms = 0;
+            m_lock_queried = false;
+        }
+        PosSigningRecordClearRestoredLock(h);
+        LogPrintf("PoS producer: share-lock restored from the signing record: signed %s at height %d\n",
+                  restored->block_hash.GetHex(), h);
+        return false;
+    }
+    return false;
+}
+
 int64_t PosProducer::Step()
 {
     // Note: we deliberately do NOT gate on IsInitialBlockDownload(). A fresh
@@ -803,6 +883,12 @@ int64_t PosProducer::Step()
             m_last_tip = tip_hash;
         }
     }
+
+    // The signing record (pos_signing_record.h): a height this member signed
+    // in an earlier run holds as the share-lock holds it in this one, while
+    // the signed block's Bitcoin anchor stands. Until the parent chain's daemon
+    // has judged that anchor, sign nothing at the height.
+    if (RestoreLockFromRecord(tip)) return 500;
 
     // Committee-equivocation prevention (Change 4a). After an anchor rollback
     // this producer would otherwise treat the rolled-back height as vacant
@@ -1379,6 +1465,14 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         return;
     }
     block->proof.solution = CScript() << leader_sig;
+    // The signing record (pos_signing_record.h): the proposal is recorded
+    // before it can leave, whether flooded or assembled into a certificate.
+    const auto record = [&](const CBlock& b) {
+        if (PosSigningRecordAppend(PosSigningEntryFor(PosSignKind::PROPOSAL, b, height, {leader_key.GetPubKey()}))) return true;
+        LogPrintf("PoS gossip: not proposing at height %d: %s\n", height, POS_SIGNING_RECORD_WRITE_ERROR);
+        return false;
+    };
+    if (!record(*block)) return;
     uint256 own_beta;
     {
         CBlockIndex* prev;
@@ -1409,6 +1503,7 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         std::vector<unsigned char> sig_b;
         if (leader_key.Sign(block_b->GetHash(), sig_b)) {
             block_b->proof.solution = CScript() << sig_b;
+            if (!record(*block_b)) return;
             LogPrintf("PoS gossip: BYZANTINE equivocating %s / %s at height %d\n",
                       hash.GetHex(), block_b->GetHash().GetHex(), height);
             FloodProposalSplit(*block, *block_b);
@@ -1427,6 +1522,7 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         std::vector<unsigned char> sig_fake;
         if (leader_key.Sign(fake->GetHash(), sig_fake)) {
             fake->proof.solution = CScript() << sig_fake;
+            if (!record(*fake)) return;
             LogPrintf("PoS gossip: BYZANTINE proposing block %s at height %d with fake anchor %s at height %u\n",
                       fake->GetHash().GetHex(), height, fake->m_anchor_hash.GetHex(), fake->m_anchor_height);
             FloodCompactProposal(*fake);
@@ -1446,6 +1542,7 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         std::vector<unsigned char> sig_bad;
         if (leader_key.Sign(bad->GetHash(), sig_bad)) {
             bad->proof.solution = CScript() << sig_bad;
+            if (!record(*bad)) return;
             LogPrintf("PoS gossip: BYZANTINE proposing invalid block %s at height %d\n", bad->GetHash().GetHex(), height);
             FloodCompactProposal(*bad);
             return;
@@ -1717,6 +1814,18 @@ int64_t PosProducer::DriveRound()
         // Valid: commit, collect our own shares (we are a potential aggregator)
         // and flood them (so every node is too).
         std::vector<PosShare> shares = MakeLocalShares(*backed);
+        // The signing record (pos_signing_record.h): the shares are recorded
+        // and synced before they can leave, by flood or by an assembled
+        // certificate. A failed write releases nothing; the node is stopping.
+        if (!shares.empty()) {
+            std::vector<CPubKey> signed_by;
+            for (const PosShare& sh : shares) signed_by.push_back(sh.pubkey);
+            if (!PosSigningRecordAppend(PosSigningEntryFor(PosSignKind::SHARE, *backed, height, std::move(signed_by)))) {
+                LogPrintf("PoS gossip: not signing %s at height %d: %s\n", backed->GetHash().GetHex(), height,
+                          POS_SIGNING_RECORD_WRITE_ERROR);
+                return POS_PRODUCER_POLL_MS;
+            }
+        }
         bool still_backed = true;
         {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
@@ -1749,6 +1858,8 @@ int64_t PosProducer::DriveRound()
             }
         }
         if (!still_backed) return 150;
+        LogPrint(BCLog::VALIDATION, "PoS gossip: signed %s at height %d (round %d, %u key(s))\n",
+                 backed->GetHash().GetHex(), height, round_index, (unsigned)shares.size());
         for (const PosShare& sh : shares) FloodShare(sh);
     }
 

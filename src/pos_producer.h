@@ -41,6 +41,7 @@
 #include <vector>
 
 class CBlock;
+class CBlockIndex;
 class CChainParams;
 class ChainstateManager;
 namespace Consensus { struct Params; }
@@ -229,6 +230,13 @@ private:
     //! Evaluate eligibility for the current tip and, if a slot is due, produce a
     //! block. Returns how long to sleep (ms) before the next evaluation.
     int64_t Step();
+    //! Move a share-lock the signing record rebuilt at the restart, for the
+    //! next height or for the tip's (a rival parent), into the in-memory
+    //! share-lock once the signed block's anchor is judged to stand; forget it
+    //! when Bitcoin replaced that anchor. Returns true while the anchor is not
+    //! judged yet: nothing is signed at that height meanwhile. Worker thread.
+    bool RestoreLockFromRecord(const CBlockIndex* tip);
+    int m_record_wait_height{-1};                      //!< height whose anchor wait was logged (worker thread)
 
     //! Leader path for a distributed BLS committee: build the unsigned block,
     //! sign it, and flood it as a proposal. Every eligible member proposes, so
