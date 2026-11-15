@@ -788,7 +788,7 @@ bool LostIsRefusal(const std::string& reason)
 bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool just_check, BlockValidationState& state)
 {
     AssertLockHeld(::cs_main);
-    if (!g_con_pos || !g_con_bitcoin_anchor || !g_validate_anchor || !pindexPrev) return true;
+    if (!g_con_pos || !g_con_bitcoin_anchor || !g_validate_anchor || !pindexPrev || g_ignore) return true;
     LoadRecorded(pindexPrev);
     std::vector<Binding> mine;
     size_t bytes = 0;
