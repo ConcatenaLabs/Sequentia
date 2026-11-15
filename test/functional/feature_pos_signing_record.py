@@ -221,6 +221,10 @@ class PosSigningRecordTest(BitcoinTestFramework):
         self.wait_until(lambda: os.path.exists(path), timeout=60)
         h0 = n1.getblockcount()
         self.wait_until(lambda: n1.getblockcount() >= h0 + 2, timeout=60)
+        # node0 holds a quorum alone and may certify before node1's round comes:
+        # wait for a share of node1's keys, so that what reached the peer is
+        # checked against the record below.
+        self.wait_until(lambda: any(p in small_keys for _, p in peer.shares), timeout=60)
         os.rename(path, path + ".moved")
         os.mkdir(path)
         self.log.info("fail: a directory stands where node1's record goes, at height %d" % n1.getblockcount())

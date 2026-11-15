@@ -28,6 +28,7 @@ import time
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    pos_sign_after_share_lock,
     assert_equal, assert_greater_than,
     get_auth_cookie, get_datadir_path, rpc_port, p2p_port,
 )
@@ -91,12 +92,12 @@ class PosAnchorFreshnessTest(BitcoinTestFramework):
         self.generatetoaddress(parent, 6, parent.getnewaddress(), sync_fun=self.no_op)
 
         # Parent SEQ block (height 1).
-        node.generateposblock(leader, committee)
+        pos_sign_after_share_lock(node.generateposblock, leader, committee)
         assert_equal(node.getblockcount(), 1)
         h1 = node.getbestblockhash()
 
         # B_old: height 2, full committee, anchored to the current Bitcoin tip.
-        res_old = node.generateposblock(leader, committee)
+        res_old = pos_sign_after_share_lock(node.generateposblock, leader, committee)
         b_old = res_old['hash']
         assert_equal(res_old['countersignatures'], 3)
         anchor_old = node.getblockheader(b_old)['anchorheight']
@@ -107,7 +108,7 @@ class PosAnchorFreshnessTest(BitcoinTestFramework):
         assert_equal(node.getbestblockhash(), h1)
         self.generatetoaddress(parent, 1, parent.getnewaddress(), sync_fun=self.no_op)
 
-        res_new = node.generateposblock(leader, committee)
+        res_new = pos_sign_after_share_lock(node.generateposblock, leader, committee)
         b_new = res_new['hash']
         assert_equal(res_new['countersignatures'], 3)
         anchor_new = node.getblockheader(b_new)['anchorheight']
@@ -154,7 +155,7 @@ class PosAnchorFreshnessTest(BitcoinTestFramework):
         # leaders anchor each new block to the freshest Bitcoin block, so the
         # canonical tip tracks Bitcoin's tip within one block — without ever
         # reorging a block that's already canonical.
-        res_next = node.generateposblock(leader, committee)  # height 3, built on B_old
+        res_next = pos_sign_after_share_lock(node.generateposblock, leader, committee)  # height 3, built on B_old
         assert_equal(node.getblockcount(), 3)
         anchor_next = node.getblockheader(res_next['hash'])['anchorheight']
         assert_greater_than(anchor_next, anchor_old)  # the new tip references the fresher BTC block

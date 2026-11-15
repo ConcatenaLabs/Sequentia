@@ -48,6 +48,7 @@ realistic Bitcoin cadence with setmocktime instead of switching the rule off.
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    pos_sign_after_share_lock,
     assert_equal, get_auth_cookie, get_datadir_path, rpc_port, p2p_port,
 )
 from test_framework.key import ECKey
@@ -136,7 +137,7 @@ class PosForkChoiceTest(BitcoinTestFramework):
         """Build a height-2 sibling on `parent_hash` (the tip must be the parent),
         rebuilding it on a fresh anchor until its hash compares as asked."""
         for _ in range(30):
-            res = node.generateposblock(leader, members)
+            res = pos_sign_after_share_lock(node.generateposblock, leader, members)
             h = res['hash']
             assert_equal(node.getblockheader(h)['previousblockhash'], parent_hash)
             if (better_than is None or hash_order(h) < hash_order(better_than)) and \
@@ -156,7 +157,7 @@ class PosForkChoiceTest(BitcoinTestFramework):
         self.advance_parent(PARENT_WARMUP_BLOCKS)
 
         # --- Shared height-1 parent, quorum-certified (leader + 2 members = 3). ---
-        res_p = node.generateposblock(leader, wifs[1:3])
+        res_p = pos_sign_after_share_lock(node.generateposblock, leader, wifs[1:3])
         assert_equal(res_p['countersignatures'], 3)
         parent_hash = res_p['hash']
         hdr_p = node.getblockheader(parent_hash)
@@ -172,11 +173,11 @@ class PosForkChoiceTest(BitcoinTestFramework):
         # the lower hash (an even chance each time), so that count and hash
         # would choose differently.
         for _ in range(30):
-            res_s = node.generateposblock(leader, wifs[1:2])
+            res_s = pos_sign_after_share_lock(node.generateposblock, leader, wifs[1:2])
             strong = res_s['hash']
             node.invalidateblock(strong)
             assert_equal(node.getbestblockhash(), parent_hash)
-            res_w = node.generateposblock(leader, [])
+            res_w = pos_sign_after_share_lock(node.generateposblock, leader, [])
             weak = res_w['hash']
             if hash_order(weak) < hash_order(strong):
                 break

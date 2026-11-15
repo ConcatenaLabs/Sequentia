@@ -16,7 +16,7 @@ Runs on the custom chain's default mempool consistency checks.
 from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, pos_sign_after_share_lock
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
@@ -52,7 +52,7 @@ class PosMaturityReorgTest(BitcoinTestFramework):
 
     def mine(self, n=1):
         for _ in range(n):
-            self.nodes[0].generateposblock(self.wif)
+            pos_sign_after_share_lock(self.nodes[0].generateposblock, self.wif)
 
     def free_coin(self):
         n = self.nodes[0]

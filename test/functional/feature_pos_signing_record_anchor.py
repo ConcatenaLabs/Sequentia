@@ -236,6 +236,7 @@ class PosSigningRecordAnchorTest(BitcoinTestFramework):
             assert "PoS gossip: signed" not in text
             self.record("undecided", "parent daemon unreachable: M held height %d for %d s and signed nothing" % (h, WAIT_S))
             # The daemon answers again: the wait ends with it, in the same run.
+            held_from = pos
             pos = self.log_size(M)
             t_open = time.time()
             gate.shut = False
@@ -250,7 +251,13 @@ class PosSigningRecordAnchorTest(BitcoinTestFramework):
                     time.sleep(0.05)
             assert signed, "undecided: the daemon answers again, and M still signs nothing at %d" % h
             if signed != x:
-                assert "share-lock at %s" % x in self.log_since(M, pos), "undecided: M signed a rival of X without asking about X"
+                # M may ask for X's certificate while the verdict is pending
+                # (its collection restarts meanwhile); a rival needs that query
+                # before it, from the hold's start.
+                text = self.log_since(M, held_from)
+                asked = text.find("share-lock at %s" % x)
+                made = text.find("PoS gossip: signed %s at height %d" % (signed, h))
+                assert 0 <= asked < made, "undecided: M signed a rival of X without asking about X"
             self.record("undecided ends", "the daemon answered again: M signed %s at %d %.1f s later, in the same run" %
                         (signed[:16], h, time.time() - t_open))
             self.stop_node(M)

@@ -27,7 +27,7 @@ from test_framework.address import byte_to_base58
 from test_framework.authproxy import JSONRPCException
 from test_framework.key import ECKey
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import get_auth_cookie, get_datadir_path, p2p_port, rpc_port
+from test_framework.util import get_auth_cookie, get_datadir_path, p2p_port, pos_sign_after_share_lock, rpc_port
 
 CHAIN = "elementsregtest"
 
@@ -169,7 +169,7 @@ class PosSigningRecordRpcTest(BitcoinTestFramework):
         wif, pub = self.stakers[0]
         nonces = [m.musignonce("fail%d" % k, w, tmpl["members"], msg)["pubnonce"] for k, (w, _) in enumerate(self.stakers)]
         try:
-            r = m.musigpartialsign("fail0", wif, tmpl["members"], nonces, msg, tmpl["block"])
+            r = pos_sign_after_share_lock(m.musigpartialsign, "fail0", wif, tmpl["members"], nonces, msg, tmpl["block"])
             raise AssertionError("musigpartialsign answered %s with no record" % r)
         except JSONRPCException as e:
             assert "cannot write the signing record" in e.error["message"], e.error["message"]
