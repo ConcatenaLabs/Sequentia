@@ -21,8 +21,8 @@ Four defining properties, all implemented and tested in this repository:
 
 1. **Open ("no-coin") fee market.** There is no privileged native fee asset.
    Fees may be proposed in ANY issued asset; block producers choose which
-   assets they accept and at what rate (a whitelist kept fresh by hand or by a
-   bundled price-server sidecar). The Sequence token (SEQ; tSEQ on testnet)
+   assets they accept and at what rate: a whitelist written by hand (static),
+   or read from a price server the node is connected to (dynamic). The Sequence token (SEQ; tSEQ on testnet)
    has equal standing with every issued asset everywhere except staking.
    See [`doc/sequentia/02-open-fee-market.md`](doc/sequentia/02-open-fee-market.md).
 2. **Bitcoin anchoring is supreme.** Every Sequentia block references a
@@ -186,8 +186,8 @@ Added by this fork (each gated on the relevant chain feature):
   and `-feepriceserver` (connect to a price server and read its list);
   option `-con_any_asset_fees`; the price server in
   [`contrib/price-server/`](contrib/price-server/) (this is the canonical
-  price-server location; the node holds a single fee-asset whitelist that the
-  sidecar keeps fresh).
+  price-server location: it publishes a fee-asset whitelist, and each node
+  connected to it reads that list; it writes to no node).
 - **Bitcoin anchoring:** `getanchorstatus`; options `-con_bitcoin_anchor`,
   `-validateanchor`, `-anchorminconf`, `-anchorpollinterval` (reuses the
   `-mainchainrpc*` connection).
@@ -262,7 +262,7 @@ expect ("rfa/vB") match.
 | [`doc/sequentia/`](doc/sequentia/README.md) | The canonical Sequentia protocol documentation (start at its README index). |
 | `src/` | The node. Sequentia-specific code: `src/pos.{h,cpp}`, `src/pos_producer.*` (proof of stake), `src/anchor.{h,cpp}` (Bitcoin anchoring), `src/exchangerates.{h,cpp}`, `src/policy/value.h`, `src/rpc/exchangerates.cpp` (open fee market), `src/supervision.{h,cpp}`, `src/supervision_submit.*` (supervised assets), `src/vrf.{h,cpp}`, `src/musig.{h,cpp}`, `src/blst/` (crypto), `src/assetregistry.*`, `src/referenceprices.*` (display helpers), plus edits in `src/chainparams.cpp`, `src/validation.cpp`, `src/node/miner.cpp`. |
 | [`contrib/sequentia/`](contrib/sequentia/) | Reference config, bootstrap tooling, the atomic-swap demo. |
-| [`contrib/price-server/`](contrib/price-server/) | The fee price-server sidecar. |
+| [`contrib/price-server/`](contrib/price-server/) | The price server: publishes a fee whitelist for the nodes connected to it. |
 | `test/functional/` | Functional tests (Sequentia ones listed above). |
 | `doc/` (everything else) | Inherited Elements/Bitcoin documentation. |
 
