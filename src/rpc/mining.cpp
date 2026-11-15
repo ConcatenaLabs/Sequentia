@@ -21,6 +21,9 @@
 #include <bls.h>
 #include <pos.h>
 #include <pos_lost.h>
+#include <node/transaction.h>
+#include <mainchainrpc.h>
+#include <deque>
 #include <pos_producer.h>
 #include <vrf.h>
 #include <node/context.h>
@@ -1888,7 +1891,7 @@ static RPCHelpMan getlostblocks()
 static RPCHelpMan getlostblock()
 {
     return RPCHelpMan{"getlostblock",
-        "\nOne lost block's evidence: the block (with its certificate) and the Bitcoin headers of its stale anchor.\n",
+        "\nOne lost block's evidence: the block, with its certificate.\n",
         {{"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the block hash"}},
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
         RPCExamples{HelpExampleCli("getlostblock", "\"<hash>\"")},
@@ -1899,9 +1902,6 @@ static RPCHelpMan getlostblock()
             ss << ev->block;
             UniValue out(UniValue::VOBJ);
             out.pushKV("block", HexStr(ss));
-            UniValue headers(UniValue::VARR);
-            for (const auto& h : ev->btc_headers) headers.push_back(HexStr(h));
-            out.pushKV("bitcoinheaders", headers);
             return out;
         }};
 }
@@ -1910,18 +1910,98 @@ static RPCHelpMan submitlostblock()
 {
     return RPCHelpMan{"submitlostblock",
         "\nOffer one block of a lost branch as evidence, as a peer's poslost message would. Returns \"\" when it was taken, else why not.\n",
-        {{"block", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the block, hex"},
-         {"bitcoinheaders", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "the Bitcoin headers of its stale anchor, parents first",
-            {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "header hex"}}}},
+        {{"block", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the block, hex"}},
         RPCResult{RPCResult::Type::STR, "", "the verdict"},
         RPCExamples{HelpExampleCli("submitlostblock", "\"<hex>\"")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             LostEvidenceMsg msg;
             if (!DecodeHexBlk(msg.block, request.params[0].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
-            if (!request.params[1].isNull()) {
-                for (const UniValue& h : request.params[1].get_array().getValues()) msg.btc_headers.push_back(ParseHex(h.get_str()));
-            }
             return LostAcceptEvidence(EnsureAnyChainman(request.context), msg);
+        }};
+}
+
+static RPCHelpMan checklockancestry()
+{
+    return RPCHelpMan{"checklockancestry",
+        "\nThe buyer's ancestry check on a lock it is about to pay against (doc/sequentia/03-bitcoin-anchoring.md, \"For a buyer's wallet\").\n"
+        "A lock is payable only when its unburied ancestry (the lock and every ancestor confirmed in a block anchored fewer than W + 1\n"
+        "Bitcoin blocks below the Bitcoin daemon's tip) holds no transaction that a Bitcoin reorganization can make fail for good:\n"
+        "a payment-proof claim, a peg-in, or a transaction that creates or spends a stake record. Such a transaction is never carried\n"
+        "over a reorganization, so nor is anything funded from it. The other two conditions (certified and final, an uncontested\n"
+        "Bitcoin tip) are getposfinality's and getchaintips'. Needs -txindex.\n",
+        {{"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the lock transaction"}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::BOOL, "payable", "true when the unburied ancestry holds no transaction of a failing class"},
+            {RPCResult::Type::NUM, "depth", "the Bitcoin depth (W + 1) from which an anchor is buried"},
+            {RPCResult::Type::NUM, "unburied", "how many transactions of the ancestry are unburied"},
+            {RPCResult::Type::ARR, "failing", "the unburied ancestors of a failing class", {
+                {RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the transaction"},
+                    {RPCResult::Type::STR, "class", "payment-proof claim, peg-in or stake record"},
+                }}}},
+        }},
+        RPCExamples{HelpExampleCli("checklockancestry", "\"<txid>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            ChainstateManager& chainman = EnsureAnyChainman(request.context);
+            const CTxMemPool* mempool = nullptr;
+            int btc_tip = -1;
+            {
+                const UniValue r = CallMainChainRPC("getblockcount", UniValue(UniValue::VARR));
+                const UniValue v = find_value(r, "result");
+                if (!find_value(r, "error").isNull() || !v.isNum()) throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "the Bitcoin daemon does not answer");
+                btc_tip = v.get_int();
+            }
+            const uint32_t depth = LostWindow() + 1;
+            std::deque<uint256> todo{ParseHashV(request.params[0], "txid")};
+            std::set<uint256> seen;
+            UniValue failing(UniValue::VARR);
+            int unburied = 0;
+            while (!todo.empty() && seen.size() < 1000) {
+                const uint256 txid = todo.front();
+                todo.pop_front();
+                if (!seen.insert(txid).second) continue;
+                uint256 hash_block;
+                const CTransactionRef tx = node::GetTransaction(nullptr, mempool, txid, Params().GetConsensus(), hash_block);
+                if (!tx) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "transaction " + txid.GetHex() + " not found (needs -txindex)");
+                {
+                    LOCK(cs_main);
+                    const CBlockIndex* b = chainman.m_blockman.LookupBlockIndex(hash_block);
+                    if (!b || !chainman.ActiveChain().Contains(b)) throw JSONRPCError(RPC_MISC_ERROR, "transaction " + txid.GetHex() + " is not in the active chain");
+                    if (btc_tip - (int64_t)b->m_anchor_height >= (int64_t)depth) continue; // buried
+                }
+                ++unburied;
+                std::string cls;
+                for (size_t i = 0; i < tx->vin.size() && cls.empty(); ++i) {
+                    if (tx->vin[i].m_is_pegin) cls = "peg-in";
+                    else if (i < tx->witness.vtxinwit.size() && !tx->witness.vtxinwit[i].m_pegin_witness.stack.empty()) cls = "payment-proof claim";
+                }
+                for (const CTxOut& o : tx->vout) {
+                    if (cls.empty() && (DelegationFromTxOut(o) || PayoutFromTxOut(o))) cls = "stake record";
+                }
+                for (const CTxIn& in : tx->vin) {
+                    if (in.m_is_pegin) continue;
+                    if (cls.empty()) {
+                        uint256 hb;
+                        if (const CTransactionRef parent = node::GetTransaction(nullptr, mempool, in.prevout.hash, Params().GetConsensus(), hb)) {
+                            if (in.prevout.n < parent->vout.size() &&
+                                (DelegationFromTxOut(parent->vout[in.prevout.n]) || PayoutFromTxOut(parent->vout[in.prevout.n]))) cls = "stake record";
+                        }
+                    }
+                    todo.push_back(in.prevout.hash);
+                }
+                if (!cls.empty()) {
+                    UniValue f(UniValue::VOBJ);
+                    f.pushKV("txid", txid.GetHex());
+                    f.pushKV("class", cls);
+                    failing.push_back(f);
+                }
+            }
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("payable", failing.empty());
+            out.pushKV("depth", (int)depth);
+            out.pushKV("unburied", unburied);
+            out.pushKV("failing", failing);
+            return out;
         }};
 }
 
@@ -2590,6 +2670,7 @@ static const CRPCCommand commands[] =
     { "hidden",             &getlostblocks,            },
     { "hidden",             &getlostblock,             },
     { "hidden",             &submitlostblock,          },
+    { "mining",             &checklockancestry,        },
     { "generating",         &getposblocktemplate,      },
     { "generating",         &submitposblock,           },
     { "util",               &vrfprove,                 },

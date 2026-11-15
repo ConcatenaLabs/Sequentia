@@ -1009,7 +1009,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // SEQUENTIA: a spend that a lost block's transaction makes is refused
     // while the next block is bound by it (pos_lost.h).
     if (const CBlockIndex* lost_tip = m_active_chainstate.m_chain.Tip()) {
-        if (std::optional<uint256> lost = LostConflict(tx, lost_tip->m_anchor_height)) {
+        if (std::optional<uint256> lost = LostConflict(tx, lost_tip)) {
             return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-lost-conflict", lost->GetHex());
         }
     }
@@ -2947,7 +2947,8 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
 std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector<CTransactionRef>& txs,
                                                                CCoinsViewCache& base, const CBlockIndex* prev,
                                                                const Consensus::Params& params,
-                                                               std::vector<int64_t>* sigops)
+                                                               std::vector<int64_t>* sigops,
+                                                               const std::map<COutPoint, uint256>* bound)
 {
     AssertLockHeld(cs_main);
     std::vector<std::pair<LostTxCat, std::string>> out;
@@ -2992,6 +2993,16 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
             break;
         }
         if (missing) { put(*missing, *missing == LostTxCat::GONE ? "input spent on this chain" : "child of a lost transaction that is not due"); continue; }
+        // An input a record of this chain binds to another transaction: not
+        // valid here until that binding lapses (doc 03, "The duty of a holder").
+        if (bound && !bound->empty()) {
+            bool held = false;
+            for (const CTxIn& in : tx.vin) {
+                auto b = bound->find(in.prevout);
+                if (b != bound->end() && b->second != tx.GetHash()) { held = true; break; }
+            }
+            if (held) { put(LostTxCat::LATER, "input bound by a record to another transaction"); continue; }
+        }
         if (pegin) { put(LostTxCat::FAILS, "peg-in"); continue; }
         if (!IsFinalTx(tx, height, cutoff)) { put(LostTxCat::LATER, "non-final (nLockTime)"); continue; }
         TxValidationState tx_state;
@@ -3595,12 +3606,37 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         for (const auto& entry : m_blockman.m_block_index) {
             const CBlockIndex* p = entry.second;
             if (p->nHeight <= pindex->nHeight || !p->PosCarriesQuorum()) continue;
-            if (p->GetAncestor(pindex->nHeight) == pindex) return true;
+            if (p->GetAncestor(pindex->nHeight) != pindex || !p->pprev) continue;
+            // "Certified" means a certificate that verifies, never the flag a
+            // header stored before its body was checked (doc 03, "The duty of a
+            // holder"): the aggregate under the committee its parent's anchor
+            // seeds, with this node's registry, reaching the seat quorum.
+            CBlockHeader hdr;
+            if (p->trimmed()) {
+                CBlock blk;
+                if (!(p->nStatus & BLOCK_HAVE_DATA) || !node::ReadBlockFromDisk(blk, p, m_params.GetConsensus())) continue;
+                hdr = blk.GetBlockHeader();
+            } else {
+                hdr = p->GetBlockHeader();
+            }
+            std::string reason;
+            const StakeRegistry& reg = StakeRegistry::GetInstance();
+            const int seats = PosVerifyBitfieldCertificate(hdr, p->pprev, reg, reason);
+            if (seats >= 0 && seats >= PosSlotQuorumAt(reg, p->nHeight)) return true;
+            LogPrintf("Lost blocks: descendant %s of %s looks certified but its certificate does not verify (%s); not an exception\n",
+                      p->GetBlockHash().ToString(), pindex->GetBlockHash().ToString(), reason.empty() ? "below the quorum" : reason);
         }
         return false;
     };
-    if (check_pos_rules && !LostCheckRecords(block, pindex->pprev, fJustCheck, state)) {
+    bool lost_has_record = false;
+    if (check_pos_rules && !LostCheckRecords(block, pindex->pprev, fJustCheck, state, &lost_has_record)) {
         return error("%s: LostCheckRecords: %s", __func__, state.ToString());
+    }
+    // F10: blocks that carry a record are marked, so the bindings are rebuilt
+    // after a restart from the block index without reading every block.
+    if (lost_has_record && !fJustCheck && !(pindex->nStatus & BLOCK_HAS_LOST_RECORD)) {
+        pindex->nStatus |= BLOCK_HAS_LOST_RECORD;
+        m_blockman.m_dirty_blockindex.insert(pindex);
     }
     if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, IsInitialBlockDownload(), lost_certified_descendant, view, state)) {
         return error("%s: LostCheckBlock: %s", __func__, state.ToString());

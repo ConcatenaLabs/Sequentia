@@ -208,12 +208,16 @@ bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache&
  *  height-gated record rule, a peg-in, or the child of a FAILS one). GONE: an
  *  input is spent on this chain (it is already mined, or something it conflicts
  *  with is). `sigops`, when given, receives each DUE transaction's signature
- *  operation cost as ConnectBlock counts it (0 for the others). */
+ *  operation cost as ConnectBlock counts it (0 for the others). `bound`, when
+ *  given, is the chain's record bindings: a transaction spending an outpoint
+ *  bound to another transaction is LATER (it may return when the binding lapses),
+ *  so the duty never asks for what validity forbids. */
 enum class LostTxCat { DUE, LATER, FAILS, GONE };
 std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector<CTransactionRef>& txs,
                                                                CCoinsViewCache& base, const CBlockIndex* prev,
                                                                const Consensus::Params& params,
-                                                               std::vector<int64_t>* sigops = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                                                               std::vector<int64_t>* sigops = nullptr,
+                                                               const std::map<COutPoint, uint256>* bound = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
                             const Consensus::Params& params, TxValidationState& state)

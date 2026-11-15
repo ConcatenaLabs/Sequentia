@@ -565,7 +565,7 @@ class LostBlocksTest(BitcoinTestFramework):
         self.wait_until(lambda: s["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=30)
         ev = a.getlostblock(s["hash"])
         self.record("f", "S", "%s at height %d anchored %d (stale), certified, spends the merchant's coin and coin2 to the seller; %d Bitcoin header(s) carried" %
-                    (s["hash"][:16], s["height"], q + 1, len(ev["bitcoinheaders"])))
+                    (s["hash"][:16], s["height"], q + 1, 0))
         # The honest chain goes on: certified blocks above H1.
         for _ in range(4):
             self.produce(1, ALL_KEYS)
@@ -576,7 +576,7 @@ class LostBlocksTest(BitcoinTestFramework):
         self.record("f", "honest chain", "H1 (merchant paid) at height %d, %d certified blocks above it, tip anchor %d" %
                     (h1["height"], before - h1["height"], self.tip(self.nodes[2])["anchorheight"]))
         # The reveal, at one honest node.
-        r = self.nodes[1].submitlostblock(ev["block"], ev["bitcoinheaders"])
+        r = self.nodes[1].submitlostblock(ev["block"])
         self.record("f", "reveal at node 1", repr(r))
         self.wait_until(lambda: all(s["hash"] in self.lost(i) for i in HONEST), timeout=60)
         time.sleep(5)
@@ -644,7 +644,7 @@ class LostBlocksTest(BitcoinTestFramework):
         self.btc_mine(2)
         self.wait_until(lambda: one["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=30)
         ev = a.getlostblock(one["hash"])
-        self.record("g", "one signer on a stale anchor", self.sub(n, ev["block"], ev["bitcoinheaders"]) +
+        self.record("g", "one signer on a stale anchor", self.sub(n, ev["block"]) +
                     "; lost: %s" % (one["hash"] in self.lost(1)))
         # g4: a mutated block (the certificate's block hash changes).
         bad = ev["block"][:-2] + ("00" if ev["block"][-2:] != "00" else "01")
@@ -657,7 +657,7 @@ class LostBlocksTest(BitcoinTestFramework):
         self.record("g", "200 junk items", "%.2f ms each (RPC round trip included)" % ((time.time() - t0) * 1000 / 200))
         # g7: the cost of judging real evidence: S-like blocks are judged once; time one fresh judgement on node 4.
         t0 = time.time()
-        r = self.sub(self.nodes[4], ev["block"], ev["bitcoinheaders"])
+        r = self.sub(self.nodes[4], ev["block"])
         self.record("g", "one genuine item judged on node 4", "%s in %.1f ms (RPC round trip included)" % (r, (time.time() - t0) * 1000))
         a.setnetworkactive(True)
         self.mesh(range(N))

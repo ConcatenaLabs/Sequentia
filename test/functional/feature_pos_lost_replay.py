@@ -212,7 +212,7 @@ class LostReplayTest(LostBlocksTest):
         self.bitcoin_reorg(1)
         self.wait_until(lambda: x["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=60)
         ev = a.getlostblock(x["hash"])
-        r = self.nodes[2].submitlostblock(ev["block"], ev["bitcoinheaders"])
+        r = self.nodes[2].submitlostblock(ev["block"])
         self.wait_until(lambda: x["hash"] in self.lost(2), timeout=60)
         self.record("r3", "two lost branches on node 2", "L (T, lost first) and X (R, lost second, shown by submitlostblock: %r)" % r)
         h = self.produce(2, ALL_KEYS, leaders=[SELLER])
@@ -595,9 +595,9 @@ class LostReplayTest(LostBlocksTest):
         self.start_node(LATE, extra_args=self.node_args(LATE))
         late = self.nodes[LATE]
         self.record("fab", "syncing node (at genesis, IBD %s)" % late.getblockchaininfo()["initialblockdownload"],
-                    self.sub(late, ev["block"], ev["bitcoinheaders"]))
+                    self.sub(late, ev["block"]))
         # At the tip.
-        r = self.sub(n2, ev["block"], ev["bitcoinheaders"])
+        r = self.sub(n2, ev["block"])
         time.sleep(3)
         self.record("fab", "node 2 at the tip", "%s; L' held lost there: %s" % (r, fab["hash"] in self.lost(2)))
         a.setnetworkactive(True)

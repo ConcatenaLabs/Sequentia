@@ -648,7 +648,7 @@ void BlockAssembler::addLostReplay(const CBlockIndex* pindexPrev)
     // records owed depend on it).
     if (!GetAnchorForNewBlock(pindexPrev->m_anchor_height, pindexPrev->m_anchor_hash, anchor_h, anchor_hash, &replaced)) return;
     CCoinsViewCache view(&m_chainstate.CoinsTip());
-    LostTemplateParts parts = LostForTemplate(pindexPrev, anchor_h, view);
+    LostTemplateParts parts = LostForTemplate(pindexPrev, anchor_h, anchor_hash, view);
     m_lost_records = std::move(parts.records);
     m_lost_cut = parts.cut;
     CCoinsViewCache work(&m_chainstate.CoinsTip());
