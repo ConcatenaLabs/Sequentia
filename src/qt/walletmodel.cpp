@@ -266,6 +266,7 @@ WalletModel::SendCoinsReturn WalletModel::prepareTransaction(WalletModelTransact
 
         auto& newTx = transaction.getWtx();
         std::vector<CAmount> out_amounts;
+        transaction.fee_list_generation = m_wallet->feeListGeneration();
         newTx = m_wallet->createTransaction(vecSend, coinControl, !wallet().privateKeysDisabled() /* sign */, nChangePosRet, nFeeRequired, blind_details, error);
         transaction.setTransactionFee(nFeeRequired);
         if (fSubtractFeeFromAmount && newTx) {
@@ -312,7 +313,13 @@ WalletModel::SendCoinsReturn WalletModel::sendCoins(WalletModelTransaction &tran
         }
 
         auto& newTx = transaction.getWtx();
-        wallet().commitTransaction(newTx, {} /* mapValue */, std::move(vOrderForm), blind_details);
+        // The fee was chosen under the whitelist in force then; if a price
+        // server's list or a hand write changed it while the send was being
+        // confirmed, nothing is sent and the fee is chosen again.
+        if (!wallet().commitTransactionUnderFeeList(newTx, {} /* mapValue */, std::move(vOrderForm), blind_details,
+                                                    transaction.fee_list_generation)) {
+            return FeeListChanged;
+        }
 
         CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
         ssTx << *newTx;

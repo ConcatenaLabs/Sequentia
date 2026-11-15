@@ -122,9 +122,17 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
     FeeCalculation fee_calc_out;
     auto blind_details = g_con_elementsmode ? std::make_unique<BlindDetails>() : nullptr;
     if (blind_details) blind_details->ignore_blind_failure = ignore_blind_fail;
+    // SEQUENTIA: one fee whitelist decides this transaction from the choice of
+    // its fee to its commit: a price server's list read meanwhile, or a hand
+    // write, waits for the commit, so the node accepts the fee under the list it
+    // was chosen under.
+    LOCK2(wallet.cs_wallet, g_fee_decision_mutex);
     const bool fCreated = CreateTransaction(wallet, recipients, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, true, blind_details.get());
     if (!fCreated) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
+    }
+    if (const int64_t delay_ms = gArgs.GetIntArg("-testfeedecisiondelay", 0); delay_ms > 0 && Params().MineBlocksOnDemand()) {
+        UninterruptibleSleep(std::chrono::milliseconds{delay_ms});
     }
     wallet.CommitTransaction(tx, std::move(map_value), {} /* orderForm */, blind_details.get());
     // SEQUENTIA: the fee whitelist can change between building a transaction

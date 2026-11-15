@@ -7,6 +7,8 @@
 #include <sync.h>
 #include <univalue.h>
 
+#include <atomic>
+#include <cstdint>
 #include <functional>
 
 constexpr const CAmount exchange_rate_scale = COIN; // 100,000,000
@@ -40,6 +42,7 @@ private:
     //! Serializes writers (RPC threads, config load) against readers
     //! (ConvertAmountToValue/ConvertValueToAmount).
     Mutex m_write_mutex;
+    std::atomic<uint64_t> m_generation{0};
 
     ExchangeRateMap() { ResetToBootstrapRates(); }
 
@@ -67,6 +70,12 @@ public:
      * there accepts nothing until its whitelist is written.
      */
     void ResetToBootstrapRates();
+
+    /** Changes each time the whitelist's content changes (an identical list
+     *  written again leaves it as it is). A wallet notes it when it chooses a
+     *  transaction's fee and compares it when it commits: equal, the fee was
+     *  chosen under the list the node accepts it under. */
+    uint64_t Generation() const { return m_generation.load(); }
 
     /**
      * Convert an amount denominated in some asset to reference fee atoms.
@@ -156,8 +165,9 @@ public:
  * whitelist.
  */
 struct FeeListSource {
-    //! Connected to a price server, which is then the whitelist's only writer:
-    //! the whitelist is dynamic. Not connected: static, written by hand.
+    //! Connected to a price server, whose published list the node reads and
+    //! which is then the whitelist's only source: the whitelist is dynamic.
+    //! Not connected: static, written by hand.
     bool connected{false};
     //! The address of the price server's published list (when connected).
     std::string url;
@@ -190,6 +200,13 @@ void SetFeeListSource(const FeeListSource& source);
 //! Change it in place, under its lock.
 void UpdateFeeListSource(const std::function<void(FeeListSource&)>& fn);
 
+/** One whitelist decides a wallet's transaction from the choice of its fee to
+ *  its commit. A wallet holds this from fee selection through commit (taken
+ *  after cs_wallet); every writer of the whitelist takes it before any other
+ *  fee-list lock, so the list cannot change between the two. Nothing that
+ *  waits on a price server holds it. */
+extern Mutex g_fee_decision_mutex;
+
 enum class FeeListApply { TAKEN, OLDER, NOT_CONNECTED };
 
 /** Write a price server's list into the whitelist, if and only if the node is
@@ -198,7 +215,20 @@ enum class FeeListApply { TAKEN, OLDER, NOT_CONNECTED };
  *  flight when the operator took over is discarded rather than written over
  *  the operator's list. */
 FeeListApply ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
-                                     int64_t published, int64_t now);
+                                     int64_t published, int64_t now,
+                                     const std::function<void()>& taken = {});
+
+/** Connect to a price server and write the list it answered, as one step
+ *  under the same lock: `connection` gives the connection's fields
+ *  (connected, url, by_default, decided_by, last_attempt). When the node is
+ *  already connected to that address, the list in force and its publication
+ *  time are kept, so an answer older than a list a poll took meanwhile is
+ *  refused (OLDER) and the newer list stays. `taken` runs under the lock only
+ *  when the list is taken, so the cache is written in the order lists are
+ *  taken, and never for a refused one. */
+FeeListApply ConnectPriceServerFeeList(const FeeListSource& connection, const std::map<CAsset, CAmount>& rates,
+                                       int64_t published, int64_t now,
+                                       const std::function<void()>& taken = {});
 
 /** Write the whitelist by hand: disconnect from the price server, if
  *  connected, and write rates, under the same lock as ApplyPriceServerFeeList.

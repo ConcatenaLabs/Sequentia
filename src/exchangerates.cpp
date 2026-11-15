@@ -93,17 +93,22 @@ std::map<CAsset, CAmount> ExchangeRateMap::GetRates() {
 }
 
 void ExchangeRateMap::ResetToBootstrapRates() {
-    LOCK(m_write_mutex);
-    this->clear();
-    (*this)[::policyAsset] = CAssetExchangeRate(exchange_rate_scale);
+    SetRates({{::policyAsset, exchange_rate_scale}});
 }
 
 void ExchangeRateMap::SetRates(const std::map<CAsset, CAmount>& rates) {
     LOCK(m_write_mutex);
+    bool same = this->size() == rates.size();
+    auto b = rates.cbegin();
+    for (auto a = this->cbegin(); same && a != this->cend(); ++a, ++b) {
+        same = a->first == b->first && a->second.m_scaled_value == b->second;
+    }
+    if (same) return;
     this->clear();
     for (const auto& rate : rates) {
         (*this)[rate.first] = CAssetExchangeRate(rate.second);
     }
+    ++m_generation;
 }
 
 bool ExchangeRateMap::HasAcceptedAsset() {
@@ -115,8 +120,7 @@ bool ExchangeRateMap::HasAcceptedAsset() {
 }
 
 void ExchangeRateMap::ClearRates() {
-    LOCK(m_write_mutex);
-    this->clear();
+    SetRates({});
 }
 
 bool ExchangeRateMap::LoadFromDefaultJSONFile(std::vector<std::string>& errors) {
@@ -232,6 +236,8 @@ bool ExchangeRateMap::ParseJSON(const std::map<std::string, UniValue>& json, std
     return !hasError;
 }
 
+Mutex g_fee_decision_mutex;
+
 namespace {
 Mutex g_fee_list_source_mutex;
 FeeListSource g_fee_list_source GUARDED_BY(g_fee_list_source_mutex);
@@ -255,10 +261,10 @@ void UpdateFeeListSource(const std::function<void(FeeListSource&)>& fn)
     fn(g_fee_list_source);
 }
 
-FeeListApply ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
-                                     int64_t published, int64_t now)
+static FeeListApply ApplyLocked(const std::string& url, const std::map<CAsset, CAmount>& rates,
+                                int64_t published, int64_t now, const std::function<void()>& taken)
+    EXCLUSIVE_LOCKS_REQUIRED(g_fee_list_source_mutex)
 {
-    LOCK(g_fee_list_source_mutex);
     if (!g_fee_list_source.connected || g_fee_list_source.url != url) return FeeListApply::NOT_CONNECTED;
     if (g_fee_list_source.have_list && published < g_fee_list_source.list_published) return FeeListApply::OLDER;
     ExchangeRateMap::GetInstance().SetRates(rates);
@@ -266,12 +272,41 @@ FeeListApply ApplyPriceServerFeeList(const std::string& url, const std::map<CAss
     g_fee_list_source.last_written = now;
     g_fee_list_source.list_published = published;
     g_fee_list_source.last_error.clear();
+    if (taken) taken();
     return FeeListApply::TAKEN;
+}
+
+FeeListApply ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
+                                     int64_t published, int64_t now, const std::function<void()>& taken)
+{
+    LOCK2(g_fee_decision_mutex, g_fee_list_source_mutex);
+    return ApplyLocked(url, rates, published, now, taken);
+}
+
+FeeListApply ConnectPriceServerFeeList(const FeeListSource& connection, const std::map<CAsset, CAmount>& rates,
+                                       int64_t published, int64_t now, const std::function<void()>& taken)
+{
+    LOCK2(g_fee_decision_mutex, g_fee_list_source_mutex);
+    const FeeListSource current = g_fee_list_source;
+    g_fee_list_source = connection;
+    if (current.connected && current.url == connection.url) {
+        // The same address: the list in force is still this server's.
+        g_fee_list_source.have_list = current.have_list;
+        g_fee_list_source.last_written = current.last_written;
+        g_fee_list_source.list_published = current.list_published;
+        g_fee_list_source.last_error = current.last_error;
+    } else {
+        g_fee_list_source.have_list = false;
+        g_fee_list_source.last_written = 0;
+        g_fee_list_source.list_published = 0;
+        g_fee_list_source.last_error.clear();
+    }
+    return ApplyLocked(connection.url, rates, published, now, taken);
 }
 
 bool WriteHandFeeList(const std::map<CAsset, CAmount>& rates, const std::string& why)
 {
-    LOCK(g_fee_list_source_mutex);
+    LOCK2(g_fee_decision_mutex, g_fee_list_source_mutex);
     const bool was_connected = g_fee_list_source.connected;
     if (was_connected) {
         g_fee_list_source.connected = false;

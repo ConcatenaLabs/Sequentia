@@ -70,15 +70,27 @@ class StandIn:
     def __init__(self):
         self.routes = {}
         self.hits = {}
+        # path -> (release, body): the next request for that path waits for
+        # `release`, then answers `body` (200); later requests get the route.
+        self.held = {}
+        self.held_arrived = threading.Event()
+        self.lock = threading.Lock()
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                outer.hits[self.path] = outer.hits.get(self.path, 0) + 1
-                route = outer.routes.get(self.path, (404, "{}"))
-                status, body = route[0], route[1]
-                if len(route) > 2:
-                    time.sleep(route[2])
+                with outer.lock:
+                    outer.hits[self.path] = outer.hits.get(self.path, 0) + 1
+                    held = outer.held.pop(self.path, None)
+                if held:
+                    outer.held_arrived.set()
+                    held[0].wait(60)
+                    status, body = 200, held[1]
+                else:
+                    route = outer.routes.get(self.path, (404, "{}"))
+                    status, body = route[0], route[1]
+                    if len(route) > 2:
+                        time.sleep(route[2])
                 data = body.encode() if isinstance(body, str) else body
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -105,6 +117,14 @@ class StandIn:
                 "reference_unit": {"api_units_per_reference_unit": 1.0}, "rates": rates, "decisions": []}
         body.update(extra)
         self.routes[path] = (200, json.dumps(body))
+
+    def hold_next(self, path, body):
+        """Hold the next request for `path`; return the event that releases it."""
+        release = threading.Event()
+        with self.lock:
+            self.held_arrived.clear()
+            self.held[path] = (release, body)
+        return release
 
     def stop(self):
         self.httpd.shutdown()
@@ -409,6 +429,9 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         self.log.info("Operator writes are serialised: a hand write during a connect lands after it")
         self.connect_races_a_hand_write()
 
+        self.log.info("Reconnecting to the same address: an older answer in flight never replaces a newer list a poll took")
+        self.reconnect_races_a_poll()
+
         self.log.info("Your own price server: the real one, with no login to the node, connected by address")
         self.own_price_server()
 
@@ -469,6 +492,63 @@ class AnyAssetFeePriceServerTest(BitcoinTestFramework):
         self.restart1()
         assert_equal(self.n1().getfeepriceserver()["connected"], False)
         assert_equal(self.rates(), hand)
+
+    def reconnect_races_a_poll(self):
+        """The reconnect asks the server and is held; meanwhile a poll of the
+        same address takes a newer list. The reconnect's older answer arrives
+        last: it is refused, the newer list and its publication time stay in
+        force, and the cache keeps the newer list across a restart that comes
+        before the next poll."""
+        url = self.standin.url("/race")
+        now = int(time.time())
+        first = {self.other: 10000000}
+        older = {"22" * 32: 20000000}
+        newer = {"33" * 32: 30000000}
+        self.standin.publish("/race", first, updated=now - 20)
+        self.n1().setfeepriceserver(url)
+        assert_equal(self.rates(), first)
+        for attempt in range(5):
+            # Arm just after a poll, so the next request is the reconnect's.
+            hits = self.standin.hits.get("/race", 0)
+            self.wait_until(lambda: self.standin.hits.get("/race", 0) > hits, timeout=10)
+            self.standin.publish("/race", newer, updated=now)
+            release = self.standin.hold_next("/race", json.dumps({"updated": now - 10, "rates": older}))
+            result = {}
+
+            def reconnect():
+                rpc = get_rpc_proxy(self.n1().url, 1, timeout=90)
+                try:
+                    result["ok"] = rpc.setfeepriceserver(url)
+                except Exception as e:
+                    result["error"] = str(e)
+            thread = threading.Thread(target=reconnect)
+            thread.start()
+            assert self.standin.held_arrived.wait(10)
+            # A poll takes the newer list while the reconnect is held.
+            self.wait_until(lambda: self.rates() == newer, timeout=10)
+            if thread.is_alive():
+                break
+            # The poll was the request held, not the reconnect: try again.
+            release.set()
+            thread.join()
+            self.standin.publish("/race", first, updated=now - 20)
+            self.n1().setfeepriceserver(url)
+        else:
+            raise AssertionError("the reconnect was never the request held")
+        release.set()
+        thread.join()
+        assert "error" not in result, result
+        state = self.n1().getfeepriceserver()
+        assert_equal(self.rates(), newer)
+        assert_equal((state["connected"], state["whitelist"], state["url"]), (True, "dynamic", url))
+        assert_equal(state["list_published"], now)
+        # A restart before the next poll: the server is down, so the cache decides.
+        self.standin.routes["/race"] = (503, "{}")
+        self.restart1()
+        state = self.n1().getfeepriceserver()
+        assert_equal((state["connected"], state["url"], state["list_published"]), (True, url, now))
+        assert_equal(self.rates(), newer)
+        self.n1().setfeeexchangerates({self.policy: 1})
 
     def own_price_server(self):
         """Run contrib/price-server/price_server.py against the stand-in's feed

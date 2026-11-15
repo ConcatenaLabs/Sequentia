@@ -68,7 +68,8 @@ public:
         DuplicateAddress,
         TransactionCreationFailed, // Error returned when wallet is still locked
         AbsurdFee,
-        PaymentRequestExpired
+        PaymentRequestExpired,
+        FeeListChanged // The fee whitelist changed between choosing the fee and sending
     };
 
     enum EncryptionStatus

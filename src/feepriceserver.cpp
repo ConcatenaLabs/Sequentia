@@ -423,8 +423,8 @@ bool InitFeeList(std::string& error)
         return false;
     }
 
-    // Connected: the price server is the only writer, so the operator's file is
-    // neither loaded nor rewritten.
+    // Connected: the list read from the price server is the whitelist's only
+    // source, so the operator's file is neither loaded nor rewritten.
     FeeListSource source;
     source.connected = true;
     source.url = choice.url;
@@ -477,7 +477,10 @@ bool RefreshFeePriceServer(int timeout_secs)
     bool ok = Request(src.url, timeout_secs, rates, published, err);
     if (ok) {
         const std::map<CAsset, CAmount> before = ExchangeRateMap::GetInstance().GetRates();
-        switch (ApplyPriceServerFeeList(src.url, rates, published, now)) {
+        // The cache is written under the same lock as the list, so it always
+        // holds the last list taken, never an older one that lost a race.
+        switch (ApplyPriceServerFeeList(src.url, rates, published, now,
+                                        [&] { WriteCache(src.url, rates, published, now); })) {
         case FeeListApply::NOT_CONNECTED:
             LogPrintf("FeePriceServer: a list from %s arrived after this node disconnected from it; discarded\n", src.url);
             return false;
@@ -488,7 +491,6 @@ bool RefreshFeePriceServer(int timeout_secs)
             break;
         case FeeListApply::TAKEN: {
             RecomputeMempoolFees();
-            WriteCache(src.url, rates, published, now);
             bool same_assets = before.size() == rates.size();
             for (auto a = before.cbegin(), b = rates.cbegin(); same_assets && a != before.cend(); ++a, ++b) {
                 same_assets = a->first == b->first;
@@ -607,15 +609,20 @@ bool SetFeePriceServer(const std::string& url, std::string& error)
     source.last_attempt = now;
     source.decided_by = "settings";
     source.by_default = url == DefaultFeePriceServer(gArgs);
-    SetFeeListSource(source);
-    // A poll of the same address may have taken a newer list in between: that
-    // one stays. Any other writer waits on g_operator_mutex.
-    if (ApplyPriceServerFeeList(url, rates, published, now) == FeeListApply::TAKEN) {
-        WriteCache(url, rates, published, now);
-    }
+    // Connected and the list written as one step. Already connected to this
+    // address, a poll may have taken a newer list while this request was in
+    // flight: that list stays, and this older answer is neither taken nor
+    // cached. Any other writer waits on g_operator_mutex.
+    const FeeListApply applied = ConnectPriceServerFeeList(source, rates, published, now,
+                                                           [&] { WriteCache(url, rates, published, now); });
     RecomputeMempoolFees();
     RecordChoice(url);
-    LogPrintf("FeePriceServer: connected to %s with setfeepriceserver; took its list: %u assets (%s)\n",
-              url, rates.size(), Describe(rates));
+    if (applied == FeeListApply::TAKEN) {
+        LogPrintf("FeePriceServer: connected to %s with setfeepriceserver; took its list: %u assets (%s)\n",
+                  url, rates.size(), Describe(rates));
+    } else {
+        LogPrintf("FeePriceServer: connected to %s with setfeepriceserver; its answer (published %s) is older than the list in force (published %s), which stays\n",
+                  url, FormatTime(published), FormatTime(GetFeeListSource().list_published));
+    }
     return true;
 }

@@ -1215,6 +1215,10 @@ void SendCoinsDialog::processSendCoinsReturn(const WalletModel::SendCoinsReturn 
         msgParams.first = tr("Payment request expired.");
         msgParams.second = CClientUIInterface::MSG_ERROR;
         break;
+    case WalletModel::FeeListChanged:
+        msgParams.first = tr("Nothing was sent: this node's fee whitelist changed while you were confirming, so the fee may no longer be accepted. Send again to choose the fee under the list in force now.");
+        msgParams.second = CClientUIInterface::MSG_ERROR;
+        break;
     // included to prevent a compiler warning.
     case WalletModel::OK:
     default:

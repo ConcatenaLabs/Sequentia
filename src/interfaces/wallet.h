@@ -154,6 +154,20 @@ public:
         WalletOrderForm order_form,
         wallet::BlindDetails* blind_details) = 0;
 
+    //! The fee whitelist's generation, noted before a transaction's fee is
+    //! chosen (see ExchangeRateMap::Generation).
+    virtual uint64_t feeListGeneration() = 0;
+
+    //! Commit a transaction only if the fee whitelist has not changed since
+    //! fee_list_generation, checked and committed under the lock every writer
+    //! of the whitelist takes, so the node accepts the fee under the list it
+    //! was chosen under. Returns false, committing nothing, if it changed.
+    virtual bool commitTransactionUnderFeeList(CTransactionRef tx,
+        WalletValueMap value_map,
+        WalletOrderForm order_form,
+        wallet::BlindDetails* blind_details,
+        uint64_t fee_list_generation) = 0;
+
     //! Return whether transaction can be abandoned.
     virtual bool transactionCanBeAbandoned(const uint256& txid) = 0;
 
