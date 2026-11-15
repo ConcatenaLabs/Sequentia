@@ -387,9 +387,11 @@ bool GetMainchainHeaderInfo(const uint256& hash, MainchainHeaderInfo& out)
 //! tip, for the cost of ONE header RPC no matter how many blocks were appended.
 //! Otherwise the parent reorganized, and Y is the fork point: walk back from the
 //! old tip until a block that is on the best chain again, one RPC per block of
-//! reorg depth.
-int MainchainUnchangedHeight(const uint256& old_tip)
+//! reorg depth. `extension`, when given, is set to whether the move was a plain
+//! extension.
+int MainchainUnchangedHeight(const uint256& old_tip, bool* extension)
 {
+    if (extension) *extension = false;
     // First tick after startup (or after a failed classification): there is no
     // old tip to reason from. The caches are re-derived from the parent daemon,
     // which is exactly right — nothing about Bitcoin should be believed across
@@ -410,6 +412,7 @@ int MainchainUnchangedHeight(const uint256& old_tip)
             return -1;
         }
         if (info.on_best_chain) {
+            if (extension) *extension = depth == 0;
             if (depth > 0) {
                 LogPrintf("Anchor: parent chain reorganized %d block(s) deep, forking at height %d; anchor verdicts at or below that height are unaffected and are kept, everything above is re-checked\n",
                           depth, info.height);
@@ -1337,7 +1340,8 @@ void AnchorWatchTask(ChainstateManager& chainman)
         //
         // The RPC is issued with no lock held: this file never calls the parent
         // daemon while holding g_anchor_mutex (or cs_main).
-        const int unchanged_height = MainchainUnchangedHeight(old_tip);
+        bool extension = false;
+        const int unchanged_height = MainchainUnchangedHeight(old_tip, &extension);
         std::function<void(int)> listener;
         {
             LOCK(g_anchor_mutex);
@@ -1345,7 +1349,9 @@ void AnchorWatchTask(ChainstateManager& chainman)
             DropAnchorCachesAbove(unchanged_height);
             listener = g_mainchain_move_listener;
         }
-        if (listener) listener(unchanged_height);
+        // A plain extension replaced nothing this watcher has seen, even an
+        // anchor newer than its last poll: no escape is void.
+        if (listener && !extension) listener(unchanged_height);
     }
     if (tip_changed || answered_again) {
         // The daemon moved, or answers again: the next check of its sync must

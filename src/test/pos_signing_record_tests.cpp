@@ -296,7 +296,23 @@ BOOST_AUTO_TEST_CASE(the_check_escapes_after_one_round_and_binds_again_after_a_r
     BOOST_CHECK(!PosSigningCheckNow(z, 40000).ok);
     // A certificate for X: it holds the height for good.
     PosSigningNoteCertificate(Hash32(0x01), 40);
-    BOOST_CHECK(!PosSigningCheckNow(z, 40000 + 10 * round).ok);
+    c = PosSigningCheckNow(z, 40000 + 10 * round);
+    BOOST_CHECK(!c.ok);
+    BOOST_CHECK(c.why.find("that block is certified") != std::string::npos);
+    BOOST_CHECK(!PosSigningCheckNow(z, 40000 + 20 * round).ok);
+    // The operator invalidates X on this node: a recovery step, so the member
+    // is released after one round, as for an uncertified block.
+    PosSigningNoteInvalidated({Hash32(0x01)}, true);
+    c = PosSigningCheckNow(z, 50000);
+    BOOST_CHECK(!c.ok);
+    BOOST_CHECK(c.why.find("signs no other block there") != std::string::npos);
+    BOOST_CHECK(PosSigningCheckNow(z, 50000 + round).ok);
+    // Revived (reconsiderblock): the certificate holds the height again.
+    PosSigningNoteInvalidated({Hash32(0x01)}, false);
+    BOOST_CHECK(!PosSigningCheckNow(z, 60000).ok);
+    // Another held block's invalidation changes nothing for X.
+    PosSigningNoteInvalidated({Hash32(0x09)}, true);
+    BOOST_CHECK(!PosSigningCheckNow(z, 70000).ok);
     fs::remove(RecordFile());
     PosSigningRecordResetForTesting();
 }

@@ -151,6 +151,14 @@ void PosSigningParentMoved(int unchanged_height);
 /** A verified quorum certificate for `block_hash` at `height` reached this node. */
 void PosSigningNoteCertificate(const uint256& block_hash, int height);
 
+/** The operator invalidated these held blocks on this node (invalidateblock,
+ *  the block or an ancestor), or revived them (reconsiderblock). A certified
+ *  block binds its height for good, wherever its certificate came from, unless
+ *  it was invalidated here: invalidating is a recovery step that must still
+ *  work, so the member is then released after one round as for any block, and
+ *  the escape says in words that it signs a rival of a certified block. */
+void PosSigningNoteInvalidated(const std::vector<uint256>& hashes, bool invalidated);
+
 /** The answer of the signing check. */
 struct PosSignCheck {
     bool ok{true};

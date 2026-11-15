@@ -110,6 +110,15 @@ class PosAnchorFreshnessTest(BitcoinTestFramework):
 
         res_new = pos_sign_after_share_lock(node.generateposblock, leader, committee)
         b_new = res_new['hash']
+        # B_old carries a full certificate this node assembled: its escape says
+        # that the member signs a rival of it because it was invalidated here.
+        with open(node.debug_log_path, encoding='utf-8', errors='replace') as f:
+            log = f.read()
+        assert ("about to sign a rival of %s at height 2, a block it holds a full certificate for, because that "
+                "block was invalidated on this node" % b_old) in log
+        # Bitcoin only gained a block since B_old was anchored: that voids no
+        # escape, so the call went through one round after the first refusal.
+        assert "Bitcoin reorganized below the anchor of %s" % b_old not in log
         assert_equal(res_new['countersignatures'], 3)
         anchor_new = node.getblockheader(b_new)['anchorheight']
         assert_greater_than(anchor_new, anchor_old)   # B_new references a fresher BTC block

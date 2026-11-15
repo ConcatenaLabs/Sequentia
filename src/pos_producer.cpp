@@ -646,6 +646,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     // it produced a block while the chain stood still. A certificate failure
     // (BLOCK_MUTATED) leaves no failed flag on the index, so also require the
     // block to be on the active chain.
+    bool full_certificate = false;
     {
         LOCK(cs_main);
         const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(block.GetHash());
@@ -654,7 +655,9 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
             err_kind = PosProduceError::INTERNAL;
             return false;
         }
+        full_certificate = pindex->PosCarriesQuorum();
     }
+    if (full_certificate) PosSigningNoteCertificate(block.GetHash(), tip->nHeight + 1);
 
     result.hash = block.GetHash();
     result.height = tip->nHeight + 1;
@@ -1877,6 +1880,13 @@ int64_t PosProducer::DriveRound()
         if (m_chainman.ProcessNewBlock(m_chainparams, final_block, /*force_processing=*/true, nullptr)) {
             LogPrintf("PoS gossip: certified block %s at height %d (round %d, %d committee member(s))\n",
                       final_hash.GetHex(), height, round_index, (int)members_n);
+            bool full_certificate = false;
+            {
+                LOCK(cs_main);
+                const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(final_hash);
+                full_certificate = pindex && pindex->PosCarriesQuorum();
+            }
+            if (full_certificate) PosSigningNoteCertificate(final_hash, height);
             // Flood the certificate (the certified header) as its own small
             // object (3A Tier 1): the full block can be lost to a partition
             // or a slow flood; the ~few-hundred-byte certificate crosses on

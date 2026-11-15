@@ -141,11 +141,13 @@ struct MainchainSyncSnapshot {
 };
 MainchainSyncSnapshot GetMainchainSyncSnapshot();
 
-/** Called by the anchor watcher whenever it sees the parent chain's tip move,
- *  with the height below which nothing changed (the old tip for a plain
- *  extension; the fork point for a reorganization; -1 when it could not tell).
- *  Set once at the start; the signing check (pos_signing_record.h) uses it to
- *  void the escape of a block whose anchor may have changed side. */
+/** Called by the anchor watcher whenever it sees the parent chain reorganize,
+ *  with the height below which nothing changed (the fork point), or -1 when it
+ *  could not tell how the tip moved. A plain extension, where the old tip is
+ *  still on the best chain, calls nothing: it replaced no block, even one newer
+ *  than the watcher's last poll. Set once at the start; the signing check
+ *  (pos_signing_record.h) uses it to void the escape of a block whose anchor
+ *  may have changed side. */
 void SetMainchainMoveListener(std::function<void(int unchanged_height)> listener);
 
 /** The parent chain's height as its daemon reports it once synced, asked again

@@ -1164,13 +1164,28 @@ Bitcoin anchor, and judges it again whenever its view of Bitcoin moves:
 - the anchor stands: X binds as above;
 - Bitcoin replaced it: X binds nothing, at once, and any escape X had is void;
 - Bitcoin returns to it later: X binds again, so the next rival waits for a new
-  query and a new round. An escape counts only while the anchor stood unbroken;
+  query and a new round. An escape counts only while the anchor stood unbroken
+  (a Bitcoin block that only extends Bitcoin's chain breaks nothing);
 - the parent chain's daemon gives no verdict: the node signs nothing else at H
   until it does (see "The signing record" for what ends that wait).
 
 A member may hold signatures for X and for Y at one height on two Bitcoin
 branches: that is following Bitcoin, never a fault. The same block again is
 always free.
+
+A block whose certificate the node holds, whether it assembled the certificate
+itself (`generateposblock`, or as the gossip round that certified it) or received
+it from a peer, binds its height for good while its anchor stands. Such a block
+leaves the node's chain at its height only when Bitcoin replaces its anchor or
+when the operator invalidates it (`invalidateblock`, on the block or an
+ancestor). After an invalidation on this node, the member is released after one
+new query and round, as for any block: invalidating is a recovery step, and
+members that refused for good would turn a repair made on many of them into a
+height nobody can sign. The log says so in words ("about to sign a rival of ...,
+a block it holds a full certificate for, because that block was invalidated on
+this node"); `reconsiderblock` makes the certificate bind again. Invalidating a
+certified block is the operator's responsibility: if its signers then certify a
+rival, two certified blocks exist at that height.
 
 The quorum arithmetic is what gives the rule its force. For X to be certifiable
 at all, at least a quorum must have signed it. Those members are all locked,

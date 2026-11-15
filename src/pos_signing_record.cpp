@@ -53,6 +53,7 @@ struct Held {
     bool queried{false};         //!< its certificate was asked for in this grace
     bool escaped{false};         //!< the round passed with no certificate while its anchor stood
     bool certified{false};       //!< a certificate for it reached this node
+    bool invalidated{false};     //!< the operator invalidated it (or an ancestor) on this node
     std::string state{"not judged"};
 };
 
@@ -393,7 +394,7 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
                              held[i].first.GetHex(), h.height, h.anchor_hash.GetHex(), h.anchor_height));
             continue;
         }
-        if (h.certified) {
+        if (h.certified && !h.invalidated) {
             h.state = "certified";
             refuse(strprintf("this member signed %s at height %d, and that block is certified", held[i].first.GetHex(), h.height));
             continue;
@@ -414,6 +415,12 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
         if (now_ms - h.grace_start_ms >= round_ms) {
             LogPrintf("Signing record: no certificate for %s at height %d within a round; it no longer holds the height\n",
                       held[i].first.GetHex(), h.height);
+            if (h.certified) {
+                LogPrintf("Signing record: this member is about to sign a rival of %s at height %d, a block it holds a "
+                          "full certificate for, because that block was invalidated on this node; invalidating a "
+                          "certified block is the operator's responsibility\n",
+                          held[i].first.GetHex(), h.height);
+            }
             h.escaped = true;
             h.state = "escaped";
             continue;
@@ -781,6 +788,21 @@ void PosSigningNoteCertificate(const uint256& block_hash, int height)
     if (it != at->second.end()) it->second.certified = true;
 }
 
+void PosSigningNoteInvalidated(const std::vector<uint256>& hashes, bool invalidated)
+{
+    LOCK(g_mutex);
+    for (auto& [height, at] : g_held) {
+        for (auto& [hash, h] : at) {
+            if (std::find(hashes.begin(), hashes.end(), hash) == hashes.end()) continue;
+            h.invalidated = invalidated;
+            // The release counts from the invalidation: one new query and round.
+            h.escaped = false;
+            h.grace_start_ms = 0;
+            h.queried = false;
+        }
+    }
+}
+
 PosSignCheck PosSigningCheckNow(const PosSigningEntry& entry, int64_t now_ms, int tip_height, const uint256& tip_hash)
 {
     std::vector<uint256> queries;
@@ -991,7 +1013,7 @@ std::vector<PosSigningHeld> PosSigningHeldBlocks()
             o.anchor_height = h.anchor_height;
             o.anchor_hash = h.anchor_hash;
             o.from_disk = h.from_disk;
-            o.state = h.certified ? "certified" : h.state;
+            o.state = h.certified && !h.invalidated ? "certified" : h.state;
             out.push_back(o);
         }
     }

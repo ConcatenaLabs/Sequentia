@@ -12,6 +12,7 @@
 #include <chainparams.h>
 #include <key_io.h>
 #include <pos.h>
+#include <pos_signing_record.h>
 #include <pos_producer.h>
 #include <vrf.h>
 #include <util/settings.h>
@@ -2227,6 +2228,23 @@ static RPCHelpMan preciousblock()
     };
 }
 
+//! SEQUENTIA: tell the signing check which blocks it holds are `root` or
+//! descend from it, as the operator invalidates or revives them here.
+static void NoteSigningInvalidation(ChainstateManager& chainman, const CBlockIndex* root, bool invalidated)
+{
+    std::vector<uint256> hit;
+    const std::vector<PosSigningHeld> held = PosSigningHeldBlocks();
+    if (held.empty()) return;
+    {
+        LOCK(cs_main);
+        for (const PosSigningHeld& h : held) {
+            const CBlockIndex* p = chainman.m_blockman.LookupBlockIndex(h.hash);
+            if (p && p->GetAncestor(root->nHeight) == root) hit.push_back(h.hash);
+        }
+    }
+    PosSigningNoteInvalidated(hit, invalidated);
+}
+
 static RPCHelpMan invalidateblock()
 {
     return RPCHelpMan{"invalidateblock",
@@ -2254,6 +2272,7 @@ static RPCHelpMan invalidateblock()
         }
     }
     chainman.ActiveChainstate().InvalidateBlock(state, pblockindex);
+    NoteSigningInvalidation(chainman, pblockindex, true);
 
     if (state.IsValid()) {
         chainman.ActiveChainstate().ActivateBestChain(state);
@@ -2302,6 +2321,7 @@ static RPCHelpMan reconsiderblock()
         }
     }
     if (g_con_bitcoin_anchor && g_validate_anchor) AnchorReconsiderBlock(chainman, pblockindex);
+    NoteSigningInvalidation(chainman, pblockindex, false);
 
     BlockValidationState state;
     chainman.ActiveChainstate().ActivateBestChain(state);
