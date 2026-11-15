@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <pos_producer.h>
+#include <pos_lost.h>
 
 #include <anchor.h>
 #include <block_proof.h>
@@ -1749,6 +1750,9 @@ int64_t PosProducer::DriveRound()
             }
         }
         if (!still_backed) return 150;
+        // C2 (pos_lost.h): a member that binds what it signed holds the block
+        // on disk before its signature leaves.
+        LostNoteSigned(*backed, height);
         for (const PosShare& sh : shares) FloodShare(sh);
     }
 

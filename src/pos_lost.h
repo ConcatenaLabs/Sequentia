@@ -119,6 +119,10 @@ void LostInit();
 //! Write the evidence.
 void LostShutdown();
 
+//! C2 (-poslostbindsigned): this member is about to release its signature on
+//! `block` at `height`; held on disk before it does.
+void LostNoteSigned(const CBlock& block, int height);
+
 //! DisconnectTip took `pindex` off the active chain. cs_main held.
 void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block);
 

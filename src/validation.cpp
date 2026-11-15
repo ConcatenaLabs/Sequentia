@@ -3866,7 +3866,10 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
             records = std::move(next_records);
         }
         PrecomputedTransactionData txdata(params.hashGenesisBlock);
-        if (!CheckInputScripts(tx, tx_state, view, flags, false, false, txdata)) { put(LostTxCat::FAILS, tx_state.GetRejectReason()); continue; }
+        // Through the script cache, as ConnectBlock with these flags: a pending
+        // transaction is judged again for every candidate, and its scripts give
+        // the same answer each time.
+        if (!CheckInputScripts(tx, tx_state, view, flags, /*cacheSigStore=*/true, /*cacheFullScriptStore=*/true, txdata)) { put(LostTxCat::FAILS, tx_state.GetRejectReason()); continue; }
         // As ConnectBlock counts it (legacy, P2SH and witness), before the
         // inputs are spent.
         if (sigops) sigops->push_back(GetTransactionSigOpCost(tx, view, flags));
