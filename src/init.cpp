@@ -1735,6 +1735,32 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 #endif
 
+    // SEQUENTIA: the settings that decide whether a block is accepted, resolved
+    // before anything connects one. The chainstate is verified below (at
+    // -checklevel=4 by connecting blocks again), and the loadblk thread then
+    // connects every stored block a -reindex, -reindex-chainstate or
+    // -loadblock brings back, or that start-up activation finds unconnected.
+    // Each of those blocks is judged by these settings, so a node configured
+    // away from a default (-posescapestallmtpgap, -validateanchor) must have
+    // them in place first, or it judges its own stored blocks by rules it is
+    // not configured with and discards their bodies. The producer, the anchor
+    // watcher and the reconciliation monitor read them from their own threads
+    // as well, so assigning them here, before any worker thread starts, also
+    // keeps every read ordered after the write.
+    g_validate_anchor = gArgs.GetBoolArg("-validateanchor", true);
+    // Escaping-stall real-time evidence and finality reconciliation (anchor.h).
+    g_pos_escape_stall_mtp_gap = std::clamp<int64_t>(
+        gArgs.GetIntArg("-posescapestallmtpgap", DEFAULT_POS_ESCAPE_STALL_MTP_GAP), 0, 7200);
+    g_pos_reconcile = gArgs.GetBoolArg("-posreconcile", true);
+    g_pos_finality_hold_ms = std::clamp<int64_t>(
+        gArgs.GetIntArg("-posfinalityholdms", DEFAULT_POS_FINALITY_HOLD_MS), 0, 600000);
+    g_pos_finality_delay_ms = std::clamp<int64_t>(
+        gArgs.GetIntArg("-posfinalitydelayms", DEFAULT_POS_FINALITY_DELAY_MS), 0, 60000);
+    g_pos_reconcile_patience = std::clamp<int64_t>(
+        gArgs.GetIntArg("-posreconcilepatience", DEFAULT_POS_RECONCILE_PATIENCE), 60, 86400);
+    g_pos_reconcile_min_depth = (int)std::clamp<int64_t>(
+        gArgs.GetIntArg("-posreconcilemindepth", DEFAULT_POS_RECONCILE_MIN_DEPTH), 1, 1000);
+
     // ********************************************************* Step 7: load block chain
 
     fReindex = args.GetBoolArg("-reindex", false);
@@ -2284,30 +2310,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                   (unsigned)reg.Size(), (unsigned long long)PosTotalWeight(reg));
     }
 
-    // SEQUENTIA: resolve -validateanchor BEFORE the producer starts. The
-    // producer's certified-sibling guard (AnchorCertifiedSiblingPending) reads
-    // g_validate_anchor from its worker thread, so assigning it only after the
-    // producer thread is running would be an unsynchronized cross-thread write
-    // (and a -validateanchor=0 producer could take a pointless first hold).
-    g_validate_anchor = gArgs.GetBoolArg("-validateanchor", true);
-
-    // SEQUENTIA: escaping-stall real-time evidence and finality reconciliation
-    // (anchor.h; incident 2026-07-17). Resolved here for the same
-    // before-any-worker-thread reason as g_validate_anchor: the watcher thread
-    // (reconciliation monitor) and the producer (MTP compliance) both read
-    // these from their own threads.
-    g_pos_escape_stall_mtp_gap = std::clamp<int64_t>(
-        gArgs.GetIntArg("-posescapestallmtpgap", DEFAULT_POS_ESCAPE_STALL_MTP_GAP), 0, 7200);
-    g_pos_reconcile = gArgs.GetBoolArg("-posreconcile", true);
-    g_pos_finality_hold_ms = std::clamp<int64_t>(
-        gArgs.GetIntArg("-posfinalityholdms", DEFAULT_POS_FINALITY_HOLD_MS), 0, 600000);
-    g_pos_finality_delay_ms = std::clamp<int64_t>(
-        gArgs.GetIntArg("-posfinalitydelayms", DEFAULT_POS_FINALITY_DELAY_MS), 0, 60000);
-    g_pos_reconcile_patience = std::clamp<int64_t>(
-        gArgs.GetIntArg("-posreconcilepatience", DEFAULT_POS_RECONCILE_PATIENCE), 60, 86400);
-    g_pos_reconcile_min_depth = (int)std::clamp<int64_t>(
-        gArgs.GetIntArg("-posreconcilemindepth", DEFAULT_POS_RECONCILE_MIN_DEPTH), 1, 1000);
-
     // SEQUENTIA PoS: start the autonomous block producer if configured. With
     // one or more staking keys it elects the best-ranked key each round, waits
     // out the slot clock, and produces blocks with no external coordinator
@@ -2334,7 +2336,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // SEQUENTIA: Bitcoin anchoring. Verify the connection to the parent chain
     // daemon and start the watcher that follows parent chain reorganizations.
-    // (g_validate_anchor was resolved above, before the producer started.)
+    // (g_validate_anchor was resolved before the chainstate was loaded.)
     if (g_con_bitcoin_anchor && g_validate_anchor) {
         // This wait can last minutes before the check gives up, and until it
         // does the only feedback is this line - so it also has to say that a
