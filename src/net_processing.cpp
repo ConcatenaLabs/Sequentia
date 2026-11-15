@@ -1937,9 +1937,11 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     std::shared_ptr<const CBlock> pblock;
     if (a_recent_block && a_recent_block->GetHash() == pindex->GetBlockHash()) {
         pblock = a_recent_block;
-    } else if (inv.IsMsgWitnessBlk()) {
+    } else if (inv.IsMsgWitnessBlk() && !g_con_pos) {
         // Fast-path: in this case it is possible to serve the block directly from disk,
-        // as the network format matches the format on disk
+        // as the network format matches the format on disk. Not on PoS chains:
+        // the body on disk may carry a thinner certificate than the one this
+        // node adopted later, which ReadBlockFromDisk serves (#387).
         std::vector<uint8_t> block_data;
         if (!ReadRawBlockFromDisk(block_data, pindex->GetBlockPos(), m_chainparams.MessageStart())) {
             assert(!"cannot load block from disk");
@@ -4390,9 +4392,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // answer with the certificate if we hold one; silence otherwise.
         uint256 hash;
         vRecv >> hash;
+        // The producer's in-memory certificates first; otherwise the one the
+        // block index keeps, which survives a restart and exists on a node
+        // without a producer (#387).
         const std::shared_ptr<PosProducer> prod = GetActivePosProducer();
-        if (!prod) return;
-        if (std::optional<CBlockHeader> cert = prod->GetCertificate(hash)) {
+        std::optional<CBlockHeader> cert = prod ? prod->GetCertificate(hash) : std::nullopt;
+        if (!cert) cert = PosStoredCertificate(m_chainman, hash);
+        if (cert) {
             m_connman.PushMessage(&pfrom, CNetMsgMaker(pfrom.GetCommonVersion()).Make(NetMsgType::POSCERT, *cert));
         }
         return;

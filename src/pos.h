@@ -361,6 +361,29 @@ public:
         return instance;
     }
 
+    //! A copy of this registry's state (#277). The election version is kept:
+    //! the copy holds the same election, so cached committees stay valid for
+    //! it until either registry changes.
+    std::shared_ptr<StakeRegistry> Clone() const
+    {
+        auto out = std::make_shared<StakeRegistry>();
+        LOCK(m_mutex);
+        LOCK(out->m_mutex);
+        out->m_config = m_config;
+        out->m_utxo = m_utxo;
+        out->m_bls = m_bls;
+        out->m_bls_utxo = m_bls_utxo;
+        out->m_bls_utxo_outputs = m_bls_utxo_outputs;
+        out->m_deleg_utxo = m_deleg_utxo;
+        out->m_payout_utxo = m_payout_utxo;
+        out->m_utxo_tranches = m_utxo_tranches;
+        out->m_deleg_height = m_deleg_height;
+        out->m_pot_utxo = m_pot_utxo;
+        out->m_weights_cache = m_weights_cache;
+        out->m_election_version = m_election_version;
+        return out;
+    }
+
     //! Clear the configuration layer (chain parameter (re)load).
     void Clear()
     {
@@ -1540,9 +1563,23 @@ bool CheckPosUnbondingTx(const CTransaction& tx, const CCoinsViewCache& inputs,
  *  staking UTXOs add weight; inputs that spend them (from the block's undo
  *  data) subtract it. Must be called exactly once per tip connect. */
 void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height);
+void PosApplyBlockStake(StakeRegistry& registry, const CBlock& block, const CBlockUndo& undo, int height);
 
 /** Exact inverse of PosApplyBlockStake, for tip disconnects (reorgs). */
 void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height);
+void PosRevertBlockStake(StakeRegistry& registry, const CBlock& block, const CBlockUndo& undo, int height);
+
+/** SEQUENTIA (#277): the stake registry as of a block other than the active
+ *  tip. A certificate is judged against the committee, keys, seat weights and
+ *  quorum its parent leaves; for a sibling of the tip that parent is not the
+ *  tip, and the live registry is the wrong state. Snapshots are taken when a
+ *  block is connected or disconnected, keyed by the block whose state they
+ *  hold, and only the most recent POS_REGISTRY_SNAPSHOTS are kept. The state
+ *  after a given block never changes, so no snapshot is ever invalidated. */
+static constexpr size_t POS_REGISTRY_SNAPSHOTS = 6;
+void PosRememberRegistryAfter(const uint256& block_hash, std::shared_ptr<const StakeRegistry> registry);
+std::shared_ptr<const StakeRegistry> PosRegistryAfterSnapshot(const uint256& block_hash);
+void PosClearRegistrySnapshots();
 
 /** Rebuild the UTXO stake layer by scanning the (flushed) UTXO set. */
 bool RebuildUtxoStake(CCoinsView& view);

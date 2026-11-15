@@ -13,6 +13,7 @@
 #include <flatfile.h>
 #include <fs.h>
 #include <hash.h>
+#include <pos.h>
 #include <pow.h>
 #include <reverse_iterator.h>
 #include <shutdown.h>
@@ -817,6 +818,22 @@ bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex, const Consensus
     if (block.GetHash() != pindex->GetBlockHash()) {
         return error("ReadBlockFromDisk(CBlock&, CBlockIndex*): GetHash() doesn't match index for %s at %s",
                 pindex->ToString(), block_pos.ToString());
+    }
+    // SEQUENTIA PoS (#387): the stored body keeps the certificate the block
+    // arrived with; a fuller one adopted later (PosUpgradeCertificate) lives in
+    // the block index entry. Serve that one. The certificate lies outside the
+    // block hash, so the block is the same block either way.
+    if (g_con_pos && g_pos_bls && PosCertificateMembers(block) < (int)pindex->m_pos_countersigs) {
+        LOCK(cs_main);
+        CBlockIndex full;
+        const CBlockIndex* pfull = pindex->trimmed() ? pindex->untrim_to(&full) : pindex;
+        if (pfull && !pfull->trimmed()) {
+            CBlockHeader adopted = block.GetBlockHeader();
+            adopted.proof.solution = pfull->get_proof().solution;
+            if (PosCertificateMembers(adopted) > PosCertificateMembers(block)) {
+                block.proof.solution = adopted.proof.solution;
+            }
+        }
     }
     return true;
 }

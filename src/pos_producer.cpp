@@ -2311,7 +2311,17 @@ PosGossipAction PosVerifyCertificate(const CBlockHeader& header, ChainstateManag
     if (already_have && !PosCertificateIsFuller(chainman, header)) return PosGossipAction::Ignore;
     if (!parent) return PosGossipAction::Ignore;
     const int height = parent->nHeight + 1;
-    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    // The committee, keys, seat weights and quorum a certificate is judged
+    // against are those its parent leaves (#277). For a child of the tip that
+    // is the live registry; for any other parent, a sibling of the tip above
+    // all, the registry as of that parent (PosRegistryAfter). Where that state
+    // is not available here the certificate cannot be judged.
+    std::shared_ptr<const StakeRegistry> parent_registry;
+    if (!parent_is_tip) {
+        parent_registry = PosRegistryAfter(chainman, parent);
+        if (!parent_registry) return PosGossipAction::Ignore;
+    }
+    const StakeRegistry& reg = parent_registry ? *parent_registry : StakeRegistry::GetInstance();
     // The leader signature (and structural size) is self-contained and objective,
     // so provable garbage is penalised. Under the bitfield form this is all
     // CheckProof verifies; the aggregate is registry-dependent (below).
