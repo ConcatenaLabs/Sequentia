@@ -45,33 +45,50 @@ An asset **absent** from the map values to `0` rfa - i.e. not accepted - so the
 table *is* the producer's acceptance set, with **no exceptions**: the policy
 asset, SEQ, is unlisted-means-refused like everything else.
 
-What a never configured node accepts depends on the chain
-(`CChainParams::SeedFeeWhitelist`):
+A whitelist is **static** when it is written by hand, and **dynamic** when a
+price server updates it. A price server ([§5](#5-the-price-server)) takes the
+prices a price feed API reports, filters and treats them under its own
+configuration, and writes the result; nothing goes from a price feed API to the
+whitelist without one. What a never configured node starts with depends on the
+chain:
 
-- **The mainnet (`sequentia`) and the testnet (`test`) start empty.** The node
-  accepts no asset, and says so at startup. It validates the chain and its
-  wallet receives as usual, but it relays no transaction and its wallet refuses
-  to send, until the whitelist is written by hand or by a price server
-  ([§5](#5-the-price-server)). No asset is pre-loaded, so none is favoured, and
-  the node does not appear to work before somebody has decided what it accepts
-  and at what price.
+- **The testnet (`test`) is connected to the network's price server.** It runs
+  no price server of its own: it asks for the list the network's price server
+  publishes (`http://sequentiatestnet.com/feewhitelist`) as it starts, before
+  its wallet can be asked to send, so its whitelist is populated at once and
+  dynamic from then on, the same list the public nodes use. No asset is listed
+  before that list arrives.
+- **The mainnet (`sequentia`) has no default price server**, so it starts with
+  an empty, static whitelist. The node accepts no asset, and says so at startup.
+  It validates the chain and its wallet receives as usual, but it relays no
+  transaction and its wallet refuses to send, until the operator writes the
+  whitelist by hand or connects to a price server. No asset is pre-loaded, so
+  none is favoured, and the node does not appear to work before somebody has
+  decided what it accepts and at what price.
 - **Custom chains start from a seed**: the map is constructed holding SEQ at
   `1e8` (`ExchangeRateMap::ResetToBootstrapRates`), so a regtest node can send
   without any setup, and any write that replaces the table replaces the seed
-  along with it. `-con_seed_fee_whitelist=0` makes a custom chain start empty as
-  the public chains do.
+  along with it. `-con_seed_fee_whitelist=0` makes a custom chain start empty
+  as the public chains do (`CChainParams::SeedFeeWhitelist`), and
+  `-con_default_fee_price_server=<address>` gives it a default price server as
+  the testnet has.
 
-The testnet once seeded SEQ as well, and a node saved its whitelist to
+The testnet once seeded SEQ, and a node saved its whitelist to
 `exchangerates.json` at every start, so a testnet data directory can hold that
 seed without anyone having chosen it. On a chain that no longer seeds, a file
 holding the policy asset at `1e8` and nothing else is therefore moved aside to
-`exchangerates.json.old-seed` at startup rather than loaded, and the node starts
-empty. Any other content is the operator's list and is loaded as written, as is
-a file named with `-initialexchangeratesjsonfile`. The mainnet never seeded, so
-there every file is loaded.
+`exchangerates.json.old-seed` rather than loaded. This is checked once per data
+directory, at the first start, and the check is recorded in `settings.json`:
+from then on the file holds only what is written to it, so an operator who lists
+the policy asset alone at `1e8` keeps that list. Any other content
+is a static whitelist its operator wrote: it is loaded as written, and on the
+testnet it takes precedence over the default price server, as does a file named
+with `-initialexchangeratesjsonfile`. The mainnet never seeded, so there every
+file is loaded.
 
 An empty whitelist is a state the operator can also return to on any chain, by
-writing `{}`. The node then behaves as an unconfigured mainnet node does.
+writing `{}`. The node then behaves as an unconfigured mainnet node does, and an
+emptied list stays empty: writing it disconnects the node from any price server.
 
 A rate of `0` reads as "refuse this asset": it is a valid stored value that flows
 through to the conversion as "not accepted". Setting a rate accepts any
@@ -86,14 +103,18 @@ re-values the mempool whenever rates change.
 ## 2. Per-producer acceptance: a single whitelist
 
 A producer keeps **one** `{asset → rate}` whitelist - the `ExchangeRateMap`
-singleton. There are no static and dynamic layers and no precedence between
-writers: the most recent write replaces the table (last-writer-wins), and there
-is no per-asset "source" or provenance.
+singleton. There are no static and dynamic layers inside it and no per-asset
+"source" or provenance: static or dynamic says who writes the table, not how it
+is stored.
 
-Nothing but those writes touches the table. A node may also fetch market prices
-for display (`-referencepricesurl`, used to show amounts in a reference
-currency); they never enter the whitelist, so an asset is accepted only because
-the operator, or the operator's price server, listed it.
+The table has **one writer at a time**: the operator, by hand or through a price
+server of their own that writes to the node over RPC, or the price server the
+node is connected to ([§5](#5-the-price-server)). While a node is connected to a
+price server, that server is the only writer; the first write by anyone else
+disconnects it for good, so the two never take turns. A node may also fetch
+market prices for display (`-referencepricesurl`, used to show amounts in a
+reference currency); they never enter the whitelist, so an asset is accepted
+only because the operator, or a price server, listed it.
 
 The table is written with `setfeeexchangerates` and read with
 `getfeeexchangerates`. Writing persists the table to `exchangerates.json` and
@@ -199,24 +220,72 @@ The operator how-tos for RBF and CPFP with asset fees are in
 
 ## 5. The price server
 
-The price server is a locally-run sidecar (`contrib/price-server/`) - a standalone
-program the operator runs alongside the node. Keeping it out of the consensus
-daemon isolates third-party HTTP, API keys, and JSON parsing from the node and
-keeps that outbound-network surface out of `sequentiad`; the sidecar is
-independently restartable and testable.
+A price server (`contrib/price-server/`) is a program that runs beside a node,
+not inside it. It takes the prices a **price feed API** reports (an exchange
+endpoint, an oracle, another operator's price server), filters and treats them
+under its own configuration (admission thresholds such as market cap, 24h volume
+and volatility, manual prices, exceptions), computes each admitted asset's rate
+from its price relative to the reference unit, and publishes the resulting
+`{asset → rate}` table. Keeping it out of the consensus daemon isolates
+third-party HTTP, API keys and JSON parsing from the node; it is independently
+restartable and testable.
 
-It periodically queries operator-designated external APIs (exchange endpoints,
-DEX oracles) for per-asset market data, applies operator-defined **admission
-thresholds** (e.g. market cap, 24h volume, volatility), computes each admitted
-asset's rate from its price relative to the reference unit, and writes the
-resulting `{asset → rate}` table into the node's single whitelist through
-`setfeeexchangerates` (`src/rpc/exchangerates.cpp`):
+A node's whitelist is dynamic when a price server updates it, its operator's own
+or another operator's. There are two ways for that to happen, and to the user
+both are being connected to a price server:
+
+- **The node is connected to it** (`-feepriceserver=<address>`,
+  `src/feepriceserver.{h,cpp}`). The node asks for the list the price server
+  publishes, the body of its `GET /api/whitelist` or the file it writes with
+  `--publish-file`, at startup and every `-feepriceserverpoll` seconds (60), and
+  makes it the whitelist. This is how the testnet works by default, and how any
+  node uses another operator's price server.
+- **The price server writes to the node**, through `setfeeexchangerates` with
+  `persist=false`: the node's own operator runs one with the node's RPC
+  credentials (the desktop wallet's Settings → Price server does this).
+
+A node connected to a price server takes that server's published list and
+nothing else:
+
+- **Only a price server's list.** The answer must be the published shape,
+  `{"updated": <time>, "rates": {"<asset id>": <rate>, ...}}`. A price feed API's
+  answer, the registry's index or anything else is refused as "not a price
+  server", and `setfeepriceserver` will not connect to such an address at all.
+  Going from a price feed API to the whitelist without a price server is not
+  possible.
+- **Whole or not at all.** A list is refused, and the list in force kept, when it
+  is empty, has more than 1000 entries, holds an entry that is not a 64-hex asset
+  id with an integer rate in `(0, 1e18]`, is older than the list in force, or is
+  over 1 MiB. An empty published list is never a policy (a price server refuses
+  to publish a round that admitted nothing), so reading it as "accept nothing"
+  would let one bad answer stop the node relaying.
+- **Unreachable.** The last list is kept for as long as the server cannot be
+  reached; `getfeepriceserver` and the desktop wallet show when it was last
+  written and the last error. It is never cleared, and nothing falls back to one
+  asset. Each list taken is cached in `feepriceserver.json` in the data directory,
+  so a restart has it at once.
+- **One writer.** The first write by anyone else (`setfeeexchangerates`, by hand
+  or by a price server pushing over RPC, or an edit in the desktop wallet)
+  disconnects the node for good: it records `-nofeepriceserver` in its
+  `settings.json`, and from then on the whitelist is exactly what is written to
+  it, an empty one included. `setfeepriceserver "<address>"` (or Connect in the
+  desktop wallet's Fee acceptance dialog) connects it again;
+  `setfeepriceserver ""` disconnects it and keeps the list in force as a static
+  whitelist. An address given on the command line is connected at every start,
+  as any command-line setting wins.
+- **Plain HTTP.** The node links no TLS library, so the list is not authenticated
+  in transit: someone on the network path can answer in the price server's
+  place. The bounds above limit what such an answer can carry, not who sent it;
+  a list signed by the price server and checked against a key the node is given
+  is the fix ([Sequentia #397](https://github.com/ConcatenaLabs/Sequentia/issues/397)).
 
 | RPC | Purpose |
 |---|---|
-| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it, which leaves the node accepting **no** fee asset at all, SEQ included, and empties its mempool. |
+| `setfeeexchangerates {asset: rate, …} [persist=true]` | Replace the whole whitelist and `RecomputeFees()`, disconnecting the node from its price server if it is connected to one. With `persist=true` (the default) it also writes `exchangerates.json` so the table survives a restart; with `persist=false` it updates only the in-memory whitelist. Pass `{}` to clear it, which leaves the node accepting **no** fee asset at all, SEQ included, and empties its mempool. |
 | `getfeeexchangerates` | Return the current whitelist as `{asset: rate}`. |
 | `getfeeacceptancepolicy` | Return the current acceptance set. |
+| `getfeepriceserver` | Whether the node is connected to a price server (its whitelist then `dynamic`, else `static`), the address, whether it is the network's default, when the list in force was taken and published, the last request and its error, and why the node disconnected if it did. |
+| `setfeepriceserver "<address>"` | Connect to a price server, after taking its list (nothing changes if the address does not answer with one). `""` disconnects and keeps the list in force as a static whitelist. Both are recorded in `settings.json`. |
 | `getfeeassetinfo [asset]` | Per asset: whether this node accepts it (`accepted`, plus `listed`/`rate` so a refusal written down as rate 0 is distinguishable from an asset nobody configured), whether the Asset Registry publishes it (`registry_listed`), and whether the reference feed prices it (`market_price`). |
 
 `getfeeassetinfo` is what a wallet asks before offering an asset as a way to
@@ -236,18 +305,18 @@ node's whitelist rate and reports acceptance. Acceptance is reported even when
 there is no estimate to convert, since a node with no fee history yet would
 otherwise look like it had a problem with the asset.
 
-There is a single whitelist; "static" versus "dynamic" is only how it is
-*operated*, not a protocol distinction. An operator setting rates by hand uses
-the default `persist=true` so the table survives a restart. A price server driving
-the whitelist automatically uses `persist=false`: it re-pushes every poll, so
-persisting would only churn the file and, worse, leave its last rates in force
-across a restart instead of failing back to the persisted static whitelist.
+There is a single whitelist; static or dynamic is who writes it, not a protocol
+distinction. An operator writing rates by hand uses the default `persist=true`
+so the table survives a restart. A price server writing to the node over RPC uses
+`persist=false`: it re-pushes every poll, so persisting would only churn the file
+and, worse, leave its last rates in force across a restart instead of the static
+whitelist.
 
 The reference unit is anchored to a chosen value (for example a USD-equivalent
 stablecoin) so rates are meaningful; the choice is operator policy, not consensus.
 The node holds the last-set rates indefinitely - there is **no** staleness or
 max-age option; keeping rates fresh (and refusing assets when a feed dies, by
-writing `0` or omitting them) is the sidecar's job. The one rule the node enforces
+writing `0` or omitting them) is the price server's job. The one rule the node enforces
 is the **non-negative-rate** floor: a negative quote is rejected outright, while a
 zero is accepted and read as "refuse this asset". Vetting source data - quorum
 across feeds, guarding implausible inter-poll jumps and dust-priced rates - is the

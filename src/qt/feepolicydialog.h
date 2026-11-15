@@ -45,6 +45,8 @@ private Q_SLOTS:
     void onAddOrUpdate();
     void onRemoveSelected();
     void onLaunchPriceServer();
+    void onConnectPriceServer();
+    void onDisconnectPriceServer();
 
 private:
     WalletModel* m_wallet_model{nullptr};
@@ -58,6 +60,11 @@ private:
     QPushButton* m_refresh{nullptr};
     QPushButton* m_launch_price_server{nullptr};
     QLabel* m_status{nullptr};
+    QLabel* m_ps_status{nullptr};        // which price server, when it last wrote, its last error
+    QLineEdit* m_ps_url{nullptr};
+    QPushButton* m_ps_connect{nullptr};
+    QPushButton* m_ps_disconnect{nullptr};
+    UniValue m_ps_state;                 // getfeepriceserver, as of the last refresh
     bool m_remove_selection_connected{false};
 
     //! This node's own RPC endpoint and credentials, as the sidecar's config wants them.
@@ -73,6 +80,10 @@ private:
     // getfeeacceptancepolicy. setfeeexchangerates REPLACES the whole map, so callers must start
     // from this full set and then add/overwrite/erase only the edited asset to preserve the rest.
     std::map<std::string, int64_t> currentRates(bool& ok, QString& err);
+    //! Writing by hand disconnects the node from its price server: ask first.
+    bool confirmHandWrite();
+    //! The price-server section's text, from m_ps_state.
+    void showPriceServerState();
 };
 
 #endif // BITCOIN_QT_FEEPOLICYDIALOG_H

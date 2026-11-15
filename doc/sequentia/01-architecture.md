@@ -67,6 +67,10 @@ substrate resolves this with an asset-independent unit.
   - `ConvertValueToAmount(value, asset)` → atoms of `asset`.
   - The map is persisted as JSON in `<datadir>/exchangerates.json` via
     `LoadFromDefaultJSONFile` / `SaveToJSONFile`.
+- **`src/feepriceserver.{h,cpp}`** connects a node to a price server
+  (`-feepriceserver`, the testnet's default): it asks for the server's published
+  list at startup and on a poll, refuses anything that is not one, and writes it
+  into the map as the only writer until anyone else writes it.
 
 A transaction's fee asset is obtained via `CTransaction::GetFeeAsset()`.
 

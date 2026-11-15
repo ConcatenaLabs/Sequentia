@@ -17,12 +17,14 @@ anchored to Bitcoin testnet4); there is no Sequentia mainnet yet.
    user may offer *any* issued asset as a transaction fee. Proposing a fee asset
    is permissionless; *accepting* it is each block producer's choice. Producers
    value heterogeneous fees against a common reference unit using an
-   exchange-rate whitelist, kept fresh by hand or by a price-server sidecar,
+   exchange-rate whitelist, written by hand (static) or by a price server (dynamic),
    and build the most valuable block they can from the transactions paying in
    assets they accept. The Sequence token (SEQ), the staking asset, holds **no
-   privileged fee status**: on the mainnet and the testnet a node starts with an
-   empty whitelist and accepts nothing until its list is written. A producer
-   may price SEQ, refuse it, or accept other assets instead. Unlisted means unaccepted, for
+   privileged fee status**: no asset is listed before a node's whitelist is
+   written. A testnet node is connected to the network's price server and takes
+   its list as it starts; a mainnet node starts empty until its operator writes
+   the list or connects to a price server. A producer may price SEQ, refuse it,
+   or accept other assets instead. Unlisted means unaccepted, for
    SEQ as for anything else. See
    [`02-open-fee-market.md`](02-open-fee-market.md).
 

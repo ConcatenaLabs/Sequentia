@@ -20,6 +20,8 @@ What must hold:
   * it stays that way across another restart, and the seed never comes back;
   * a list the operator wrote is kept, even one holding the policy asset alone
     at another rate, or the policy asset at 1:1 beside another asset;
+  * the check runs once per data directory (recorded in settings.json), so the
+    policy asset alone at 1:1, written by the operator afterwards, is kept;
   * a file named with -initialexchangeratesjsonfile is loaded as written, even
     when it holds only the old seed: naming it is the operator's choice.
 """
@@ -119,10 +121,17 @@ class AnyAssetFeeOldSeedTest(BitcoinTestFramework):
         self.restart(UNSEEDED)
         assert_equal(node.getfeeexchangerates(), {})
 
+        self.log.info("The check runs once: the policy asset alone at 1:1, written by the operator, is kept")
+        node.setfeeexchangerates(seed)
+        self.restart(UNSEEDED, stopped_empty=True)  # this run began with the emptied list
+        assert_equal(node.getfeeexchangerates(), seed)
+        assert_equal(self.read(self.rates_file()), seed)
+
         self.log.info("A file named with -initialexchangeratesjsonfile is loaded as written, the seed included")
         named = os.path.join(self.options.tmpdir, "named-rates.json")
         self.write(named, seed)
-        self.restart(UNSEEDED + ["-initialexchangeratesjsonfile=%s" % named], stopped_empty=True)
+        node.setfeeexchangerates({})
+        self.restart(UNSEEDED + ["-initialexchangeratesjsonfile=%s" % named])
         assert_equal(node.getfeeexchangerates(), seed)
 
         self.log.info("Once it lists an asset, it sends")

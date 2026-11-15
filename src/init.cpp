@@ -69,7 +69,6 @@
 #include <util/check.h>
 #include <util/moneystr.h>
 #include <util/strencodings.h>
-#include <util/settings.h>
 #include <util/string.h>
 #include <util/syscall_sandbox.h>
 #include <util/system.h>
@@ -105,6 +104,7 @@
 #include <assetsdir.h> // InitGlobalAssetDir
 #include <assetregistry.h> // StartAssetRegistry
 #include <referenceprices.h> // StartReferencePrices
+#include <feepriceserver.h> // InitFeeList, StartFeePriceServer
 #include <pegins.h>
 
 #if ENABLE_ZMQ
@@ -430,7 +430,10 @@ void SetupServerArgs(ArgsManager& argsman)
     std::vector<std::string> hidden_args = {
         "-dbcrashratio", "-forcecompactdb",
         // GUI args. These will be overwritten by SetupUIArgs for the GUI
-        "-choosedatadir", "-lang=<lang>", "-min", "-resetguisettings", "-splash", "-uiplatform"};
+        "-choosedatadir", "-lang=<lang>", "-min", "-resetguisettings", "-splash", "-uiplatform",
+        // SEQUENTIA: settings.json's record that this data directory's fee
+        // whitelist file was checked for the old seed (feepriceserver.cpp).
+        "-feelistseedchecked"};
 
     argsman.AddArg("-version", "Print version and exit", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #if HAVE_SYSTEM
@@ -634,6 +637,9 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-assetregistryurl=<url>", "Sequentia Asset Registry index URL (http only). When set, the node periodically fetches asset labels and merges the registry-verified ones into the asset directory (used by RPC output and the GUI). These labels are ADVISORY only: the index is fetched over plain HTTP with no TLS and no signature, so they are not cryptographically authenticated to the node and must not be trusted for value decisions. Operator -assetdir entries always take precedence.", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-assetregistrypoll=<n>", "Seconds between Asset Registry refreshes (0 disables periodic refresh; only the initial fetch runs). (default: 300)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-assetregistrytimeout=<n>", "Timeout in seconds for an Asset Registry fetch. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-feepriceserver=<url>", "Connect to the price server whose published fee list is at this address (http only; a price server's GET /api/whitelist, or the file it writes with --publish-file), making the fee whitelist dynamic: the node takes that server's list at startup and every -feepriceserverpoll seconds. While connected, the price server is the whitelist's only writer; the first write by anyone else (setfeeexchangerates, by hand or by a price server pushing over RPC) disconnects the node for good, which it records in settings.json. -nofeepriceserver keeps the whitelist static. Only a price server's list is taken, never a price feed API's answer. (default: the network's price server on the testnet, none on other chains)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-feepriceserverpoll=<n>", "Seconds between requests to the connected price server. (default: 60)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-feepriceservertimeout=<n>", "Timeout in seconds for a request to the connected price server; the one made at startup waits at most 5. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-referencepricesurl=<url>", "Sequentia reference-price feed URL (http only). When set, the node periodically fetches per-asset USD prices used by the GUI to value displayed amounts in a user-chosen reference currency (display only; never affects consensus or fees).", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-referencepricespoll=<n>", "Seconds between reference-price refreshes (0 disables periodic refresh; only the initial fetch runs). (default: 120)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-referencepricestimeout=<n>", "Timeout in seconds for a reference-price fetch. (default: 15)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -760,19 +766,6 @@ static bool AppInitServers(NodeContext& node)
     return true;
 }
 
-/** SEQUENTIA: whether a fee whitelist file holds the policy asset at the
- *  reference rate and nothing else: exactly what a node that seeded its
- *  whitelist saved at every start, with no operator involved. */
-static bool IsOldSeedFile(const fs::path& path)
-{
-    std::map<std::string, util::SettingsValue> json;
-    std::vector<std::string> errors;
-    if (!util::ReadSettings(path, json, errors) || json.size() != 1) return false;
-    const auto& [key, value] = *json.begin();
-    return GetAssetFromString(key) == ::policyAsset && value.isNum() &&
-           value.getValStr() == ToString(exchange_rate_scale);
-}
-
 // Parameter interaction based on rules
 void InitParameterInteraction(ArgsManager& args)
 {
@@ -885,6 +878,16 @@ void InitParameterInteraction(ArgsManager& args)
         // breakage, same fix.
         if (args.SoftSetArg("-referencepricesurl", "http://sequentiatestnet.com/prices"))
             LogPrintf("%s: chain=test -> setting -referencepricesurl=http://sequentiatestnet.com/prices\n", __func__);
+        // Connected to the network's price server, so a fresh node's fee
+        // whitelist is the one the public nodes use, populated as it starts and
+        // dynamic from then on, with no asset listed before it arrives. Same
+        // plain-HTTP reason as the two above. -nofeepriceserver turns it off,
+        // and a list the operator wrote takes precedence over this default.
+        const std::string fee_price_server = DefaultFeePriceServer(args);
+        if (args.SoftSetArg("-feepriceserver", fee_price_server)) {
+            NoteFeePriceServerIsDefault(true);
+            LogPrintf("%s: chain=test -> setting -feepriceserver=%s\n", __func__, fee_price_server);
+        }
         // And the SeqDEX order-book relay, so a staker who switches reward
         // conversion on has somewhere to sell into without first being told to
         // go and configure a URL. Same plain-HTTP reason as the two above: the
@@ -897,6 +900,14 @@ void InitParameterInteraction(ArgsManager& args)
         // missing feature.
         if (args.SoftSetArg("-seqoburl", "http://sequentiatestnet.com/seqob"))
             LogPrintf("%s: chain=test -> setting -seqoburl=http://sequentiatestnet.com/seqob\n", __func__);
+    } else {
+        // A custom chain may name a default price server, standing in for the
+        // testnet's (the functional tests do); every other chain has none.
+        const std::string fee_price_server = DefaultFeePriceServer(args);
+        if (!fee_price_server.empty() && args.SoftSetArg("-feepriceserver", fee_price_server)) {
+            NoteFeePriceServerIsDefault(true);
+            LogPrintf("%s: -con_default_fee_price_server -> setting -feepriceserver=%s\n", __func__, fee_price_server);
+        }
     }
 }
 
@@ -1516,56 +1527,28 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // If fees can be paid in any asset, node operators need to be able to specify asset exchange
         // rates using either the static config file and/or the exchange rates RPCs.
         ExchangeRateMap& exchangeRateMap = ExchangeRateMap::GetInstance();
-        // SEQUENTIA: on a chain that does not seed the whitelist (the mainnet
-        // and the testnet), an unconfigured node accepts no fee asset at all.
-        // Cleared before the load, so a whitelist the operator has written is
-        // kept: the file, when there is one, replaces the table either way.
-        if (!Params().SeedFeeWhitelist()) exchangeRateMap.ClearRates();
-        std::string file_path_string = gArgs.GetArg("-initialexchangeratesjsonfile", "");
-        // A chain that once seeded the whitelist and no longer does (the
-        // testnet) has data directories whose exchangerates.json holds nothing
-        // but that seed: the node saved its whitelist at every start, so the
-        // seed was written there without anyone choosing it. Loading it would
-        // keep the one-asset list the open fee market withholds. Such a file is
-        // moved aside, not loaded. The mainnet never seeded, so a file there is
-        // always its operator's, whatever it holds.
-        if (!Params().SeedFeeWhitelist() && Params().NetworkIDString() != CBaseChainParams::SEQUENTIA &&
-            file_path_string.empty()) {
-            const fs::path rates_file = AbsPathForConfigVal(fs::PathFromString(exchange_rates_config_file));
-            if (fs::exists(rates_file) && IsOldSeedFile(rates_file)) {
-                const fs::path aside = fs::PathFromString(fs::PathToString(rates_file) + ".old-seed");
-                if (!RenameOver(rates_file, aside)) {
-                    return InitError(strprintf(_("Unable to move the old seeded fee list %s aside"), fs::PathToString(rates_file)));
-                }
-                LogPrintf("%s held only the old seeded fee list (the policy asset alone, which nobody chose); "
-                          "moved it to %s rather than loading it\n", fs::PathToString(rates_file), fs::PathToString(aside));
-            }
-        }
-        std::vector<std::string> errors;
-        if (!file_path_string.empty()) {
-            fs::path file_path = GetConfigFile(file_path_string);
-            if (!exchangeRateMap.LoadFromJSONFile(file_path, errors)) {
-                return InitError(strprintf(_("Unable to load exchange rates from JSON file %s: \n%s\n"), file_path_string, MakeUnorderedList(errors)));
-            };
-        } else {
-            if (!exchangeRateMap.LoadFromDefaultJSONFile(errors)) {
-                return InitError(strprintf(_("Unable to load exchange rates from default JSON file %s: \n%s\n"), exchange_rates_config_file, MakeUnorderedList(errors)));
-            };
-        }
-        errors.clear();
-        if (!exchangeRateMap.SaveToJSONFile(errors)) {
-            return InitError(strprintf(_("Unable to save exchange rates to JSON file %s: \n%s\n"), exchange_rates_config_file, MakeUnorderedList(errors)));
-        };
-        // SEQUENTIA: the node keeps a SINGLE fee-asset whitelist (no static/dynamic
-        // layers, no node-side staleness). Freshness/admission is the price-server
-        // sidecar's job — it adds/removes assets and re-pushes via
-        // setfeeexchangerates with persist=false. The node just holds whatever was
-        // last set.
+        // SEQUENTIA: who writes the whitelist, and the list itself: the price
+        // server's when the node is connected to one (asked for here, before
+        // the wallet can send), the operator's file when not.
+        std::string fee_list_error;
+        if (!InitFeeList(fee_list_error)) return InitError(Untranslated(fee_list_error));
+        // SEQUENTIA: the node keeps a SINGLE fee whitelist. It is static when
+        // written by hand and dynamic when a price server updates it, either
+        // because the node is connected to that server (feepriceserver.h) or
+        // because the server pushes to it over setfeeexchangerates. The node
+        // keeps no layers and no staleness of its own.
         if (!exchangeRateMap.HasAcceptedAsset()) {
             // Said at startup rather than left to be discovered from a refused
             // send. Not an InitWarning: the GUI asks the same thing with a
             // button that leads to the answer, and one prompt is enough.
-            const std::string notice = strprintf(
+            const FeeListSource source = GetFeeListSource();
+            const std::string notice = source.connected
+                ? strprintf("This node is connected to the price server at %s, which has not sent a fee "
+                            "whitelist yet (%s), so until it does the node accepts no asset for transaction "
+                            "fees and will not send or relay transactions. It still validates the chain, and "
+                            "its wallet can still receive.",
+                            source.url, source.last_error.empty() ? "no answer yet" : source.last_error)
+                : strprintf(
                 "This node accepts no asset for transaction fees, so it will not send or relay "
                 "transactions. It still validates the chain, and its wallet can still receive. "
                 "To change that, write the fee whitelist: list assets and prices in %s or with "
@@ -1652,6 +1635,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     assert(!node.mempool);
     int check_ratio = std::min<int>(std::max<int>(args.GetIntArg("-checkmempool", chainparams.DefaultConsistencyChecks() ? 1 : 0), 0), 1000000);
     node.mempool = std::make_unique<CTxMemPool>(node.fee_estimator.get(), check_ratio);
+    // SEQUENTIA: keep asking the connected price server, now there is a mempool
+    // whose fees must be valued again when its list changes.
+    if (g_con_any_asset_fees) StartFeePriceServer(*node.scheduler, node.mempool.get());
 
     assert(!node.chainman);
     node.chainman = std::make_unique<ChainstateManager>();

@@ -324,11 +324,12 @@ class AssetState:
 
 
 class PriceServer:
-    def __init__(self, config, dry_run=False, config_path=None):
+    def __init__(self, config, dry_run=False, config_path=None, publish_file=None):
         check_config(config)  # every construction path, not just the CLI
         self.cfg = config
         self.dry_run = dry_run
         self.config_path = config_path
+        self.publish_file = publish_file  # where the whitelist is published for nodes to connect to
         self._lock = threading.Lock()
         self._states = {}            # TICKER -> AssetState
         self.last_rates = {}         # asset_id -> rate (last published)
@@ -708,6 +709,7 @@ class PriceServer:
                 self.last_report = report
                 self.last_prices = prices
                 self.last_poll_ts = time.time()
+                self.write_publish_file()
                 return self.last_rates
             log.error("this poll admitted NO assets and there is no previous set to fall back on; "
                       "publishing nothing. Fed nodes keep whatever they already had.")
@@ -733,6 +735,7 @@ class PriceServer:
         self.last_report = report
         self.last_prices = prices
         self.last_poll_ts = time.time()
+        self.write_publish_file()
         admitted = sum(1 for r in report if r["rate"] is not None)
         if self.dry_run:
             log.info("dry-run: %d/%d discovered assets admitted; would publish %s",
@@ -763,6 +766,25 @@ class PriceServer:
                       "config against the node's own rpcport/rpcuser (or cookie path): %s",
                       len(self.rpcs), "; ".join("%s: %s" % (n["url"], n["error"]) for n in node_status))
         return rates
+
+    def write_publish_file(self):
+        """Publish the whitelist as a file, for nodes that connect to this price
+        server over the network rather than receive its pushes over RPC: the
+        same body as GET /api/whitelist, written whole (a temporary file renamed
+        over the old one) after every completed poll, so a web server can serve
+        it without exposing this server's own UI. Nothing is written until a
+        poll has admitted at least one asset: a node connected to this server
+        refuses an empty list, and an empty file would say nothing true."""
+        if not self.publish_file or not self.last_rates:
+            return
+        tmp = self.publish_file + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf8") as f:
+                json.dump(_whitelist_payload(self), f, indent=2)
+            os.chmod(tmp, 0o644)  # it is public by definition
+            os.replace(tmp, self.publish_file)
+        except OSError as e:
+            log.error("could not write the published whitelist to %s: %s", self.publish_file, e)
 
     def run(self):
         signal.signal(signal.SIGTERM, self._stop)
@@ -1782,6 +1804,11 @@ def main():
                         help="permit a non-loopback bind even without an admin password (NOT recommended)")
     parser.add_argument("--set-password", action="store_true",
                         help="prompt for an admin password, store its hash in the config, and exit")
+    parser.add_argument("--publish-file", default=None,
+                        help="after every completed poll, write the whitelist (the body of GET "
+                             "/api/whitelist) to this file, for a web server to publish to nodes "
+                             "that connect to this price server (-feepriceserver). Written in "
+                             "--dry-run too, since it publishes nothing to any node.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -1813,7 +1840,8 @@ def main():
         print("Admin password set. Restart the price server to pick it up.")
         return 0
 
-    server = PriceServer(config, dry_run=args.dry_run, config_path=args.config)
+    server = PriceServer(config, dry_run=args.dry_run, config_path=args.config,
+                         publish_file=args.publish_file)
     if args.ui_port:
         if (not _is_loopback(args.ui_host)
                 and not config.get("ui", {}).get("password_hash")

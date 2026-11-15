@@ -7,6 +7,8 @@
 #include <sync.h>
 #include <univalue.h>
 
+#include <functional>
+
 constexpr const CAmount exchange_rate_scale = COIN; // 100,000,000
 const std::string exchange_rates_config_file = "exchangerates.json";
 
@@ -124,6 +126,10 @@ public:
     //! Replace the whole whitelist from parsed JSON (asset label/hex -> rate).
     bool LoadFromJSON(std::map<std::string, UniValue> json, std::vector<std::string>& error);
 
+    //! Parse JSON (asset label/hex -> rate) into rates without writing the
+    //! whitelist, so a caller can validate before it commits to the write.
+    static bool ParseJSON(const std::map<std::string, UniValue>& json, std::map<CAsset, CAmount>& rates_out, std::vector<std::string>& errors);
+
     /** Replace the whole whitelist. Used by both an operator and a price-server
      *  sidecar — the node treats them identically. */
     void SetRates(const std::map<CAsset, CAmount>& rates);
@@ -137,5 +143,62 @@ public:
      *  to the out-of-box state instead. */
     void ClearRates();
 };
+
+/**
+ * SEQUENTIA: who writes the fee whitelist.
+ *
+ * A whitelist is static when it is written by hand (exchangerates.json,
+ * setfeeexchangerates, the desktop wallet), and dynamic when a price server
+ * updates it. A price server turns what a price feed API reports into a
+ * whitelist under its own admission rules; nothing ever goes from a price feed
+ * API to the whitelist without one. A node gets a dynamic whitelist in one of
+ * two ways: it is connected to a price server (-feepriceserver), its own or
+ * another operator's, and takes the list that server publishes; or a price
+ * server of its operator's pushes to it over RPC, which to the node is a write
+ * like any other.
+ *
+ * Exactly one writer at a time. While the node is connected to a price server,
+ * that server is the whitelist's only writer; the first write by anyone else
+ * ends the connection for good (see feepriceserver.h). The display
+ * reference-price feed (-referencepricesurl) never writes the whitelist.
+ */
+struct FeeListSource {
+    //! Connected to a price server: it is the whitelist's only writer.
+    bool connected{false};
+    //! The address of the price server's published list (when connected).
+    std::string url;
+    //! The address came from the chain's default rather than from the operator.
+    bool by_default{false};
+    //! A list from that server is in force (taken this run, or its cache).
+    bool have_list{false};
+    //! Unix time the list in force was taken from the server; 0 = never.
+    int64_t last_written{0};
+    //! The server's own "updated" time for the list in force; 0 = not stated.
+    int64_t list_published{0};
+    //! Unix time of the last request to the server; 0 = none yet.
+    int64_t last_attempt{0};
+    //! Why the last request did not change the list; empty after a success.
+    std::string last_error;
+    //! Why the node disconnected, when it did during this run.
+    std::string ended;
+};
+
+//! A snapshot of who writes the whitelist.
+FeeListSource GetFeeListSource();
+//! Replace the record of who writes the whitelist.
+void SetFeeListSource(const FeeListSource& source);
+//! Change it in place, under its lock.
+void UpdateFeeListSource(const std::function<void(FeeListSource&)>& fn);
+
+/** Write a price server's list into the whitelist, if and only if the node is
+ *  still connected to that same address. Checked and written under one lock,
+ *  so a list that was in flight when the operator took over is discarded
+ *  rather than written over the operator's list. */
+bool ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
+                             int64_t published, int64_t now);
+
+/** Disconnect from the price server, recording why.
+ *  @return true if the node was connected. */
+bool DisconnectFeePriceServer(const std::string& why);
 
 #endif // BITCOIN_EXCHANGERATES_H

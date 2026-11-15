@@ -734,5 +734,58 @@ class ShutdownLeavesTheWhitelistInPlace(unittest.TestCase):
         self.assertEqual(args[0], {}, "the opt-in still clears")
         self.assertIs(args[1], False, "and still without persisting, so a restart recovers")
 
+
+class ThePublishFileIsTheWhitelistNodesConnectTo(unittest.TestCase):
+    """--publish-file writes the body of GET /api/whitelist after every completed
+    poll: the list a node connected to this price server (-feepriceserver) takes.
+    It must be that body exactly, written whole, public-readable, and never an
+    empty list, which a connected node refuses."""
+
+    def poll_into(self, path, prices, srv=None):
+        tickers = list(LIVE_PRICES)
+        registry = {tk.upper(): (asset_id(tk), "example.test", 8) for tk in tickers}
+        feed = {tk.upper(): {"price": prices.get(tk), "market_cap": None, "volume_24h": None}
+                for tk in tickers}
+        real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
+        ps.fetch_registry = lambda url, timeout: dict(registry)
+        ps.fetch_prices = lambda source, timeout: dict(feed)
+        try:
+            srv = srv or ps.PriceServer(base_cfg(), dry_run=True, publish_file=path)
+            srv.poll_once()
+        finally:
+            ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
+        return srv
+
+    def test_the_file_is_the_api_body(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "feewhitelist.json")
+            srv = self.poll_into(path, LIVE_PRICES)
+            with open(path, encoding="utf8") as f:
+                published = json.load(f)
+            self.assertEqual(published, json.loads(json.dumps(ps._whitelist_payload(srv))))
+            self.assertEqual(published["rates"], srv.last_rates)
+            self.assertIsInstance(published["updated"], float)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+            self.assertFalse(os.path.exists(path + ".tmp"))
+
+    def test_nothing_is_written_before_a_round_admits_an_asset(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "feewhitelist.json")
+            self.poll_into(path, {})
+            self.assertFalse(os.path.exists(path), "an empty list is never published")
+
+    def test_an_empty_round_keeps_the_last_list_in_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "feewhitelist.json")
+            srv = self.poll_into(path, LIVE_PRICES)
+            good = dict(srv.last_rates)
+            self.poll_into(path, {}, srv=srv)
+            with open(path, encoding="utf8") as f:
+                self.assertEqual(json.load(f)["rates"], good)
+
+    def test_no_file_without_the_option(self):
+        srv = self.poll_into(None, LIVE_PRICES)
+        self.assertIsNone(srv.publish_file)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

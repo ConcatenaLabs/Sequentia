@@ -1,23 +1,34 @@
 # Sequentia price server
 
-A small, stdlib-only Python sidecar that keeps a Sequentia node's **fee-asset
-whitelist** up to date, and (optionally) republishes its prices to the world.
+A small, stdlib-only Python program that keeps Sequentia nodes' **fee
+whitelists** up to date. A whitelist written by hand is static; one a price
+server updates is dynamic.
 
-Each poll it:
+A price server takes what a **price feed API** reports, and filters and treats
+it under its own configuration. Each poll it:
 
 1. **discovers** the asset universe from the network's Asset Registry
    (ticker → asset id, issuer domain) — you never list assets by hand;
-2. **fetches prices** for those assets from one market-data API;
+2. **fetches prices** for those assets from one price feed API;
 3. applies your **admission rules** to decide which assets are allowed to pay
    transaction fees, and at what rate;
-4. **publishes** the result to your node(s) via the `setfeeexchangerates` RPC
-   with `persist=false`.
+4. **publishes** the resulting whitelist, in either or both of two ways:
+   - **to your own node(s)**, written over the `setfeeexchangerates` RPC with
+     `persist=false`;
+   - **to nodes that connect to it**: a node started with
+     `-feepriceserver=<address>` (or told `setfeepriceserver "<address>"`) asks
+     for the list this server publishes, at its `GET /api/whitelist` or in the
+     file it writes with `--publish-file`, and takes it as its whitelist. That
+     is how a node uses another operator's price server, and how every testnet
+     node uses the network's, at `http://sequentiatestnet.com/feewhitelist`.
 
-The node itself keeps a single whitelist and is unaware of all this — running
-this sidecar is what makes the whitelist "dynamic". Stop the sidecar and the
-whitelist just stops changing (each node keeps the last set it received; on a
-node restart it falls back to the operator's static file). Nothing here touches
-consensus: it only decides which assets your node accepts fees in.
+Nothing goes from a price feed API to a node's whitelist without a price
+server: a node refuses an answer that is not a price server's published list.
+Stop the server and the whitelists it writes stop changing (each node keeps the
+last list it received; a node it writes to over RPC falls back to its operator's
+static file at a restart, and a node connected to it keeps its cached list).
+Nothing here touches consensus: it only decides which assets a node accepts
+fees in.
 
 No dependencies — just Python 3. On `chain=test` and `chain=sequentia` the open fee market is always on; a custom chain needs `-con_any_asset_fees=1`.
 
@@ -29,6 +40,8 @@ python3 price_server.py --config config.json --once          # one poll, print, 
 python3 price_server.py --config config.json --dry-run       # decide + log, don't publish
 python3 price_server.py --config config.json --ui-port 8090  # + web UI on http://127.0.0.1:8090
 python3 price_server.py --config config.json --set-password  # set the admin password, then exit
+python3 price_server.py --config config.json --publish-file /srv/feewhitelist/feewhitelist.json
+                                                             # + publish the whitelist for nodes that connect
 ```
 
 Copy `config.example.json` to `config.json` as a starting point; its defaults
@@ -107,7 +120,10 @@ without a `price` field.)
 
 ### `GET /api/whitelist`
 
-The rates as pushed to the nodes, plus the per-asset decisions:
+The rates as pushed to the nodes, plus the per-asset decisions. This is also
+the list a node connected to this server takes (`-feepriceserver`): it reads
+`updated` and `rates`, takes the list whole or not at all, and refuses one that
+is empty or older than the list it holds.
 
 ```json
 {
@@ -324,6 +340,21 @@ keep it private.
   }
 }
 ```
+
+## Publishing the whitelist for nodes that connect
+
+`--publish-file <path>` writes the body of `GET /api/whitelist` to a file after
+every completed poll, whole (a temporary file renamed over the old one) and
+world-readable, so a web server can publish it without exposing this server's
+own web UI. Nothing is written until a poll has admitted at least one asset. It
+is written in `--dry-run` too, since that publishes nothing to any node. The
+network's price server publishes its file this way at
+`http://sequentiatestnet.com/feewhitelist`; a node connects to it with
+`-feepriceserver=<that address>`.
+
+Serve the file, never the admin UI: behind a reverse proxy every request comes
+from the proxy's own address, so a UI with no password set would treat the
+whole world as the local admin.
 
 ## Deploying on a server (systemd example)
 

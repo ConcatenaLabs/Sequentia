@@ -345,7 +345,7 @@ BOOST_AUTO_TEST_CASE(fresh_chains_have_no_utxo_recovery)
 //! the network's fee currency by default, which is the one privilege the open
 //! fee market withholds. On the mainnet the operator writes the whitelist, by
 //! hand or through a price server, before the node will send or relay anything.
-//! On the testnet the node follows the network's price server and takes the list
+//! On the testnet the node is connected to the network's price server and takes the list
 //! it publishes. Custom chains keep the seed unless -con_seed_fee_whitelist=0.
 BOOST_AUTO_TEST_CASE(fee_whitelist_is_seeded_on_no_public_chain)
 {

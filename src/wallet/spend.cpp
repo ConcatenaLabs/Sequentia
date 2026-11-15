@@ -1131,7 +1131,15 @@ static bool CreateTransactionInternal(
         // asset, and "choose a different fee asset" would send the user round
         // every asset in turn. Say what is actually missing.
         if (!ExchangeRateMap::GetInstance().HasAcceptedAsset()) {
-            error = _("This node accepts no asset for transaction fees yet, so nothing can be sent. Write the fee whitelist first: list assets and prices in exchangerates.json or with setfeeexchangerates, or set up a price server. Receiving is not affected.");
+            const FeeListSource source = GetFeeListSource();
+            if (source.connected) {
+                // Waiting for the price server is not the operator's mistake,
+                // and telling them to write the list would end the connection.
+                error = strprintf(_("This node is connected to the price server at %s, which has not sent a fee whitelist yet (%s), so nothing can be sent until it does. Receiving is not affected."),
+                                  source.url, source.last_error.empty() ? "no answer yet" : source.last_error);
+                return false;
+            }
+            error = _("This node accepts no asset for transaction fees yet, so nothing can be sent. Write the fee whitelist first: list assets and prices in exchangerates.json or with setfeeexchangerates, or connect to a price server (setfeepriceserver). Receiving is not affected.");
             return false;
         }
         CAmount probe = ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue();

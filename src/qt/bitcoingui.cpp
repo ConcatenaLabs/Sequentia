@@ -71,6 +71,7 @@
 #include <QMenuBar>
 #include <QGridLayout>
 #include <QSpacerItem>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QProgressDialog>
@@ -1119,24 +1120,88 @@ void BitcoinGUI::promptFeeSetupIfNeeded()
     for (const FeeAssetInfo& info : m_node.listFeeAssetInfo()) {
         if (info.accepted) return;
     }
+    // A node connected to a price server is waiting for its list, which is
+    // not something the user has to set up; the Send form and the Fee
+    // acceptance dialog say what it is waiting for.
+    if (feePriceServerState()["connected"].isTrue()) return;
     // Nothing is accepted, so nothing can be sent or relayed. That is how a node
-    // starts on a chain that does not seed the whitelist, and the user should
-    // hear it here rather than from a refused payment.
+    // starts on a chain with no default price server (the mainnet), and the
+    // user should hear it here rather than from a refused payment.
     QMessageBox box(QMessageBox::Information, tr("Set up fee acceptance"),
                     tr("This node does not yet accept any asset for transaction fees, so it cannot "
                        "send or relay transactions. You can receive in the meantime.\n\n"
-                       "Choose which assets it accepts and what each is worth. You can set the "
-                       "prices by hand, or set up the price server to keep them current."),
+                       "Its fee whitelist says which assets it accepts and what each is worth. Write "
+                       "it by hand, and it is static; or connect to a price server, another "
+                       "operator's or your own, and it is dynamic: the price server keeps it updated."),
                     QMessageBox::NoButton, this);
-    QPushButton* setup = box.addButton(tr("Set up now"), QMessageBox::AcceptRole);
+    QPushButton* by_hand = box.addButton(tr("Write it by hand"), QMessageBox::AcceptRole);
+    QPushButton* connect_to = box.addButton(tr("Connect to a price server…"), QMessageBox::AcceptRole);
+    QPushButton* run_own = box.addButton(tr("Run my own price server"), QMessageBox::AcceptRole);
     box.addButton(tr("Later"), QMessageBox::RejectRole);
+    // A message box sizes its buttons to its text column, which clips labels
+    // this long; each button asks for the width its own label needs.
+    for (QPushButton* b : {by_hand, connect_to, run_own}) {
+        b->setMinimumWidth(GUIUtil::TextWidth(b->fontMetrics(), b->text()) + 40);
+    }
     box.exec();
-    if (box.clickedButton() == setup) gotoFeePolicyDialog();
+    if (box.clickedButton() == by_hand) gotoFeePolicyDialog();
+    else if (box.clickedButton() == connect_to) connectToPriceServer();
+    else if (box.clickedButton() == run_own) launchPriceServer();
+}
+
+UniValue BitcoinGUI::feePriceServerState()
+{
+    try {
+        return m_node.executeRpc("getfeepriceserver", UniValue(UniValue::VARR), std::string());
+    } catch (...) {
+        return UniValue(UniValue::VOBJ);
+    }
+}
+
+void BitcoinGUI::connectToPriceServer()
+{
+    const UniValue state = feePriceServerState();
+    QString suggestion = state["network_price_server"].isStr() ? QString::fromStdString(state["network_price_server"].get_str()) : QString();
+    for (;;) {
+        bool ok = false;
+        const QString url = QInputDialog::getText(this, tr("Connect to a price server"),
+            tr("The address of the price server's published whitelist, e.g. http://host:8090/api/whitelist. "
+               "A price feed's address is not a price server and is refused."),
+            QLineEdit::Normal, suggestion, &ok).trimmed();
+        if (!ok || url.isEmpty()) return;
+        UniValue params(UniValue::VARR);
+        params.push_back(url.toStdString());
+        try {
+            m_node.executeRpc("setfeepriceserver", params, std::string());
+            QMessageBox::information(this, tr("Connected to a price server"),
+                tr("This node is connected to the price server at %1, and its whitelist is that server's.").arg(url));
+            return;
+        } catch (const UniValue& e) {
+            const QString why = e.isObject() && e.exists("message") ? QString::fromStdString(e["message"].get_str()) : QString::fromStdString(e.write());
+            if (QMessageBox::warning(this, tr("Connect to a price server"), why,
+                                     QMessageBox::Retry | QMessageBox::Cancel) != QMessageBox::Retry) return;
+            suggestion = url;
+        } catch (const std::exception& e) {
+            QMessageBox::warning(this, tr("Connect to a price server"), QString::fromStdString(e.what()));
+            return;
+        }
+    }
 }
 
 void BitcoinGUI::launchPriceServer()
 {
     showNormalIfMinimized();
+    {
+        const UniValue state = feePriceServerState();
+        if (state["connected"].isTrue() &&
+            QMessageBox::question(this, tr("Run your own price server?"),
+                tr("This node is connected to the price server at %1. Your own price server writes this "
+                   "node's whitelist instead, and its first write disconnects the node from %1.\n\n"
+                   "Run your own price server?").arg(QString::fromStdString(state["url"].get_str())),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
+            return;
+        }
+    }
     const QString appDir = QCoreApplication::applicationDirPath();
 
     // Locate the bundled sidecar (see GUIUtil::findPriceServerFile for the search order).
