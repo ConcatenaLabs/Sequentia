@@ -700,7 +700,7 @@ struct Plan {
     int64_t micros{0};
 };
 
-Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& view, bool build)
+Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& view, bool build)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_lost_mutex)
 {
     Plan plan;
@@ -872,6 +872,43 @@ Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& vie
 }
 
 } // namespace
+
+//! The plan is a function of the parent (its chain, its coins, the records
+//! on it), the candidate's anchor height and the store. It is computed once
+//! for each and shared by the template, the block's test, every proposal on
+//! the same parent and the block's connection.
+struct PlanMemo {
+    uint256 prev;
+    uint32_t anchor_h{0};
+    uint256 store;
+    Plan plan;
+};
+std::optional<PlanMemo> g_plan_memo GUARDED_BY(g_lost_mutex);
+
+uint256 StoreFingerprint() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    CHashWriter hw(SER_GETHASH, 0);
+    hw << g_gen;
+    for (const auto& [h, b] : g_blocks) {
+        hw << h << b.prot << (uint8_t)b.anchor_state << (uint64_t)b.btc_headers.size() << b.fork_height << b.epoch;
+    }
+    return hw.GetHash();
+}
+
+Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, CCoinsViewCache& view, bool /*build*/)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_lost_mutex)
+{
+    const uint256 store = StoreFingerprint();
+    if (g_plan_memo && g_plan_memo->prev == prev->GetBlockHash() && g_plan_memo->anchor_h == anchor_h && g_plan_memo->store == store) {
+        Plan hit = g_plan_memo->plan;
+        hit.summary += "; reused";
+        return hit;
+    }
+    Plan plan = PlanCompute(prev, anchor_h, view, /*build=*/true);
+    if (!plan.summary.empty()) LogPrint(BCLog::VALIDATION, "Lost blocks: plan computed on %s at height %d: %s\n", prev->GetBlockHash().ToString(), prev->nHeight + 1, plan.summary);
+    g_plan_memo = PlanMemo{prev->GetBlockHash(), anchor_h, store, plan};
+    return plan;
+}
 
 std::vector<std::optional<LostRecord>> LostParseRecords(const CBlock& block)
 {

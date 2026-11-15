@@ -2969,6 +2969,8 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
     const auto& fedpegscripts = GetValidFedpegScripts(prev, params, true);
     PosRecordState records;
     std::set<uint256> later, fails;
+    int64_t t_inputs = 0, t_scripts = 0, t_rest = 0, t_mark = GetTimeMicros();
+    const auto lap = [&](int64_t& acc) { const int64_t now = GetTimeMicros(); acc += now - t_mark; t_mark = now; };
     for (const CTransactionRef& ref : txs) {
         const CTransaction& tx = *ref;
         const auto put = [&](LostTxCat c, const std::string& why) {
@@ -3030,14 +3032,22 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
             if (!PosCheckTxRecords(tx, spent, height, params, next_records, reason, debug)) { put(LostTxCat::FAILS, reason); continue; }
             records = std::move(next_records);
         }
+        lap(t_inputs);
         PrecomputedTransactionData txdata(params.hashGenesisBlock);
-        if (!CheckInputScripts(tx, tx_state, view, flags, false, false, txdata)) { put(LostTxCat::FAILS, tx_state.GetRejectReason()); continue; }
+        const bool scripts_ok = CheckInputScripts(tx, tx_state, view, flags, false, false, txdata);
+        lap(t_scripts);
+        if (!scripts_ok) { put(LostTxCat::FAILS, tx_state.GetRejectReason()); continue; }
         // As ConnectBlock counts it (legacy, P2SH and witness), before the
         // inputs are spent.
         if (sigops) sigops->push_back(GetTransactionSigOpCost(tx, view, flags));
         CTxUndo undo;
         UpdateCoins(tx, view, undo, height);
         put(LostTxCat::DUE, "");
+        lap(t_rest);
+    }
+    if (txs.size() >= 100) {
+        LogPrint(BCLog::VALIDATION, "Lost blocks: classified %u transactions: inputs, amounts, locks and records %d us, scripts %d us, coins %d us\n",
+                 (unsigned)txs.size(), (int)t_inputs, (int)t_scripts, (int)t_rest);
     }
     return out;
 }
