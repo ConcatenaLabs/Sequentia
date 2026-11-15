@@ -18,7 +18,11 @@ feature_pos_lost_blocks.py. Cases (LOST_CASES):
       list: claimed by default, left unclaimed with -poslostleaveunlisted;
   r5  more due transactions than one block holds, bound by signature
       operations: the longest prefix that fits, refused when empty or short,
-      nothing else while it is cut, ordinary transactions once it is done.
+      nothing else while it is cut, ordinary transactions once it is done;
+  r6  the abuse: the seller fills its own certified block with transactions
+      paying fees in an asset only it lists; the block is lost; Bitcoin goes
+      there, back and there again: each is mined once, and ordinary
+      transactions follow as soon as the due set is done.
 """
 
 import os
@@ -31,7 +35,8 @@ from test_framework.messages import tx_from_hex, CTxInWitness
 from test_framework.script import CScript, OP_0, OP_1, OP_IF, OP_ENDIF, OP_DROP, OP_CHECKMULTISIG
 from test_framework.util import assert_equal
 
-CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5").split(",")
+CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6").split(",")
+ABUSE_TXS = int(os.environ.get("LOST_ABUSE_TXS", "340"))
 
 
 class LostReplayTest(LostBlocksTest):
@@ -399,6 +404,114 @@ class LostReplayTest(LostBlocksTest):
         self.record("r5", "outcome", "F+1 (%s): the %d of the prefix and nothing else; F+2 (%s): the other %d, then %d ordinary transaction(s)%s" %
                     (h1["hash"][:12], k, h2["hash"][:12], n - k, len(t2) - 1 - (n - k), " (the waiting one among them)" if o_id in t2 else ""))
         assert o_id in t2
+        self.realign()
+
+    # ---------------------------------------------------------------- r6
+    def chain_txs(self, node, from_height):
+        """txid -> [heights] over the active chain from `from_height`."""
+        seen = {}
+        for hh in range(from_height, node.getblockcount() + 1):
+            for t in node.getblock(node.getblockhash(hh))["tx"][1:]:
+                seen.setdefault(t, []).append(hh)
+        return seen
+
+    def case_r6(self):
+        self.log.info("(r6) the seller fills its own certified block with fees in its own asset; there, back and there again")
+        a = self.nodes[SELLER]
+        n1 = self.nodes[1]
+        m = ABUSE_TXS
+        iss = a.issueasset(assetamount=Decimal("100000"), tokenamount=0, blind=False, fee_asset="bitcoin")
+        self.produce(SELLER, ALL_KEYS, txs_must=[iss["txid"]])
+        self.sync_tips(range(N))
+        X = iss["asset"]
+        rates = a.getfeeexchangerates()
+        rates[X] = 100000000
+        a.setfeeexchangerates(rates)
+        # An ordinary transaction, made now, sent to the honest nodes once the replay starts.
+        coin = self.fund()
+        o_hex = self.spend(coin, n1.getnewaddress(), Decimal("0.0001"))
+        o_id = tx_from_hex(o_hex).rehash()
+        # m coins of X, one per abusive transaction.
+        utxo = [u for u in a.listunspent() if u["asset"] == X][0]
+        addrs = [a.getnewaddress() for _ in range(m)]
+        outs = [{ad: Decimal("1"), "asset": X} for ad in addrs]
+        chg = a.getnewaddress()
+        outs.append({chg: Decimal(str(utxo["amount"])) - m - Decimal("0.01"), "asset": X})
+        outs.append({"fee": Decimal("0.01"), "fee_asset": X})
+        assets = set(addrs)
+        raw = a.createrawtransaction([{"txid": utxo["txid"], "vout": utxo["vout"]}], outs)
+        fan = a.sendrawtransaction(a.signrawtransactionwithwallet(raw)["hex"])
+        self.produce(SELLER, ALL_KEYS, txs_must=[fan])
+        self.sync_tips(range(N))
+        fdec = a.getrawtransaction(fan, 1)
+        dest = n1.getnewaddress()
+        abuse = []
+        for o in fdec["vout"]:
+            if o["scriptPubKey"].get("address") not in assets:
+                continue
+            r = a.createrawtransaction([{"txid": fan, "vout": o["n"]}], [{dest: Decimal("0.99999"), "asset": X}, {"fee": Decimal("0.00001"), "fee_asset": X}])
+            abuse.append(a.sendrawtransaction(a.signrawtransactionwithwallet(r)["hex"]))
+        assert_equal(len(abuse), m)
+        self.btc_mine(1)
+        f_height = n1.getblockcount()
+        L = self.produce(SELLER, ALL_KEYS, leaders=[SELLER])
+        in_l = [t for t in L["block"]["tx"][1:] if t in abuse]
+        Lw = L["block"]["weight"]
+        assert_equal(len(in_l), m)
+        self.produce(SELLER, ALL_KEYS, leaders=[SELLER])
+        self.sync_tips(range(N))
+        assert n1.getblockheader(L["hash"])["poscertified"]
+        self.record("r6", "L", "the seller's certified block at height %d: %d of its own transactions paying fees in X, weight %d of %d" %
+                    (L["height"], len(in_l), Lw, 400000))
+        since = self.lose("r6", [L["hash"]])
+        n1.sendrawtransaction(o_hex)
+        hs = []
+        while True:
+            h = self.produce(1, ALL_KEYS, leaders=[1, 2, 3, 4])
+            txs = self.tx_ids(n1, h["hash"])
+            carried = [t for t in txs[1:] if t in abuse]
+            hs.append((h["height"], len(carried), o_id in txs, n1.getblock(h["hash"])["weight"]))
+            if o_id in txs or len(hs) > 6:
+                break
+        self.sync_tips(HONEST + [LATE])
+        seen = self.chain_txs(n1, f_height + 1)
+        assert all(len(seen.get(t, [])) == 1 for t in in_l)
+        self.record("r6", "there", "honest blocks (height, carried, ordinary tx in it, weight): %s; each of the %d mined once" % (hs, len(in_l)))
+        assert o_id in self.tx_ids(n1, self.nodes[1].getblockhash(hs[-1][0]))
+        # Back: Bitcoin returns to L's branch.
+        b = self.btc()
+        orig, new = self.btc_orig_first, self.btc_new
+        b.invalidateblock(new[0])
+        b.reconsiderblock(orig)
+        self.btc_mine(3)
+        self.wait_until(lambda: all(self.in_chain(self.nodes[i], L["hash"]) for i in HONEST), timeout=120)
+        h_back = self.produce(1, ALL_KEYS, leaders=[1, 2, 3, 4])
+        self.sync_tips(HONEST)
+        seen = self.chain_txs(n1, f_height + 1)
+        twice = [t for t in in_l + [o_id] if len(seen.get(t, [])) != 1]
+        self.record("r6", "back", "L's branch active again on every honest node; next block %d carries %d abusive and the ordinary tx: %s; each of the %d and the ordinary tx in the chain once: %s" %
+                    (h_back["height"], len([t for t in self.tx_ids(n1, h_back["hash"]) if t in abuse]), o_id in seen, len(in_l), not twice))
+        assert not twice
+        # There again: a third Bitcoin branch; both earlier branches are lost.
+        b.invalidateblock(orig)
+        self.btc_mine(4)
+        self.wait_until(lambda: all(not self.in_chain(self.nodes[i], L["hash"]) for i in HONEST), timeout=120)
+        self.wait_lost(L["hash"], HONEST)
+        hs2 = []
+        while True:
+            h = self.produce(1, ALL_KEYS, leaders=[1, 2, 3, 4])
+            txs = self.tx_ids(n1, h["hash"])
+            hs2.append((h["height"], len([t for t in txs[1:] if t in abuse]), o_id in txs, n1.getblock(h["hash"])["weight"]))
+            if len(hs2) >= 3:
+                break
+        self.sync_tips(HONEST + [LATE])
+        seen = self.chain_txs(n1, f_height + 1)
+        counts = {}
+        for t in in_l + [o_id]:
+            counts[len(seen.get(t, []))] = counts.get(len(seen.get(t, [])), 0) + 1
+        self.record("r6", "there again", "honest blocks (height, carried, ordinary tx, weight): %s; occurrences in the chain of the %d abusive and the ordinary tx: %s" %
+                    (hs2, len(in_l), counts))
+        assert_equal(counts, {1: len(in_l) + 1})
         self.realign()
 
     # ------------------------------------------------------------ b1, b2
