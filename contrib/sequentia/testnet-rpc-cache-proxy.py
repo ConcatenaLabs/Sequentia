@@ -23,6 +23,15 @@ The parent (Bitcoin testnet) only changes every ~10 minutes, so a 10 s TTL is
 far fresher than the anchor needs. Auth headers are ignored (the public endpoint
 needs none) — point the nodes' -mainchainrpcuser/-password at anything.
 
+What it keeps about its callers: the time each client address last made a
+call, in memory only, for a day (SEEN_TTL); an entry older than that is
+dropped, and a restart forgets them all. Nothing else is recorded, and no
+request is logged. The record answers one question, whether a given address
+has been using this endpoint lately, and only to the machine the proxy runs
+on: GET /last-seen (every address and its last call, unix seconds) or
+GET /last-seen?addr=<address> ({"addr": ..., "last": <seconds or null>}),
+answered to loopback callers only; anyone else gets 404.
+
 Run it and leave it open:  python3 testnet-rpc-cache-proxy.py
 """
 
@@ -33,6 +42,7 @@ import socketserver
 import subprocess
 import threading
 import time
+import urllib.parse
 
 # Upstream Bitcoin RPC endpoint and listen address are env-configurable so the
 # same proxy serves testnet3, testnet4, or any gateway:
@@ -54,6 +64,37 @@ _cache = {}                      # key -> (expiry, result_obj)
 _locks = {}                      # key -> Lock (in-flight dedup)
 _guard = threading.Lock()
 _stats = {"hits": 0, "upstream": 0}
+
+SEEN_TTL = 86400.0               # seconds a caller's last-call time is kept
+_seen = {}                       # client address -> unix time of its last call
+_seen_guard = threading.Lock()
+_seen_pruned = [0.0]
+
+
+def _norm_addr(addr):
+    """An IPv4 caller on a dual-stack socket arrives as ::ffff:a.b.c.d."""
+    return addr[7:] if addr.startswith("::ffff:") and "." in addr else addr
+
+
+def _note_caller(addr, now=None):
+    now = time.time() if now is None else now
+    with _seen_guard:
+        _seen[_norm_addr(addr)] = now
+        if now - _seen_pruned[0] > 60:
+            _seen_pruned[0] = now
+            for a in [a for a, t in _seen.items() if now - t > SEEN_TTL]:
+                del _seen[a]
+
+
+def _last_seen(now=None):
+    now = time.time() if now is None else now
+    with _seen_guard:
+        return {a: int(t) for a, t in _seen.items() if now - t <= SEEN_TTL}
+
+
+def _is_loopback(addr):
+    a = _norm_addr(addr)
+    return a == "::1" or a.startswith("127.")
 
 # When this proxy is exposed beyond localhost (e.g. over a tailnet to an external
 # tester), block everything that isn't a read-only block/chain query: node
@@ -108,7 +149,29 @@ def _with_id(obj, rid):
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def do_GET(self):
+        url = urllib.parse.urlsplit(self.path)
+        if url.path != "/last-seen" or not _is_loopback(self.client_address[0]):
+            self._reply(404, b'{"error":"not found"}')
+            return
+        seen = _last_seen()
+        q = urllib.parse.parse_qs(url.query)
+        if "addr" in q:
+            a = _norm_addr(q["addr"][0])
+            out = {"addr": a, "last": seen.get(a)}
+        else:
+            out = seen
+        self._reply(200, json.dumps(out).encode())
+
+    def _reply(self, code, out):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
     def do_POST(self):
+        _note_caller(self.client_address[0])
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n)
         out = self._serve(body)
