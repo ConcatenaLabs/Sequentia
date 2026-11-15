@@ -32,10 +32,10 @@ from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, p2p_port, rpc_port
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
-CASES = os.environ.get("PV_CASES", "a,b,c,f,g").split(",")
-RESULTS = os.environ.get("PV_RESULTS", "")
-BASE_BIN = os.environ.get("PV_BASE_BIN", "")
-W = int(os.environ.get("PV_WINDOW", "6"))
+CASES = os.environ.get("LOST_CASES", "a,b,c,f,g").split(",")
+RESULTS = os.environ.get("LOST_RESULTS", "")
+BASE_BIN = os.environ.get("LOST_BASE_BIN", "")
+W = int(os.environ.get("LOST_WINDOW", "6"))
 N = 6
 SELLER = 0
 LATE = 5
@@ -56,7 +56,7 @@ class LostBlocksTest(BitcoinTestFramework):
         self.num_nodes = N
         self.stakers = [make_key() for _ in range(N)]
         self.results = {}
-        self.base_nodes = set(int(x) for x in os.environ.get("PV_BASE_NODES", "").split(",") if x)
+        self.base_nodes = set(int(x) for x in os.environ.get("LOST_BASE_NODES", "").split(",") if x)
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -625,7 +625,7 @@ class LostBlocksTest(BitcoinTestFramework):
         self.realign()
 
     def case_d(self):
-        """Nodes without the rule (PV_BASE_NODES run the base binary)."""
+        """Nodes without the rule (LOST_BASE_NODES run the base binary)."""
         self.log.info("(d) a network with nodes that do not run the rule: %s", sorted(self.base_nodes))
         st = self.gap("d", online=list(range(N)))
         rule = [i for i in HONEST + [LATE] if i not in self.base_nodes]
