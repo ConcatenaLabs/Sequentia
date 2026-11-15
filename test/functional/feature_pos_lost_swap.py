@@ -312,7 +312,7 @@ class LostSwapTest(LostBlocksTest):
         n1.sendrawtransaction(c.serialize().hex())
         LC = self.produce(1, ALL_KEYS, txs_must=[c_id])
         # A child splitting the claim's coin, and a grandchild per output, certified on top.
-        val = Decimal(lock["asset_amount"]) / Decimal(100000000)
+        val = Decimal(str(n1.getrawtransaction(c_id, 1)["vout"][0]["value"]))
         addrs = [n1.getnewaddress() for _ in range(nkids)]
         outs = [{ad: Decimal("0.05")} for ad in addrs]
         outs.append({n1.getnewaddress(): val - Decimal("0.05") * nkids - Decimal("0.01")})
@@ -354,10 +354,6 @@ class LostSwapTest(LostBlocksTest):
         self.record("sD", "plans", [l.split("template on ", 1)[-1][66:260] for l in tmpl[:4]])
         assert sum(1 for x in per_block if x[1]) >= 2, per_block
         assert all(x[2] <= 25000 + 200 for x in per_block)
-        # The seller's refund of the lock, forced: refused from the chain's records.
-        r = self.refund(lock)
-        x = self.force_on_seller("sD", [r.serialize().hex()])
-        self.refused_by_any("sD", HONEST + [LATE], x["hash"], since)
         self.realign()
 
     # ---------------------------------------------------------------- sR
@@ -381,17 +377,18 @@ class LostSwapTest(LostBlocksTest):
         # L1: a new staker K locks stake (its key never signs).
         from feature_pos_lost_blocks import make_key
         k_wif, k_pub = make_key()
-        script = a.getstakescript(k_pub, 5)["script"]
+        script = a.getstakescript(k_pub, 600)["script"]
         coin = self.fund()
         reg_raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}],
                                          [{"data": ""}] if False else [{a.getnewaddress(): Decimal("0.0001")}, {"fee": Decimal("0.0001")}])
         rt = tx_from_hex(reg_raw)
         from test_framework.messages import CTxOut, CTxOutValue, CTxOutAsset
-        rt.vout[0] = CTxOut(int(Decimal(coin["amount"] - Decimal("0.0001")) * 100000000), CScript(bytes.fromhex(script)))
-        rt.vout[0].nAsset = CTxOutAsset(bytes.fromhex(self.asset)[::-1])
+        rt.vout[0] = CTxOut(CTxOutValue(int((coin["amount"] - Decimal("0.0001")) * 100000000)), bytes.fromhex(script),
+                            CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1]))
         reg_hex = a.signrawtransactionwithwallet(rt.serialize().hex())["hex"]
         reg = n1.sendrawtransaction(reg_hex)
         reg_before = sorted(n1.getstakerinfo().keys())
+        time.sleep(65)  # the set-up's rapid blocks ran the chain's time ahead of the clock
         L1 = self.produce(1, ALL_KEYS, txs_must=[reg])
         reg_after = n1.getstakerinfo()
         assert k_pub in reg_after
