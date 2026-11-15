@@ -3478,7 +3478,20 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     }
 
     // SEQUENTIA: lost blocks (pos_lost.h). Every block, certified or not.
-    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, state)) {
+    // Evidence held off the chain bears only on a candidate that extends the
+    // active tip and has no certified descendant, and never during initial
+    // block download: it can stop this node accepting a block, never undo one,
+    // and never judge history.
+    const auto lost_certified_descendant = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        if (fJustCheck) return false;
+        for (const auto& entry : m_blockman.m_block_index) {
+            const CBlockIndex* p = entry.second;
+            if (p->nHeight <= pindex->nHeight || !p->PosCarriesQuorum()) continue;
+            if (p->GetAncestor(pindex->nHeight) == pindex) return true;
+        }
+        return false;
+    };
+    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, IsInitialBlockDownload(), lost_certified_descendant, state)) {
         return error("%s: LostCheckBlock: %s", __func__, state.ToString());
     }
 

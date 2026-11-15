@@ -29,6 +29,23 @@
 using node::ReadBlockFromDisk;
 
 namespace {
+//! The Bitcoin daemon's block count.
+bool GetMainchainBlockCount(int& count)
+{
+    try {
+        const UniValue reply = CallMainChainRPC("getblockcount", UniValue(UniValue::VARR));
+        if (!find_value(reply, "error").isNull()) return false;
+        const UniValue result = find_value(reply, "result");
+        if (!result.isNum()) return false;
+        count = result.get_int();
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+} // namespace
+
+namespace {
 
 enum class AnchorState { UNKNOWN, OK, STALE };
 
@@ -75,6 +92,7 @@ std::vector<std::pair<const CBlockIndex*, std::shared_ptr<const CBlock>>> g_pend
 bool g_ignore{false};
 uint32_t g_window{DEFAULT_POS_LOST_WINDOW};
 uint64_t g_last_scan_gen{0};
+bool g_refused_scanned{false};
 int64_t g_last_replay{0};
 
 fs::path LostPath() { return gArgs.GetDataDirNet() / "lostblocks.dat"; }
@@ -259,15 +277,30 @@ void LostShutdown()
 void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block)
 {
     AssertLockHeld(::cs_main);
-    if (!g_con_pos || !pindex || !block) return;
-    g_pending.emplace_back(pindex, block);
+    if (!g_con_pos || !g_con_bitcoin_anchor || !g_validate_anchor || !pindex || !block) return;
+    // Held durably before cs_main is released, so before this node signs
+    // anything after the disconnect: an unclean stop cannot lose it.
+    LOCK(g_lost_mutex);
+    const uint256 h = pindex->GetBlockHash();
+    if (g_blocks.count(h)) return;
+    LostBlk b = MakeBlk(block, pindex->nHeight);
+    b.certified = pindex->PosCarriesQuorum();
+    b.own = true;
+    g_blocks.emplace(h, std::move(b));
+    WriteFile();
 }
 
-bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state)
+bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
+                    const std::function<bool()>& certified_descendant, BlockValidationState& state)
 {
-    if (!LostActive() || !pindexPrev) return true;
+    if (!LostActive() || !pindexPrev || ibd) return true;
     LOCK(g_lost_mutex);
     if (auto why = ViolationLocked(block, pindexPrev)) {
+        if (certified_descendant()) {
+            LogPrintf("Lost blocks: block %s at height %d breaks the rule but has a certified descendant; the evidence does not bear on it: %s\n",
+                      block.GetHash().ToString(), pindexPrev->nHeight + 1, *why);
+            return true;
+        }
         LogPrintf("Lost blocks: refusing block %s at height %d: %s\n", block.GetHash().ToString(),
                   pindexPrev->nHeight + 1, *why);
         return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-txns-lost-respend", *why);
@@ -326,11 +359,8 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     uint32_t parent_anchor_h = 0;
     uint256 parent_anchor;
     bool parent_in_store = false;
-    uint32_t tip_anchor_h = 0;
     {
         LOCK(cs_main);
-        const CBlockIndex* tip = chainman.ActiveChain().Tip();
-        tip_anchor_h = tip ? tip->m_anchor_height : 0;
         const CBlockIndex* p = chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock);
         if (p && chainman.ActiveChain().Contains(p)) {
             height = p->nHeight + 1;
@@ -351,7 +381,8 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     }
     if (g_con_blockheightinheader && (uint32_t)height != block.block_height) return "bad-height";
     if (block.m_anchor_height < parent_anchor_h) return "bad-anchor-not-monotonic";
-    if (tip_anchor_h > block.m_anchor_height + POS_LOST_KEEP_WINDOWS * g_window) return "expired";
+    int btc_h = 0;
+    if (GetMainchainBlockCount(btc_h) && (uint32_t)btc_h > block.m_anchor_height + g_window) return "expired";
     // Where its anchor stands: a block of a branch Bitcoin left, or the child
     // of one. A node whose daemon never saw the stale Bitcoin block learns it
     // from the headers carried with the evidence; they cost real work.
@@ -454,20 +485,22 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
     }
     std::map<uint256, AnchorState> verdicts;
     for (const auto& [h, a] : anchors) verdicts[h] = CachedVerdict(a.first, a.second);
+    // The lapse is read from Bitcoin's height, never from the tip's anchor: a
+    // tip that cannot advance would otherwise hold a refusal for ever.
+    int btc_h = -1;
+    if (!GetMainchainBlockCount(btc_h)) btc_h = -1;
     // 4) Which blocks are lost, and the outpoints they bind.
     bool changed = false;
     std::vector<uint256> need_headers;
     {
         LOCK2(cs_main, g_lost_mutex);
-        const CBlockIndex* tip = chainman.ActiveChain().Tip();
-        const uint32_t tip_anchor_h = tip ? tip->m_anchor_height : 0;
         for (auto it = g_blocks.begin(); it != g_blocks.end();) {
             LostBlk& b = it->second;
             auto v = verdicts.find(it->first);
             if (v != verdicts.end() && v->second != AnchorState::UNKNOWN) b.anchor_state = v->second;
             const CBlockIndex* self = chainman.m_blockman.LookupBlockIndex(b.hash);
             const bool active = self && chainman.ActiveChain().Contains(self);
-            const bool expired = tip_anchor_h > b.anchor_h + POS_LOST_KEEP_WINDOWS * g_window;
+            const bool expired = btc_h >= 0 && (uint32_t)btc_h > b.anchor_h + g_window;
             if (active || expired) {
                 LogPrint(BCLog::VALIDATION, "Lost blocks: dropping %s (%s)\n", b.hash.ToString(), active ? "on the active chain" : "past the window");
                 it = g_blocks.erase(it);
@@ -563,7 +596,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
     {
         LOCK(g_lost_mutex);
         gen = g_gen;
-        any = !g_spends.empty() || !g_refused.empty();
+        any = !g_spends.empty() || !g_refused.empty() || !g_refused_scanned;
     }
     if (!any) return;
     // 5) The mempool: drop what conflicts, put lost transactions back, first in
@@ -604,27 +637,22 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             }
         }
     }
-    if (gen == g_last_scan_gen && !changed) return;
+    if (gen == g_last_scan_gen && !changed && g_refused_scanned) return;
     g_last_scan_gen = gen;
-    // 6) Judge again: a block of the active chain that the evidence now binds
-    //    (evidence that arrived late), and every block refused before.
-    CBlockIndex* lowest_bad = nullptr;
+    // 6) Judge again every block refused before. Nothing on the active chain
+    //    is judged again: evidence can stop a block from being accepted, and
+    //    never undoes one (forward-only).
     std::vector<CBlockIndex*> revive;
     {
         LOCK(cs_main);
-        int floor = std::numeric_limits<int>::max();
-        {
-            LOCK(g_lost_mutex);
-            for (const auto& [o, v] : g_spends) for (const auto& s : v) floor = std::min(floor, s.fork_height);
-        }
-        CBlockIndex* tip = chainman.ActiveChain().Tip();
-        for (CBlockIndex* p = tip; p && p->nHeight > floor; p = p->pprev) {
-            CBlock blk;
-            if (!ReadBlockFromDisk(blk, p, Params().GetConsensus())) continue;
-            LOCK(g_lost_mutex);
-            if (auto why = ViolationLocked(blk, p->pprev)) {
-                LogPrintf("Lost blocks: active block %s at height %d breaks the rule: %s\n", p->GetBlockHash().ToString(), p->nHeight, *why);
-                lowest_bad = p;
+        if (!g_refused_scanned) {
+            // Refusals written to the block index before a restart.
+            g_refused_scanned = true;
+            for (const auto& [h, p] : chainman.m_blockman.m_block_index) {
+                if (p->nStatus & BLOCK_FAILED_LOST) {
+                    LOCK(g_lost_mutex);
+                    g_refused.insert(h);
+                }
             }
         }
         std::set<uint256> refused;
@@ -645,26 +673,17 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             if (!ViolationLocked(blk, p->pprev)) revive.push_back(p);
         }
     }
-    if (lowest_bad) {
-        BlockValidationState state;
-        chainman.ActiveChainstate().InvalidateBlock(state, lowest_bad);
+    if (!revive.empty()) {
         {
             LOCK(cs_main);
-            lowest_bad->nStatus |= BLOCK_FAILED_LOST;
+            for (CBlockIndex* p : revive) {
+                LogPrintf("Lost blocks: block %s at height %d no longer breaks the rule; judging it again\n", p->GetBlockHash().ToString(), p->nHeight);
+                chainman.ActiveChainstate().ResetBlockFailureFlags(p);
+                p->nStatus &= ~BLOCK_FAILED_LOST;
+                LOCK(g_lost_mutex);
+                g_refused.erase(p->GetBlockHash());
+            }
         }
-        LostNoteRefused(lowest_bad);
-    }
-    if (!revive.empty()) {
-        LOCK(cs_main);
-        for (CBlockIndex* p : revive) {
-            LogPrintf("Lost blocks: block %s at height %d no longer breaks the rule; judging it again\n", p->GetBlockHash().ToString(), p->nHeight);
-            chainman.ActiveChainstate().ResetBlockFailureFlags(p);
-            p->nStatus &= ~BLOCK_FAILED_LOST;
-            LOCK(g_lost_mutex);
-            g_refused.erase(p->GetBlockHash());
-        }
-    }
-    if (lowest_bad || !revive.empty()) {
         BlockValidationState state;
         chainman.ActiveChainstate().ActivateBestChain(state);
     }

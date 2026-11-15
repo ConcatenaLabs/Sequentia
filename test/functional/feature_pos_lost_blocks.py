@@ -515,14 +515,18 @@ class LostBlocksTest(BitcoinTestFramework):
                     (n.getblockcount(), self.in_chain(n, st["x"]["hash"]), n.getbestblockhash() == self.nodes[2].getbestblockhash()))
 
     def case_f(self):
-        """Late reveal: a dishonest quorum certifies S in secret on a Bitcoin block it then makes stale."""
+        """Late reveal: a dishonest quorum certifies S in secret on a Bitcoin block it then makes stale.
+        Forward-only: nothing accepted is undone; S binds only candidates for the tip, until the lapse."""
         self.log.info("(f) late reveal by a dishonest quorum")
         a = self.nodes[SELLER]
         coin = self.fund()
+        coin2 = self.fund()
         merchant = self.nodes[2].getnewaddress()
         m_hex = self.spend(coin, merchant, Decimal("0.0001"))
         s_hex = self.spend(coin, a.getnewaddress(), Decimal("0.0002"))
-        m_id, s_id = tx_from_hex(m_hex).rehash(), tx_from_hex(s_hex).rehash()
+        s2_hex = self.spend(coin2, a.getnewaddress(), Decimal("0.0002"))
+        q_hex = self.spend(coin2, self.nodes[3].getnewaddress(), Decimal("0.0003"))
+        m_id, s_id, s2_id, q_id = [tx_from_hex(h).rehash() for h in (m_hex, s_hex, s2_hex, q_hex)]
         fpoint = self.nodes[1].getbestblockhash()
         # The merchant is paid in a certified block H1, anchored at Q, buried under certified blocks.
         self.nodes[1].sendrawtransaction(m_hex)
@@ -536,40 +540,60 @@ class LostBlocksTest(BitcoinTestFramework):
         a.invalidateblock(h1["hash"])
         assert_equal(a.getbestblockhash(), fpoint)
         a.sendrawtransaction(s_hex)
-        s = self.produce(SELLER, ALL_KEYS, leaders=ALL_KEYS, txs_must=[s_id])
+        a.sendrawtransaction(s2_hex)
+        s = self.produce(SELLER, ALL_KEYS, leaders=ALL_KEYS, txs_must=[s_id, s2_id])
         assert_equal(s["block"]["anchorheight"], q + 1)
         # A goes stale (a natural reorganization, or a block the quorum mined and withheld).
         self.btc().invalidateblock(a_hash)
         self.btc_mine(2)
         self.wait_until(lambda: a.getbestblockhash() != s["hash"], timeout=60)
-        ev = None
         self.wait_until(lambda: s["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=30)
         ev = a.getlostblock(s["hash"])
-        self.record("f", "S", "%s at height %d anchored %d (stale), certified, spends the merchant's coin to the seller; %d Bitcoin header(s) carried" %
+        self.record("f", "S", "%s at height %d anchored %d (stale), certified, spends the merchant's coin and coin2 to the seller; %d Bitcoin header(s) carried" %
                     (s["hash"][:16], s["height"], q + 1, len(ev["bitcoinheaders"])))
         # The honest chain goes on: certified blocks above H1.
         for _ in range(4):
             self.produce(1, ALL_KEYS)
         self.sync_tips(HONEST + [LATE])
         before = self.nodes[2].getblockcount()
+        best_before = {i: self.nodes[i].getbestblockhash() for i in HONEST + [LATE]}
         sizes = [self.log_size(i) for i in range(N)]
         self.record("f", "honest chain", "H1 (merchant paid) at height %d, %d certified blocks above it, tip anchor %d" %
                     (h1["height"], before - h1["height"], self.tip(self.nodes[2])["anchorheight"]))
         # The reveal, at one honest node.
-        t0 = time.time()
         r = self.nodes[1].submitlostblock(ev["block"], ev["bitcoinheaders"])
         self.record("f", "reveal at node 1", repr(r))
-        self.wait_until(lambda: all(not self.in_chain(self.nodes[i], h1["hash"]) for i in HONEST), timeout=60)
-        self.record("f", "rollback", "every honest node left H1 (%d blocks deep, finalized) in %.1f s" % (before - h1["height"] + 1, time.time() - t0))
-        line = self.log_has(2, "breaks the rule", sizes[2])
-        self.record("f", "node 2's reason", line[0].split(" ", 1)[1][:240] if line else "(relayed: refused on activation)")
-        h = self.produce(1, [1, 2, 3, 4, 5], leaders=[1, 2, 3, 4, 5], txs_must=[s_id])
-        self.sync_tips(HONEST + [LATE])
-        n = self.nodes[2]
-        self.record("f", "outcome", "S's spend mined at height %s; the merchant's payment in the chain: %s; height %d (was %d)" %
-                    (self.block_of(s_id, n), self.block_of(m_id, n) is not None, n.getblockcount(), before))
+        self.wait_until(lambda: all(s["hash"] in self.lost(i) for i in HONEST), timeout=60)
+        time.sleep(5)
+        for i in HONEST + [LATE]:
+            assert self.in_chain(self.nodes[i], h1["hash"]), i
+            assert_equal(self.nodes[i].getbestblockhash(), best_before[i])
+        self.record("f", "no rollback", "S held as lost on nodes %s; H1 (%d deep) and every block above it stay on every honest node; tips unchanged" %
+                    (HONEST, before - h1["height"] + 1))
+        assert not any(self.log_has(i, "breaks the rule:", sizes[i]) for i in HONEST)
+        # What S can still freeze: coin2, unspent, which S's own transaction spends.
+        try:
+            self.nodes[1].sendrawtransaction(q_hex)
+            raise AssertionError("honest mempool took Q")
+        except JSONRPCException as e:
+            assert "txn-lost-conflict" in e.error["message"], e.error
+            self.record("f", "honest mempool refuses Q (coin2 elsewhere)", e.error["message"])
+        a.reconsiderblock(h1["hash"])
         a.setnetworkactive(True)
         self.mesh(range(N))
+        self.wait_until(lambda: a.getbestblockhash() == self.nodes[1].getbestblockhash(), timeout=60)
+        sizes = [self.log_size(i) for i in range(N)]
+        a.sendrawtransaction(q_hex)
+        xq = self.produce(SELLER, ALL_KEYS, leaders=[SELLER], txs_must=[q_id])
+        self.assert_refused("f", HONEST, xq["hash"], sizes)
+        # The lapse: Bitcoin passes anchor(S) + W; the refusal ends, the block is judged again and taken.
+        need = q + 1 + W + 1
+        if self.btc().getblockcount() < need:
+            self.btc_mine(need - self.btc().getblockcount())
+        t0 = time.time()
+        self.wait_until(lambda: all(self.in_chain(self.nodes[i], xq["hash"]) for i in HONEST), timeout=60)
+        self.record("f", "lapse", "Bitcoin at %d > anchor(S)+W = %d: every honest node took the block with Q in %.1f s; S dropped: %s" %
+                    (self.btc().getblockcount(), q + 1 + W, time.time() - t0, all(s["hash"] not in self.lost(i) for i in HONEST)))
         self.realign()
 
     def sub(self, node, *args):

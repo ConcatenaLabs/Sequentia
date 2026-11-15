@@ -24,6 +24,7 @@
 #include <serialize.h>
 #include <uint256.h>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -39,9 +40,6 @@ class UniValue;
 //! The window, in Bitcoin blocks of the anchor: a lost block binds the blocks
 //! anchored at most this many Bitcoin blocks above its own anchor.
 static constexpr uint32_t DEFAULT_POS_LOST_WINDOW = 6;
-//! Evidence is kept (and served) until the active tip anchors this many
-//! windows above the lost block's anchor.
-static constexpr uint32_t POS_LOST_KEEP_WINDOWS = 2;
 //! At most this many blocks are kept as evidence; more is refused.
 static constexpr size_t POS_LOST_MAX_BLOCKS = 2000;
 
@@ -68,8 +66,11 @@ void LostShutdown();
 //! DisconnectTip took `pindex` off the active chain. cs_main held.
 void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block);
 
-//! The rule, for `block` built on `pindexPrev`. cs_main held.
-bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, BlockValidationState& state);
+//! The rule, for `block` built on `pindexPrev`, the active tip. Off-chain
+//! evidence is not applied during initial block download, nor to a block that
+//! `certified_descendant` says has a certified descendant. cs_main held.
+bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
+                    const std::function<bool()>& certified_descendant, BlockValidationState& state);
 
 //! A lost transaction `tx` conflicts with, for the mempool, while the next
 //! block (anchored at least at `tip_anchor_height`) is still bound.
