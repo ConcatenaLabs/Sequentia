@@ -108,7 +108,7 @@ class PosSigningRecordRpcTest(BitcoinTestFramework):
         n.rpc = None
 
     def run_test(self):
-        m, peer = self.nodes[1], self.nodes[2]
+        m = self.nodes[1]
         for _ in range(2):
             self.certified_block(m)
         self.sync_blocks(self.nodes[1:])
@@ -116,7 +116,7 @@ class PosSigningRecordRpcTest(BitcoinTestFramework):
         self.case_fail()
 
     def case_stop(self):
-        m, peer = self.nodes[1], self.nodes[2]
+        m = self.nodes[1]
         # T: a transaction the member's block carries.
         g = m.getblock(m.getblockhash(0), 2)
         coin = [(tx["txid"], vo["n"], Decimal(vo["value"])) for tx in g["tx"] for vo in tx["vout"]
