@@ -11,6 +11,7 @@
 #include <musig.h>
 #include <pos.h>
 #include <pos_lost.h>
+#include <exchangerates.h>
 #include <vrf.h>
 #include <chainparams.h>
 #include <coins.h>
@@ -667,6 +668,7 @@ void BlockAssembler::addLostReplay(const CBlockIndex* pindexPrev)
     m_lost_records = std::move(parts.records);
     m_lost_cut = parts.cut;
     CCoinsViewCache work(&m_chainstate.CoinsTip());
+    const bool leave_unlisted = gArgs.GetBoolArg("-poslostleaveunlisted", false);
     const auto& fedpegscripts = GetValidFedpegScripts(pindexPrev, chainparams.GetConsensus(), true);
     for (const CTransactionRef& tx : parts.prefix) {
         TxValidationState state;
@@ -683,13 +685,26 @@ void BlockAssembler::addLostReplay(const CBlockIndex* pindexPrev)
         if (PosCheckTxRecords(*tx, spent, nHeight, chainparams.GetConsensus(), records, reason, debug)) {
             *m_pos_records = std::move(records);
         }
+        const int64_t sigops = GetTransactionSigOpCost(*tx, work, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS);
         pblocktemplate->block.vtx.emplace_back(tx);
         pblocktemplate->vTxFees.push_back(0);
-        pblocktemplate->vTxSigOpsCost.push_back(GetLegacySigOpCount(*tx) * WITNESS_SCALE_FACTOR);
+        pblocktemplate->vTxSigOpsCost.push_back(sigops);
         nBlockWeight += GetTransactionWeight(*tx);
-        nBlockSigOpsCost += GetLegacySigOpCount(*tx) * WITNESS_SCALE_FACTOR;
+        nBlockSigOpsCost += sigops;
         ++nBlockTx;
-        feeMap += fee_map;
+        // The fee of a carried transaction is claimed as any fee is. A producer
+        // that must not hold an asset it does not list sets
+        // -poslostleaveunlisted: that fee then stays unclaimed (consensus lets a
+        // coinbase claim less than the block's fees), and nobody receives it.
+        for (const auto& [asset, amount] : fee_map) {
+            CAmount rate = 0;
+            if (leave_unlisted && amount > 0 && !(ExchangeRateMap::GetInstance().GetRate(asset, rate) && rate > 0)) {
+                LogPrintf("Lost blocks: carried transaction %s pays %d of unlisted asset %s; left unclaimed (-poslostleaveunlisted)\n",
+                          tx->GetHash().ToString(), amount, asset.GetHex());
+                continue;
+            }
+            feeMap[asset] += amount;
+        }
         for (const CTxIn& in : tx->vin) {
             if (!in.m_is_pegin) {
                 work.SpendCoin(in.prevout);

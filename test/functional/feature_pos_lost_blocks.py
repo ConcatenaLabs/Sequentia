@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Sequentia developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Lost blocks (doc 04, "Lost blocks"), attacked.
+"""Lost blocks (doc 03 §3, "Transactions of a lost block"), attacked.
 
 A transaction T is certified in block L, Bitcoin then replaces L's anchor, and
 the seller who signed T has a conflicting spend R built into a block. Every
@@ -36,6 +36,8 @@ CASES = os.environ.get("LOST_CASES", "a,b,c,f,g").split(",")
 RESULTS = os.environ.get("LOST_RESULTS", "")
 BASE_BIN = os.environ.get("LOST_BASE_BIN", "")
 W = int(os.environ.get("LOST_WINDOW", "6"))
+# The testnet's block weight; fees in any accepted asset, as on the testnet.
+MAX_WEIGHT = int(os.environ.get("LOST_MAX_WEIGHT", "400000"))
 N = 6
 SELLER = 0
 LATE = 5
@@ -91,7 +93,7 @@ class LostBlocksTest(BitcoinTestFramework):
             "-con_connect_genesis_outputs=1", "-acceptnonstdtxn=1", "-par=1", "-fallbackfee=0.0001",
             "-blindedaddresses=0", "-con_default_blinded_addresses=0",
             "-con_bitcoin_anchor=1", "-validateanchor=1", "-anchorpollinterval=1", "-anchorminconf=1",
-            "-posescapestallmtpgap=0",
+            "-posescapestallmtpgap=0", "-con_any_asset_fees=1", "-con_maxblockweight=%d" % MAX_WEIGHT,
             "-mainchainrpchost=127.0.0.1", "-mainchainrpcport=%d" % self.btc_port,
             "-mainchainrpcuser=%s" % self.btc_user, "-mainchainrpcpassword=%s" % self.btc_pass,
             "-parentgenesisblockhash=%s" % self.btc_genesis, "-debug=mempool", "-debug=validation", "-txindex=1",
@@ -101,6 +103,7 @@ class LostBlocksTest(BitcoinTestFramework):
             a.append("-poslostwindow=%d" % W)
         if i == SELLER:
             a += ["-posdebugignorelost=1", "-minrelaytxfee=0", "-blockmintxfee=0"]
+        a += getattr(self, "extra", {}).get(i, [])
         return a
 
     def setup_network(self):
@@ -248,12 +251,17 @@ class LostBlocksTest(BitcoinTestFramework):
         self.produce(SELLER, ALL_KEYS, txs_must=[txid])
         self.sync_tips(range(N))
 
-    def fund(self, amount=Decimal("1"), online=None):
+    def fund(self, amount=Decimal("1"), online=None, lock=True):
+        """A coin of the seller's for a case to spend by hand. It is locked in the
+        seller's wallet, so that a later wallet send (the next fund()) cannot pick
+        it as an input and leave the case spending a coin already spent."""
         a = self.nodes[SELLER]
         txid = a.sendtoaddress(address=a.getnewaddress(), amount=amount, fee_asset_label="bitcoin")
         self.produce(SELLER, ALL_KEYS, txs_must=[txid])
         self.sync_tips(online if online is not None else range(N))
         vout = [o for o in a.getrawtransaction(txid, 1)["vout"] if o["value"] == amount][0]["n"]
+        if lock:
+            a.lockunspent(False, [{"txid": txid, "vout": vout}])
         return {"txid": txid, "vout": vout, "amount": amount}
 
     def sync_mempools_of(self, idx, txid, timeout=30):
@@ -457,9 +465,11 @@ class LostBlocksTest(BitcoinTestFramework):
         self.record("c1", "node 5 restarted, seller its only peer", "tip %s, X %s, L lost here: %s" %
                     (self.nodes[LATE].getbestblockhash()[:16], self.status_of(self.nodes[LATE], x["hash"]), st["L"] in self.lost(LATE)))
         self.connect_nodes(LATE, 1)
-        self.wait_until(lambda: self.status_of(self.nodes[LATE], x["hash"]) == "invalid" or st["L"] in self.lost(LATE), timeout=30)
-        self.record("c1", "node 5 with an honest peer", "X %s, L lost: %s" % (self.status_of(self.nodes[LATE], x["hash"]), st["L"] in self.lost(LATE)))
+        self.wait_until(lambda: st["L"] in self.lost(LATE), timeout=30)
+        self.record("c1", "node 5 with an honest peer", "X %s, L lost: %s (forward-only: an accepted block stays; it rejoins by reconciliation, case b1)" %
+                    (self.status_of(self.nodes[LATE], x["hash"]), st["L"] in self.lost(LATE)))
         h = self.produce(1, [1], leaders=[1], txs_must=[st["t_id"]])
+        self.nodes[LATE].invalidateblock(x["hash"])  # the harness, not the rule, moves it on
         self.connect_nodes(LATE, 2)
         self.sync_tips(HONEST + [LATE])
         self.record("c1", "outcome", "node 5 on the honest chain with T at height %s" % self.block_of(st["t_id"], self.nodes[LATE]))
@@ -476,6 +486,9 @@ class LostBlocksTest(BitcoinTestFramework):
                     (late_tip[:16], on_x, self.block_of(st["r_id"], self.nodes[LATE]) is not None))
         t0 = time.time()
         self.connect_nodes(LATE, 3)
+        if on_x:
+            self.wait_until(lambda: st["L"] in self.lost(LATE), timeout=60)
+            self.nodes[LATE].invalidateblock(x["hash"])  # the harness, not the rule, moves it on (case b1)
         self.wait_until(lambda: self.nodes[LATE].getbestblockhash() == self.nodes[3].getbestblockhash(), timeout=60)
         self.record("c2", "after an honest peer", "on the honest chain in %.1f s; X %s; T at height %s" %
                     (time.time() - t0, self.status_of(self.nodes[LATE], x["hash"]), self.block_of(st["t_id"], self.nodes[LATE])))

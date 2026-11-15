@@ -3773,10 +3773,12 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
 
 std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector<CTransactionRef>& txs,
                                                                CCoinsViewCache& base, const CBlockIndex* prev,
-                                                               const Consensus::Params& params)
+                                                               const Consensus::Params& params,
+                                                               std::vector<int64_t>* sigops)
 {
     AssertLockHeld(cs_main);
     std::vector<std::pair<LostTxCat, std::string>> out;
+    if (sigops) sigops->clear();
     out.reserve(txs.size());
     CCoinsViewCache view(&base);
     // The block being judged, as far as these rules read it: its height, its
@@ -3800,6 +3802,7 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
             if (c == LostTxCat::LATER) later.insert(tx.GetHash());
             if (c == LostTxCat::FAILS) fails.insert(tx.GetHash());
             out.emplace_back(c, why);
+            if (sigops && sigops->size() < out.size()) sigops->push_back(0);
         };
         if (tx.IsCoinBase()) { put(LostTxCat::GONE, "coinbase"); continue; }
         // Inputs: present, or created by a lost transaction not yet due, or gone.
@@ -3864,6 +3867,9 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
         }
         PrecomputedTransactionData txdata(params.hashGenesisBlock);
         if (!CheckInputScripts(tx, tx_state, view, flags, false, false, txdata)) { put(LostTxCat::FAILS, tx_state.GetRejectReason()); continue; }
+        // As ConnectBlock counts it (legacy, P2SH and witness), before the
+        // inputs are spent.
+        if (sigops) sigops->push_back(GetTransactionSigOpCost(tx, view, flags));
         CTxUndo undo;
         UpdateCoins(tx, view, undo, height);
         put(LostTxCat::DUE, "");
