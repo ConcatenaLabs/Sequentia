@@ -573,7 +573,7 @@ void PosSigningNoteIndexAtStart(ChainstateManager& chainman)
                                                                                  : PosCertRoute::INDEX_AT_START);
         ++noted;
     }
-    LogPrintf("Signing record: %u block(s) with a verified full certificate in the window, read from the block index "
+    LogPrintf("Signing record: %u block(s) with a verified full certificate in the window, read from the block index " /* Continued */
               "of %u entries in %.1f ms\n", (unsigned)noted, (unsigned)chainman.m_blockman.m_block_index.size(),
               (GetTimeMicros() - t0) / 1000.0);
 }

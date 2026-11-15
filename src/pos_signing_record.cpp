@@ -320,7 +320,7 @@ std::optional<std::string> DamagedHoldRefuses(int height, int64_t now_ms) EXCLUS
     if (height < g_hold.floor) return std::nullopt;
     if (g_hold.height < 0) {
         g_hold.height = height;
-        LogPrintf("Signing record: holding height %d for an unreadable entry: signing nothing there until it is "
+        LogPrintf("Signing record: holding height %d for an unreadable entry: signing nothing there until it is " /* Continued */
                   "certified, passed, or %d ms with a peer pass\n", height, (int)g_hold.bound_ms);
     }
     if (height > g_hold.height) {
@@ -479,7 +479,7 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
             LogPrintf("Signing record: no certificate for %s at height %d within a round; it no longer holds the height\n",
                       held[i].first.GetHex(), h.height);
             if (h.certified) {
-                LogPrintf("Signing record: this member is about to sign a rival of %s at height %d, a block it holds a "
+                LogPrintf("Signing record: this member is about to sign a rival of %s at height %d, a block it holds a " /* Continued */
                           "full certificate for, because that block was invalidated on this node; invalidating a "
                           "certified block is the operator's responsibility\n",
                           held[i].first.GetHex(), h.height);
@@ -719,7 +719,7 @@ bool PosSigningRecordLoad(const uint256& genesis, std::string& error)
         st.entry = stand_in;
         st.bytes = Frame(stand_in).size();
         g_entries.push_back(std::move(st));
-        LogPrintf("Signing record: the last entry (%u bytes) is whole but unreadable; a copy of the file is kept as %s. "
+        LogPrintf("Signing record: the last entry (%u bytes) is whole but unreadable; a copy of the file is kept as %s. " /* Continued */
                   "This member signs nothing at the first height from %d it is asked to sign at, until that height is "
                   "certified or passed, or for one window and two rounds with a peer\n", (unsigned)damaged_bytes, copy, floor);
         g_hold.copy = copy;
@@ -734,7 +734,7 @@ bool PosSigningRecordLoad(const uint256& genesis, std::string& error)
     if (g_hold.active) {
         g_hold.bound_ms = PosSigningWindowMs() + 2 * PosSigningRoundMs();
         if (!damaged) {
-            LogPrintf("Signing record: an unreadable entry found at an earlier start still holds: this member signs "
+            LogPrintf("Signing record: an unreadable entry found at an earlier start still holds: this member signs " /* Continued */
                       "nothing at the first height from %d it is asked to sign at, until that height is certified or "
                       "passed, or for %d ms with a peer\n", g_hold.floor, (int)g_hold.bound_ms);
         }

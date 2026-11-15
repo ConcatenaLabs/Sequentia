@@ -56,7 +56,6 @@ class PosSigningRecordFileTest(PosSigningRecordRpcTest):
         return m.generateposblock(self.stakers[0][0], [w for w, _ in self.stakers[1:]])
 
     def run_test(self):
-        m = self.nodes[1]
         self.generate()
         self.generate()
         self.case_unreadable()
