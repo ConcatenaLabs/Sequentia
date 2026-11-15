@@ -89,7 +89,9 @@ class LostSwapTest(LostBlocksTest):
         lock_addr = program_to_witness(1, tap.scriptPubKey[2:])
         a = self.nodes[SELLER]
         raw = a.createrawtransaction([], [{lock_addr: Decimal("10")}])
-        funded = a.fundrawtransaction(raw, {"fee_asset": "bitcoin", "replaceable": True})["hex"]
+        # The change stays a segwit v0 output. Paying a taproot output, the wallet would otherwise make its change
+        # taproot too, and the next lock funded from it would carry an invalid signature (Sequentia #349).
+        funded = a.fundrawtransaction(raw, {"fee_asset": "bitcoin", "replaceable": True, "change_type": "bech32"})["hex"]
         t_hex = a.signrawtransactionwithwallet(funded)["hex"]
         t = tx_from_hex(t_hex)
         txid = t.rehash()
@@ -97,6 +99,9 @@ class LostSwapTest(LostBlocksTest):
         return dict(sk_b=sk_b, sk_s=sk_s, tap=tap, claim=claim, refund=refund, txid=txid, vout=vout, hex=t_hex,
                     txout=t.vout[vout], addr=addr, amount=sat, floor=floor, deadline=deadline, refund_at=refund_at,
                     asset_amount=10 * 100000000)
+
+    def send_lock(self, lock):
+        return self.nodes[1].sendrawtransaction(lock["hex"])
 
     def coin_anchor(self, txid, node=None):
         node = node or self.nodes[1]
@@ -151,7 +156,7 @@ class LostSwapTest(LostBlocksTest):
         n1 = self.nodes[1]
         h0 = b.getblockcount()
         lock = self.make_lock(50_000_000, h0, h0 + 50, h0)
-        n1.sendrawtransaction(lock["hex"])
+        self.send_lock(lock)
         self.produce(1, ALL_KEYS, txs_must=[lock["txid"]])
         for _ in range(bp.FLOOR_DEPTH + 1):
             self.produce(1, ALL_KEYS)
@@ -203,7 +208,7 @@ class LostSwapTest(LostBlocksTest):
         h0 = b.getblockcount()
         lock = self.make_lock(50_000_000, h0, h0 + 50, h0 + 1000)
         b.generatetoaddress(1, self.bbuyer.getnewaddress())
-        n1.sendrawtransaction(lock["hex"])
+        self.send_lock(lock)
         L = self.produce(1, ALL_KEYS, txs_must=[lock["txid"]])
         self.produce(1, ALL_KEYS)
         self.sync_tips(range(N))
@@ -298,7 +303,7 @@ class LostSwapTest(LostBlocksTest):
         b = self.btc()
         h0 = b.getblockcount()
         lock = self.make_lock(50_000_000, h0, h0 + 50, h0)
-        n1.sendrawtransaction(lock["hex"])
+        self.send_lock(lock)
         self.produce(1, ALL_KEYS, txs_must=[lock["txid"]])
         for _ in range(bp.FLOOR_DEPTH + 1):
             self.produce(1, ALL_KEYS)
@@ -365,7 +370,7 @@ class LostSwapTest(LostBlocksTest):
         b = self.btc()
         h0 = b.getblockcount()
         lock = self.make_lock(50_000_000, h0, h0 + 50, h0)
-        n1.sendrawtransaction(lock["hex"])
+        self.send_lock(lock)
         self.produce(1, ALL_KEYS, txs_must=[lock["txid"]])
         for _ in range(bp.FLOOR_DEPTH + 1):
             self.produce(1, ALL_KEYS)
@@ -377,25 +382,34 @@ class LostSwapTest(LostBlocksTest):
         # L1: a new staker K locks stake (its key never signs).
         from feature_pos_lost_blocks import make_key
         k_wif, k_pub = make_key()
-        script = a.getstakescript(k_pub, 600)["script"]
+        bls = n1.getblsregistration(k_wif)
+        script = a.getstakescript(pubkey=k_pub, csv_blocks=600, blspubkey=bls["blspubkey"], pop=bls["pop"])["script"]
         coin = self.fund()
+        # K stakes one atom: a weight like each of the six stakers' (they are registered with weight 1).
+        # A stake of the whole coin (1e8 atoms) would hold all but 6e-8 of the weight, so the six's
+        # exponential-race slots would open hours late and every block they make is time-too-new.
         reg_raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}],
-                                         [{"data": ""}] if False else [{a.getnewaddress(): Decimal("0.0001")}, {"fee": Decimal("0.0001")}])
+                                         [{a.getnewaddress(): Decimal("0.00000001")},
+                                          {a.getnewaddress(): coin["amount"] - Decimal("0.00010001")}, {"fee": Decimal("0.0001")}])
         rt = tx_from_hex(reg_raw)
         from test_framework.messages import CTxOut, CTxOutValue, CTxOutAsset
-        rt.vout[0] = CTxOut(CTxOutValue(int((coin["amount"] - Decimal("0.0001")) * 100000000)), bytes.fromhex(script),
-                            CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1]))
+        rt.vout[0] = CTxOut(CTxOutValue(1), bytes.fromhex(script), CTxOutAsset(b"\x01" + bytes.fromhex(self.asset)[::-1]))
         reg_hex = a.signrawtransactionwithwallet(rt.serialize().hex())["hex"]
         reg = n1.sendrawtransaction(reg_hex)
         reg_before = sorted(n1.getstakerinfo().keys())
-        time.sleep(65)  # the set-up's rapid blocks ran the chain's time ahead of the clock
         L1 = self.produce(1, ALL_KEYS, txs_must=[reg])
         reg_after = n1.getstakerinfo()
         assert k_pub in reg_after
         c, pr = self.buyer_claim(lock, pay)
         c_id = c.rehash()
         n1.sendrawtransaction(c.serialize().hex())
-        LC = self.produce(1, ALL_KEYS, txs_must=[c_id])
+        # K signs LC: its certificate then names a member the fork point's registry does not have.
+        self.wait_until(lambda: c_id in n1.getrawmempool(), timeout=30)
+        signers = [self.stakers[j][0] for j in ALL_KEYS if j != 1] + [k_wif]
+        LC = n1.generateposblock(self.stakers[1][0], signers)
+        assert c_id in n1.getblock(LC["hash"])["tx"]
+        LC["block"] = n1.getblock(LC["hash"])
+        self.record("sR", "LC's certificate", "%d countersignatures, K's among them" % LC["countersignatures"])
         self.produce(1, ALL_KEYS)
         self.sync_tips(range(N))
         assert n1.getblockheader(LC["hash"])["poscertified"]
@@ -406,18 +420,33 @@ class LostSwapTest(LostBlocksTest):
         self.wait_lost(LC["hash"], HONEST)
         since = [self.log_size(i) for i in range(N)]
         rows = []
-        for _ in range(3):
-            h = self.produce(1, ALL_KEYS, leaders=[SELLER])
-            recs = self.records_in(n1, h["hash"])
-            rows.append((h["height"], reg in n1.getblock(h["hash"])["tx"], len(recs)))
-        self.sync_tips(HONEST + [LATE])
+        h = self.produce(1, ALL_KEYS, leaders=[SELLER])
+        rows.append((h["height"], reg in n1.getblock(h["hash"])["tx"], len(self.records_in(n1, h["hash"]))))
+        self.sync_tips(range(N))
         why = self.log_has(1, "cannot be recorded", since[1])
-        self.record("sR", "honest blocks (height, K's stake replayed, records)", rows)
-        self.record("sR", "node 1", why[0].split("Lost blocks: ", 1)[-1][:260] if why else "no 'cannot be recorded' line")
-        # The seller's refund, forced: refused by the holders, whether or not a record exists.
+        self.record("sR", "node 1 at the first block", why[0].split("Lost blocks: ", 1)[-1][:260] if why else "no 'cannot be recorded' line")
+        # With no record on the chain yet, the seller's refund, forced, meets only the holders' refusal.
         r = self.refund(lock)
         x = self.force_on_seller("sR", [r.serialize().hex()])
         self.refused_by_any("sR", HONEST, x["hash"], since)
+        self.realign()
+        for _ in range(2):
+            h = self.produce(1, ALL_KEYS, leaders=[SELLER])
+            rows.append((h["height"], reg in n1.getblock(h["hash"])["tx"], len(self.records_in(n1, h["hash"]))))
+        self.sync_tips(range(N))
+        self.record("sR", "honest blocks (height, K's stake replayed, records)", rows)
+        since = [self.log_size(i) for i in range(N)]
+        x2 = self.force_on_seller("sR", [r.serialize().hex()])
+        self.refused_by_any("sR", HONEST, x2["hash"], since)
+        self.realign()
+        # The payment is still on Bitcoin: the claim, proven again, keeps its id and is mined.
+        c2, pr2 = self.buyer_claim(lock, pay)
+        assert_equal(c2.rehash(), c_id)
+        n1.sendrawtransaction(c2.serialize().hex())
+        hc = self.produce(1, ALL_KEYS, leaders=[SELLER], txs_must=[c_id])
+        self.sync_tips(HONEST + [LATE])
+        self.record("sR", "outcome", "the claim %s, re-proven (Bitcoin block %d), mined at height %d with the same id" %
+                    (c_id[:12], pr2["height"], hc["height"]))
         self.realign()
 
     # ---------------------------------------------------------------- sC
