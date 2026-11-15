@@ -2632,4 +2632,25 @@ bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet,
 
     return true;
 }
+std::optional<std::string> FeeRefusalUnderList(const CWallet& wallet, const CTransactionRef& tx)
+{
+    AssertLockHeld(g_fee_decision_mutex);
+    if (!g_con_any_asset_fees || !wallet.GetBroadcastTransactions()) return std::nullopt;
+    const std::optional<interfaces::MempoolRefusal> refusal = wallet.chain().checkMempoolAccept(tx);
+    if (!refusal) return std::nullopt;
+    if (refusal->reason != "min relay fee not met" && refusal->reason != "insufficient fee" &&
+        refusal->reason != "mempool min fee not met") {
+        return std::nullopt;
+    }
+    const CAsset fee_asset = tx->GetFeeAsset(::policyAsset);
+    if (ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, fee_asset).GetValue() <= 0) {
+        return strprintf("This node no longer accepts %s for fees: its fee whitelist changed while the transaction "
+                         "was being built or reviewed. Nothing was sent; send again and choose another fee asset.",
+                         fee_asset.GetHex());
+    }
+    return strprintf("The fee this transaction pays is now below what this node requires (%s): the fee asset's "
+                     "rate in its fee whitelist changed while the transaction was being built or reviewed. Nothing "
+                     "was sent; review the new fee and send again.", refusal->reason);
+}
+
 } // namespace wallet

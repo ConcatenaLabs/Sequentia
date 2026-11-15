@@ -69,7 +69,7 @@ public:
         TransactionCreationFailed, // Error returned when wallet is still locked
         AbsurdFee,
         PaymentRequestExpired,
-        FeeListChanged // The fee whitelist changed between choosing the fee and sending
+        FeeListChanged // The fee is no longer accepted under the fee whitelist in force
     };
 
     enum EncryptionStatus

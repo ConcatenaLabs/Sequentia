@@ -101,24 +101,23 @@ static std::vector<CAsset> SubtractFeeFromAssets(const std::vector<CRecipient>& 
     return assets;
 }
 
-// SEQUENTIA: one fee whitelist decides a transaction, from the choice of its
-// fee to its commit. The caller notes the list's generation before the fee is
-// chosen; this compares it under the lock every writer of the whitelist takes,
-// held only for the commit. A list that changed meanwhile (a price server's
-// list read, a hand write) means nothing is committed or sent; a list that did
-// not cannot change until the node has taken the transaction. Building and
-// signing, an external signer's included, hold no lock a writer waits on.
-void CommitTransactionUnderFeeList(CWallet& wallet, CTransactionRef tx, mapValue_t map_value, BlindDetails* blind_details,
-                                   uint64_t fee_list_generation)
+// SEQUENTIA: the fee whitelist can change while a transaction is built (a
+// connected node reads its price server's list every minute). At commit, under
+// the lock every writer of the whitelist takes, the transaction is judged
+// against the list in force now, as the mempool judges it: its fee asset still
+// accepted, and its fee at least what the current rate requires for its size.
+// If so it is committed, whatever else in the list changed, and the list cannot
+// change before the node has taken it; if not, nothing is committed or sent,
+// and the caller is told why. Building and signing, an external signer's
+// included, hold no lock a writer waits on.
+void CommitTransactionUnderFeeList(CWallet& wallet, CTransactionRef tx, mapValue_t map_value, BlindDetails* blind_details)
 {
     if (const int64_t delay_ms = gArgs.GetIntArg("-testfeedecisiondelay", 0); delay_ms > 0) {
         UninterruptibleSleep(std::chrono::milliseconds{delay_ms});
     }
     LOCK2(wallet.cs_wallet, g_fee_decision_mutex);
-    if (g_con_any_asset_fees && ExchangeRateMap::GetInstance().Generation() != fee_list_generation) {
-        throw JSONRPCError(RPC_WALLET_ERROR,
-            "This node's fee whitelist changed while the transaction was being built, so its fee may no longer "
-            "be accepted. Nothing was sent; try again, and the fee is chosen under the list in force now.");
+    if (const std::optional<std::string> refused = FeeRefusalUnderList(wallet, tx)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, *refused);
     }
     wallet.CommitTransaction(std::move(tx), std::move(map_value), {} /* orderForm */, blind_details);
 }
@@ -145,14 +144,12 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
     auto blind_details = g_con_elementsmode ? std::make_unique<BlindDetails>() : nullptr;
     if (blind_details) blind_details->ignore_blind_failure = ignore_blind_fail;
     LOCK(wallet.cs_wallet);
-    // SEQUENTIA: the fee is chosen under this list and committed only under it
-    // (CommitTransactionUnderFeeList).
-    const uint64_t fee_list_generation = ExchangeRateMap::GetInstance().Generation();
     const bool fCreated = CreateTransaction(wallet, recipients, tx, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, true, blind_details.get());
     if (!fCreated) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, error.original);
     }
-    CommitTransactionUnderFeeList(wallet, tx, std::move(map_value), blind_details.get(), fee_list_generation);
+    // SEQUENTIA: judged against the fee whitelist in force at the commit.
+    CommitTransactionUnderFeeList(wallet, tx, std::move(map_value), blind_details.get());
     // SEQUENTIA: the fee whitelist can change between building a transaction
     // and offering it (a connected node reads its price server's list every
     // minute), so this node may refuse what it just signed for its fee. Such a
@@ -233,12 +230,11 @@ static uint256 SelectKeyAuthorization(CWallet& wallet, const CPubKey& key, CCoin
     CCoinControl payment_control;
     auto blind_details = g_con_elementsmode ? std::make_unique<BlindDetails>() : nullptr;
     if (blind_details) blind_details->ignore_blind_failure = true;
-    const uint64_t fee_list_generation = ExchangeRateMap::GetInstance().Generation();
     if (!CreateTransaction(wallet, recipients, tx, fee, change_pos, error, payment_control, fee_calc, true, blind_details.get())) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf(
             "cannot fund the payment to the record's key that authorises it: %s", error.original));
     }
-    CommitTransactionUnderFeeList(wallet, tx, {}, blind_details.get(), fee_list_generation);
+    CommitTransactionUnderFeeList(wallet, tx, {}, blind_details.get());
     for (uint32_t n = 0; n < tx->vout.size(); ++n) {
         if (tx->vout[n].scriptPubKey == script) {
             coin_control.Select(COutPoint(tx->GetHash(), n));

@@ -93,22 +93,17 @@ std::map<CAsset, CAmount> ExchangeRateMap::GetRates() {
 }
 
 void ExchangeRateMap::ResetToBootstrapRates() {
-    SetRates({{::policyAsset, exchange_rate_scale}});
+    LOCK(m_write_mutex);
+    this->clear();
+    (*this)[::policyAsset] = CAssetExchangeRate(exchange_rate_scale);
 }
 
 void ExchangeRateMap::SetRates(const std::map<CAsset, CAmount>& rates) {
     LOCK(m_write_mutex);
-    bool same = this->size() == rates.size();
-    auto b = rates.cbegin();
-    for (auto a = this->cbegin(); same && a != this->cend(); ++a, ++b) {
-        same = a->first == b->first && a->second.m_scaled_value == b->second;
-    }
-    if (same) return;
     this->clear();
     for (const auto& rate : rates) {
         (*this)[rate.first] = CAssetExchangeRate(rate.second);
     }
-    ++m_generation;
 }
 
 bool ExchangeRateMap::HasAcceptedAsset() {
@@ -120,7 +115,8 @@ bool ExchangeRateMap::HasAcceptedAsset() {
 }
 
 void ExchangeRateMap::ClearRates() {
-    SetRates({});
+    LOCK(m_write_mutex);
+    this->clear();
 }
 
 bool ExchangeRateMap::LoadFromDefaultJSONFile(std::vector<std::string>& errors) {

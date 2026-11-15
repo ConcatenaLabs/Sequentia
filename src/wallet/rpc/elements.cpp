@@ -43,7 +43,7 @@ using wallet::LegacyScriptPubKeyMan;
 // forward declarations
 namespace wallet {
 UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vector<CRecipient> &recipients, mapValue_t map_value, bool verbose, bool ignore_blind_fail);
-void CommitTransactionUnderFeeList(CWallet& wallet, CTransactionRef tx, mapValue_t map_value, BlindDetails* blind_details, uint64_t fee_list_generation);
+void CommitTransactionUnderFeeList(CWallet& wallet, CTransactionRef tx, mapValue_t map_value, BlindDetails* blind_details);
 RPCHelpMan signrawtransactionwithwallet();
 }
 
@@ -1418,7 +1418,6 @@ static CTransactionRef SendGenerationTransaction(const CScript& asset_script, co
     FeeCalculation fee_calc_out;
     BlindDetails blind_details;
     CTransactionRef tx_ref;
-    const uint64_t fee_list_generation = ExchangeRateMap::GetInstance().Generation();
     if (!CreateTransaction(*pwallet, vecSend, tx_ref, nFeeRequired, nChangePosRet, error, coin_control, fee_calc_out, true, &blind_details, issuance_details)) {
         throw JSONRPCError(RPC_WALLET_ERROR, error.original);
     }
@@ -1432,7 +1431,7 @@ static CTransactionRef SendGenerationTransaction(const CScript& asset_script, co
     // one place that is guaranteed to still exist when the issuer comes back to
     // register, possibly days and one restart later.
     if (!contract_json.empty()) map_value["assetcontract"] = contract_json;
-    CommitTransactionUnderFeeList(*pwallet, tx_ref, std::move(map_value), &blind_details, fee_list_generation);
+    CommitTransactionUnderFeeList(*pwallet, tx_ref, std::move(map_value), &blind_details);
 
     return tx_ref;
 }

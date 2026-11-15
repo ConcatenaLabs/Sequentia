@@ -42,10 +42,6 @@ private:
     QList<SendAssetsRecipient> recipients;
     CTransactionRef wtx;
     CAmount fee;
-
-public:
-    //! The fee whitelist's generation when the fee was chosen.
-    uint64_t fee_list_generation{0};
 };
 
 #endif // BITCOIN_QT_WALLETMODELTRANSACTION_H

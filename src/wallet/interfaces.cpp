@@ -296,15 +296,17 @@ public:
         LOCK(m_wallet->cs_wallet);
         m_wallet->CommitTransaction(std::move(tx), std::move(value_map), std::move(order_form), blind_details);
     }
-    uint64_t feeListGeneration() override { return ExchangeRateMap::GetInstance().Generation(); }
     bool commitTransactionUnderFeeList(CTransactionRef tx,
         WalletValueMap value_map,
         WalletOrderForm order_form,
         BlindDetails* blind_details,
-        uint64_t fee_list_generation) override
+        std::string& fee_refusal) override
     {
         LOCK2(m_wallet->cs_wallet, g_fee_decision_mutex);
-        if (g_con_any_asset_fees && ExchangeRateMap::GetInstance().Generation() != fee_list_generation) return false;
+        if (const std::optional<std::string> refused = FeeRefusalUnderList(*m_wallet, tx)) {
+            fee_refusal = *refused;
+            return false;
+        }
         m_wallet->CommitTransaction(std::move(tx), std::move(value_map), std::move(order_form), blind_details);
         return true;
     }
