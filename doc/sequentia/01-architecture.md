@@ -59,14 +59,20 @@ substrate resolves this with an asset-independent unit.
   fee-floor checks, fee estimation - happen in rfa.
 - **`ExchangeRateMap`** (`src/exchangerates.{h,cpp}`) is a singleton
   `std::map<CAsset, CAssetExchangeRate>`. Each rate is scaled by
-  `exchange_rate_scale = COIN (1e8)`. On the testnet and custom chains
-  `policyAsset` is seeded at scale `1.0`; on mainnet the map starts empty.
+  `exchange_rate_scale = COIN (1e8)`. On custom chains `policyAsset` is
+  seeded at scale `1.0`; on the mainnet and the testnet the map starts empty.
   - `ConvertAmountToValue(amount, asset)` → rfa, computed as
     `amount * rate / scale` (128-bit intermediate, saturating at `INT64_MAX`).
     An asset **absent from the map converts to 0 rfa** - i.e. "not accepted".
   - `ConvertValueToAmount(value, asset)` → atoms of `asset`.
   - The map is persisted as JSON in `<datadir>/exchangerates.json` via
     `LoadFromDefaultJSONFile` / `SaveToJSONFile`.
+- **`src/feepriceserver.{h,cpp}`** connects a node to a price server
+  (`-feepriceserver`, the testnet's default): on the node's feeds thread it reads
+  the server's published list at startup and on a poll, with every request
+  bounded in time and size, refuses anything that is not one, and writes it into
+  the map as the only writer until the operator writes it by hand. A price
+  server never writes to a node.
 
 A transaction's fee asset is obtained via `CTransaction::GetFeeAsset()`.
 
@@ -81,9 +87,10 @@ A transaction's fee asset is obtained via `CTransaction::GetFeeAsset()`.
 | RPC / wallet | `getfeeexchangerates` / `setfeeexchangerates` (`src/rpc/exchangerates.cpp`); wallet fee logic (`src/wallet/spend.cpp`, `feebumper.cpp`) | All value fees through the map. |
 
 This plumbing is the foundation; it makes no policy decisions of its own beyond
-"absent asset = 0 rfa = not accepted". The seam a dynamic price server plugs into
-is `RecomputeFees()`: a price server updates the `ExchangeRateMap` and calls that
-path - exactly as `setfeeexchangerates` does - without touching consensus. The
+"absent asset = 0 rfa = not accepted". The seam a dynamic whitelist uses is
+`RecomputeFees()`: the list read from a price server updates the
+`ExchangeRateMap` and calls that path - exactly as `setfeeexchangerates` does -
+without touching consensus. The
 single exchange-rate whitelist, per-producer acceptance, cross-asset
 fee replacement, and paying fees in an arbitrary asset are the full design in
 [`02-open-fee-market.md`](02-open-fee-market.md).

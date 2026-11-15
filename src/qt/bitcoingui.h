@@ -16,6 +16,8 @@
 
 #include <QComboBox>
 #include <QLabel>
+#include <univalue.h>
+
 #include <QMainWindow>
 #include <QMap>
 #include <QMenu>
@@ -116,6 +118,9 @@ protected:
     bool eventFilter(QObject *object, QEvent *event) override;
 
 private:
+    /** getfeepriceserver, or an empty object if the call fails. */
+    UniValue feePriceServerState();
+
     interfaces::Node& m_node;
     WalletController* m_wallet_controller{nullptr};
     std::unique_ptr<interfaces::Handler> m_handler_message_box;
@@ -361,6 +366,8 @@ public Q_SLOTS:
     void promptFeeSetupIfNeeded();
     /** Launch the bundled price-server sidecar and open its configuration page */
     void launchPriceServer();
+    /** Ask for a price server's address and connect this node to it. */
+    void connectToPriceServer(QString suggestion = QString());
     /** Terminate the price-server sidecar if running (called on GUI teardown). */
     void stopPriceServer();
     /** Switch to send coins page */

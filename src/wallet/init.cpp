@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <chainparams.h>
 #include <init.h>
 #include <interfaces/chain.h>
 #include <interfaces/init.h>
@@ -81,6 +82,7 @@ void WalletInit::AddWalletOptions(ArgsManager& argsman) const
 
 #ifdef USE_BDB
     argsman.AddArg("-dblogsize=<n>", strprintf("Flush wallet database activity from memory to disk log every <n> megabytes (default: %u)", DEFAULT_WALLET_DBLOGSIZE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET_DEBUG_TEST);
+    argsman.AddArg("-testfeedecisiondelay=<ms>", "Wait this long between building a transaction and committing it in the sends that hold one fee list through commit (sendtoaddress, sendmany, issueasset, reissueasset and the others that use them), so a test can change the fee whitelist in between. Refused on chains that do not mine blocks on demand (the testnet, the mainnet). (default: 0)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET_DEBUG_TEST);
     argsman.AddArg("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", DEFAULT_FLUSHWALLET), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET_DEBUG_TEST);
     argsman.AddArg("-privdb", strprintf("Sets the DB_PRIVATE flag in the wallet db environment (default: %u)", DEFAULT_WALLET_PRIVDB), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET_DEBUG_TEST);
 #else
@@ -105,6 +107,20 @@ bool WalletInit::ParameterInteraction() const
          return InitError(Untranslated("A version conflict was detected between the run-time BerkeleyDB library and the one used during compilation."));
      }
 #endif
+    if (gArgs.IsArgSet("-testfeedecisiondelay")) {
+        // Named chains are public networks or their parameters; the switch is
+        // for regtest and custom chains, where a test controls every block.
+        // (MineBlocksOnDemand() does not tell them apart: the public testnet
+        // sets the flag it reads.)
+        const std::string chain = Params().NetworkIDString();
+        for (const std::string& named : {CBaseChainParams::MAIN, CBaseChainParams::SEQUENTIA, CBaseChainParams::TESTNET,
+                                         CBaseChainParams::SIGNET, CBaseChainParams::LIQUID1,
+                                         CBaseChainParams::LIQUID1TEST, CBaseChainParams::LIQUIDTESTNET}) {
+            if (chain == named) {
+                return InitError(Untranslated("-testfeedecisiondelay is for private test chains only (regtest or a custom chain): it holds every send between building and committing it."));
+            }
+        }
+    }
     if (gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
         for (const std::string& wallet : gArgs.GetArgs("-wallet")) {
             LogPrintf("%s: parameter interaction: -disablewallet -> ignoring -wallet=%s\n", __func__, wallet);

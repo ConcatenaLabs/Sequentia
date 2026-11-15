@@ -5,6 +5,7 @@
 #include <interfaces/wallet.h>
 
 #include <consensus/amount.h>
+#include <exchangerates.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
 #include <policy/fees.h>
@@ -294,6 +295,20 @@ public:
     {
         LOCK(m_wallet->cs_wallet);
         m_wallet->CommitTransaction(std::move(tx), std::move(value_map), std::move(order_form), blind_details);
+    }
+    bool commitTransactionUnderFeeList(CTransactionRef tx,
+        WalletValueMap value_map,
+        WalletOrderForm order_form,
+        BlindDetails* blind_details,
+        std::string& fee_refusal) override
+    {
+        LOCK2(m_wallet->cs_wallet, g_fee_decision_mutex);
+        if (const std::optional<std::string> refused = FeeRefusalUnderList(*m_wallet, tx)) {
+            fee_refusal = *refused;
+            return false;
+        }
+        m_wallet->CommitTransaction(std::move(tx), std::move(value_map), std::move(order_form), blind_details);
+        return true;
     }
     bool transactionCanBeAbandoned(const uint256& txid) override { return m_wallet->TransactionCanBeAbandoned(txid); }
     bool abandonTransaction(const uint256& txid) override

@@ -1131,7 +1131,15 @@ static bool CreateTransactionInternal(
         // asset, and "choose a different fee asset" would send the user round
         // every asset in turn. Say what is actually missing.
         if (!ExchangeRateMap::GetInstance().HasAcceptedAsset()) {
-            error = _("This node accepts no asset for transaction fees yet, so nothing can be sent. Write the fee whitelist first: list assets and prices in exchangerates.json or with setfeeexchangerates, or set up a price server. Receiving is not affected.");
+            const FeeListSource source = GetFeeListSource();
+            if (source.connected) {
+                // Waiting for the price server is not the operator's mistake,
+                // and telling them to write the list would end the connection.
+                error = strprintf(_("This node is connected to the price server at %s, which has not sent a fee whitelist yet (%s), so nothing can be sent until it does. Receiving is not affected."),
+                                  source.url, source.last_error.empty() ? "no answer yet" : source.last_error);
+                return false;
+            }
+            error = _("This node accepts no asset for transaction fees yet, so nothing can be sent. Write the fee whitelist first: list assets and prices in exchangerates.json or with setfeeexchangerates, or connect to a price server (setfeepriceserver). Receiving is not affected.");
             return false;
         }
         CAmount probe = ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue();
@@ -2373,6 +2381,25 @@ static bool CreateTransactionInternal(
     }
 
 
+    // SEQUENTIA: the fee whitelist can change while the transaction is built
+    // (a connected node reads its price server's list every minute). Checked
+    // again here, before anything is signed: a fee asset that stopped being
+    // accepted, or a fee its rate now values at nothing, is refused rather
+    // than signed into a transaction no node relays.
+    if (g_con_any_asset_fees) {
+        ExchangeRateMap& rates = ExchangeRateMap::GetInstance();
+        if (rates.ConvertAmountToValue(exchange_rate_scale, coin_selection_params.m_fee_asset).GetValue() <= 0) {
+            error = _("The fee asset stopped being accepted by this node while the transaction was being built (its fee whitelist changed). Nothing was signed; try again, or choose another fee asset.");
+            return false;
+        }
+        if (nFeeRet <= 0 || rates.ConvertAmountToValue(nFeeRet, coin_selection_params.m_fee_asset).GetValue() <= 0) {
+            if (coin_selection_params.m_effective_feerate.GetFeePerK() > 0) {
+                error = _("The fee came to nothing at the fee asset's current rate (its fee whitelist changed while the transaction was being built). Nothing was signed; try again.");
+                return false;
+            }
+        }
+    }
+
     if (sign) {
         if (!wallet.SignTransaction(txNew)) {
             error = _("Signing transaction failed");
@@ -2605,4 +2632,44 @@ bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet,
 
     return true;
 }
+std::optional<std::string> FeeRefusalUnderList(const CWallet& wallet, const CTransactionRef& tx)
+{
+    AssertLockHeld(g_fee_decision_mutex);
+    if (!g_con_any_asset_fees || !wallet.GetBroadcastTransactions()) return std::nullopt;
+    const std::optional<interfaces::MempoolRefusal> refusal = wallet.chain().checkMempoolAccept(tx);
+    const CAsset fee_asset = tx->GetFeeAsset(::policyAsset);
+    if (!refusal) {
+        // The node takes the transaction. The wallet's own ceiling (-maxtxfee)
+        // is judged at the rate in force too, as the relay judges it a moment
+        // later under this same lock: a fee asset whose rate rose makes the
+        // same fee worth more, and a transaction the ceiling stopped would be
+        // kept by the wallet, unsent, with its txid returned to the caller.
+        CAmount fee{0};
+        for (const CTxOut& out : tx->vout) {
+            if (out.IsFee() && out.nAsset.IsExplicit() && out.nValue.IsExplicit() && out.nAsset.GetAsset() == fee_asset) {
+                fee += out.nValue.GetAmount();
+            }
+        }
+        if (wallet.m_default_max_tx_fee > 0 &&
+            ExchangeRateMap::GetInstance().ConvertAmountToValue(fee, fee_asset).GetValue() > wallet.m_default_max_tx_fee) {
+            return strprintf("The fee this transaction pays is now worth more than this wallet's limit (-maxtxfee): the "
+                             "fee asset's rate in this node's fee whitelist changed while the transaction was being "
+                             "built or reviewed. Nothing was sent; review the new fee and send again.");
+        }
+        return std::nullopt;
+    }
+    if (refusal->reason != "min relay fee not met" && refusal->reason != "insufficient fee" &&
+        refusal->reason != "mempool min fee not met") {
+        return std::nullopt;
+    }
+    if (ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, fee_asset).GetValue() <= 0) {
+        return strprintf("This node no longer accepts %s for fees: its fee whitelist changed while the transaction "
+                         "was being built or reviewed. Nothing was sent; send again and choose another fee asset.",
+                         fee_asset.GetHex());
+    }
+    return strprintf("The fee this transaction pays is now below what this node requires (%s): the fee asset's "
+                     "rate in its fee whitelist changed while the transaction was being built or reviewed. Nothing "
+                     "was sent; review the new fee and send again.", refusal->reason);
+}
+
 } // namespace wallet

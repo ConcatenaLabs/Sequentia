@@ -73,12 +73,12 @@ class AnyAssetFeeFeedDisplayOnlyTest(BitcoinTestFramework):
         assert_equal(info['accepted'], False)
 
         self.log.info("An asset the operator leaves out stays out")
-        node.setfeeexchangerates({policy: 500000000}, False)
+        node.setfeeexchangerates({policy: 500000000})
         self.let_the_feed_poll()
         assert_equal(node.getfeeexchangerates(), {policy: 500000000})
 
         self.log.info("A cleared whitelist stays cleared")
-        node.setfeeexchangerates({}, False)
+        node.setfeeexchangerates({})
         self.let_the_feed_poll()
         assert_equal(node.getfeeexchangerates(), {})
 

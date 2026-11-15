@@ -154,6 +154,16 @@ public:
         WalletOrderForm order_form,
         wallet::BlindDetails* blind_details) = 0;
 
+    //! Commit a transaction if this node accepts its fee under the fee
+    //! whitelist in force now, judged and committed under the lock every
+    //! writer of the whitelist takes. Returns false, committing nothing, with
+    //! what to tell the user in fee_refusal, if the fee is no longer accepted.
+    virtual bool commitTransactionUnderFeeList(CTransactionRef tx,
+        WalletValueMap value_map,
+        WalletOrderForm order_form,
+        wallet::BlindDetails* blind_details,
+        std::string& fee_refusal) = 0;
+
     //! Return whether transaction can be abandoned.
     virtual bool transactionCanBeAbandoned(const uint256& txid) = 0;
 

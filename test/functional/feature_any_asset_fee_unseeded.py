@@ -18,7 +18,6 @@ What must hold for such a node:
     back empty, a configured one comes back configured.
 """
 
-import json
 import os
 import time
 
@@ -32,8 +31,8 @@ NOT_SET_UP = "This node accepts no asset for transaction fees yet"
 STARTUP_NOTICE = (
     "Warning: This node accepts no asset for transaction fees, so it will not send or relay "
     "transactions. It still validates the chain, and its wallet can still receive. To change "
-    "that, write the fee whitelist: list assets and prices in exchangerates.json or with "
-    "setfeeexchangerates, or set up a price server to keep it current."
+    "that, write the fee whitelist by hand, in exchangerates.json or with setfeeexchangerates, "
+    "or connect the node to a price server (-feepriceserver or setfeepriceserver) to keep it current."
 )
 
 
@@ -73,8 +72,8 @@ class AnyAssetFeeUnseededTest(BitcoinTestFramework):
         assert_equal(seeded.getfeeexchangerates(), {policy: 100000000})
         assert_equal(unseeded.getfeeexchangerates(), {})
         assert_equal(unseeded.getfeeacceptancepolicy(), {})
-        with open(self.whitelist_file(unseeded), encoding="utf8") as f:
-            assert_equal(json.load(f), {})
+        # Startup writes no list: an unconfigured node's data directory holds none.
+        assert not os.path.exists(self.whitelist_file(unseeded))
 
         self.log.info("It says so at startup, on stderr and in the log")
         self.stop_node(1, expected_stderr=STARTUP_NOTICE)

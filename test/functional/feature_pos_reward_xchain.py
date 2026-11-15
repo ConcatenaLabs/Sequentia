@@ -256,7 +256,7 @@ class RewardXchainTest(BitcoinTestFramework):
             rates = rates["rates"]
         rates = {k: v for k, v in rates.items()}
         rates[taken] = 100000000
-        seq.setfeeexchangerates(rates, False)
+        seq.setfeeexchangerates(rates)
         assert taken in seq.getfeeexchangerates()
         assert untaken not in seq.getfeeexchangerates()
         self.log.info("fee-accepted asset %s..., unaccepted asset %s...",

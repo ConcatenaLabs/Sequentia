@@ -8,6 +8,7 @@
 #include <block_proof.h>
 #include <core_io.h>
 #include <deploymentstatus.h>
+#include <exchangerates.h>
 #include <issuance.h>
 #include <supervision.h>
 #include <key_io.h>
@@ -42,6 +43,7 @@ using wallet::LegacyScriptPubKeyMan;
 // forward declarations
 namespace wallet {
 UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vector<CRecipient> &recipients, mapValue_t map_value, bool verbose, bool ignore_blind_fail);
+void CommitTransactionUnderFeeList(CWallet& wallet, CTransactionRef tx, mapValue_t map_value, BlindDetails* blind_details);
 RPCHelpMan signrawtransactionwithwallet();
 }
 
@@ -1429,7 +1431,7 @@ static CTransactionRef SendGenerationTransaction(const CScript& asset_script, co
     // one place that is guaranteed to still exist when the issuer comes back to
     // register, possibly days and one restart later.
     if (!contract_json.empty()) map_value["assetcontract"] = contract_json;
-    pwallet->CommitTransaction(tx_ref, std::move(map_value), {} /* orderForm */, &blind_details);
+    CommitTransactionUnderFeeList(*pwallet, tx_ref, std::move(map_value), &blind_details);
 
     return tx_ref;
 }

@@ -28,8 +28,8 @@ CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset
         // branch for the policy asset means either that the seed was replaced
         // by a whitelist that leaves it out, which is an operator policy and
         // refusing is the honest reading of it (the same policy stated as an
-        // explicit rate of 0), or that the chain starts unseeded (the mainnet)
-        // and nobody has listed it yet.
+        // explicit rate of 0), or that the chain starts unseeded (the mainnet
+        // and the testnet) and nobody has listed it yet.
         return CValue(0);
     }
     auto scaled_value = it->second.m_scaled_value;
@@ -177,9 +177,16 @@ UniValue ExchangeRateMap::AcceptancePolicyToJSON() {
 }
 
 bool ExchangeRateMap::LoadFromJSON(std::map<std::string, UniValue> json, std::vector<std::string>& errors) {
-    bool hasError = false;
     std::map<CAsset, CAmount> parsedRates;
-    for (auto rate : json) {
+    if (!ParseJSON(json, parsedRates, errors)) return false;
+    SetRates(parsedRates);
+    return true;
+}
+
+bool ExchangeRateMap::ParseJSON(const std::map<std::string, UniValue>& json, std::map<CAsset, CAmount>& parsedRates, std::vector<std::string>& errors) {
+    bool hasError = false;
+    parsedRates.clear();
+    for (const auto& rate : json) {
         CAsset asset = GetAssetFromString(rate.first);
         if (asset.IsNull()) {
             // SEQUENTIA: GetAssetFromString() collapses several different
@@ -222,7 +229,94 @@ bool ExchangeRateMap::LoadFromJSON(std::map<std::string, UniValue> json, std::ve
             }
         }
     }
-    if (hasError) return false;
-    SetRates(parsedRates);
+    return !hasError;
+}
+
+Mutex g_fee_decision_mutex;
+
+namespace {
+Mutex g_fee_list_source_mutex;
+FeeListSource g_fee_list_source GUARDED_BY(g_fee_list_source_mutex);
+} // namespace
+
+FeeListSource GetFeeListSource()
+{
+    LOCK(g_fee_list_source_mutex);
+    return g_fee_list_source;
+}
+
+void SetFeeListSource(const FeeListSource& source)
+{
+    LOCK(g_fee_list_source_mutex);
+    g_fee_list_source = source;
+}
+
+void UpdateFeeListSource(const std::function<void(FeeListSource&)>& fn)
+{
+    LOCK(g_fee_list_source_mutex);
+    fn(g_fee_list_source);
+}
+
+static FeeListApply ApplyLocked(const std::string& url, const std::map<CAsset, CAmount>& rates,
+                                int64_t published, int64_t now, const std::function<void()>& taken)
+    EXCLUSIVE_LOCKS_REQUIRED(g_fee_list_source_mutex)
+{
+    if (!g_fee_list_source.connected || g_fee_list_source.url != url) return FeeListApply::NOT_CONNECTED;
+    if (g_fee_list_source.have_list && published < g_fee_list_source.list_published) return FeeListApply::OLDER;
+    ExchangeRateMap::GetInstance().SetRates(rates);
+    g_fee_list_source.have_list = true;
+    g_fee_list_source.last_written = now;
+    g_fee_list_source.list_published = published;
+    g_fee_list_source.last_error.clear();
+    if (taken) taken();
+    return FeeListApply::TAKEN;
+}
+
+FeeListApply ApplyPriceServerFeeList(const std::string& url, const std::map<CAsset, CAmount>& rates,
+                                     int64_t published, int64_t now, const std::function<void()>& taken)
+{
+    LOCK2(g_fee_decision_mutex, g_fee_list_source_mutex);
+    return ApplyLocked(url, rates, published, now, taken);
+}
+
+FeeListApply ConnectPriceServerFeeList(const FeeListSource& connection, const std::map<CAsset, CAmount>& rates,
+                                       int64_t published, int64_t now, const std::function<void()>& taken)
+{
+    LOCK2(g_fee_decision_mutex, g_fee_list_source_mutex);
+    const FeeListSource current = g_fee_list_source;
+    g_fee_list_source = connection;
+    if (current.connected && current.url == connection.url) {
+        // The same address: the list in force is still this server's.
+        g_fee_list_source.have_list = current.have_list;
+        g_fee_list_source.last_written = current.last_written;
+        g_fee_list_source.list_published = current.list_published;
+        g_fee_list_source.last_error = current.last_error;
+    } else {
+        g_fee_list_source.have_list = false;
+        g_fee_list_source.last_written = 0;
+        g_fee_list_source.list_published = 0;
+        g_fee_list_source.last_error.clear();
+    }
+    return ApplyLocked(connection.url, rates, published, now, taken);
+}
+
+bool WriteHandFeeList(const std::map<CAsset, CAmount>& rates, const std::string& why)
+{
+    LOCK2(g_fee_decision_mutex, g_fee_list_source_mutex);
+    const bool was_connected = g_fee_list_source.connected;
+    if (was_connected) {
+        g_fee_list_source.connected = false;
+        g_fee_list_source.ended = why;
+    }
+    ExchangeRateMap::GetInstance().SetRates(rates);
+    return was_connected;
+}
+
+bool DisconnectFeePriceServer(const std::string& why)
+{
+    LOCK(g_fee_list_source_mutex);
+    if (!g_fee_list_source.connected) return false;
+    g_fee_list_source.connected = false;
+    g_fee_list_source.ended = why;
     return true;
 }

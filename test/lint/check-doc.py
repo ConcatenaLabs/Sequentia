@@ -30,6 +30,8 @@ SET_DOC_OPTIONAL.update(['-con_fpowallowmindifficultyblocks', '-con_fpownoretarg
 # SEQUENTIA: hidden chain parameters, registered via AddHiddenArgs in init.cpp
 # alongside the -con_* arguments above, so they carry no AddArg documentation.
 SET_DOC_OPTIONAL.update(['-con_utxo_recovery_retire', '-con_utxo_recovery_create'])
+# SEQUENTIA: settings.json's records of the fee whitelist's last choice; never set by hand.
+SET_DOC_OPTIONAL.update(['-feepriceserverconf', '-feelisthand'])
 
 
 def lint_missing_argument_documentation():

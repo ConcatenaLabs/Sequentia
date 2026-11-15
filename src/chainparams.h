@@ -141,10 +141,11 @@ public:
     //! address format matches Bitcoin's). See doc/sequentia/01-architecture.md.
     bool DefaultBlindedAddresses() const { return m_default_blinded_addresses; }
     //! SEQUENTIA: whether an unconfigured node starts with a fee whitelist that
-    //! already accepts the policy asset. False on the Sequentia mainnet: there a
-    //! node accepts no fee asset until its operator writes the whitelist, by
-    //! hand or through a price server, so no asset is accepted merely by
-    //! default. See doc/sequentia/02-open-fee-market.md.
+    //! already accepts the policy asset. False on the Sequentia mainnet and
+    //! testnet: there a node accepts no fee asset until its whitelist is
+    //! written, by hand or by a price server, so no asset is accepted merely by
+    //! default. True on custom chains unless -con_seed_fee_whitelist=0. See
+    //! doc/sequentia/02-open-fee-market.md.
     bool SeedFeeWhitelist() const { return m_seed_fee_whitelist; }
     bool anyonecanspend_aremine;
     const std::string& ParentBech32HRP() const { return parent_bech32_hrp; }

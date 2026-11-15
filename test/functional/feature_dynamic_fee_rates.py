@@ -4,11 +4,11 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Tests the fee-asset exchange-rate whitelist (setfeeexchangerates).
 
-There is a SINGLE whitelist. "Static" versus "dynamic" is only how it is
-operated, not a protocol distinction: an operator setting rates by hand persists
-them to exchangerates.json (the default), while a price server driving the
-whitelist automatically pushes with persist=false so its rates are re-sent each
-poll and never outlive a dead feed across a restart. See
+There is a SINGLE whitelist. setfeeexchangerates is the hand write: it is
+saved to exchangerates.json and survives a restart, and the whitelist is static.
+A whitelist is dynamic only when the node is connected to a price server and
+reads its list (feature_any_asset_fee_price_server.py); a price server never
+writes to a node, so persist=false is refused. See
 doc/sequentia/02-open-fee-market.md.
 """
 
@@ -53,9 +53,13 @@ class FeeExchangeRatesTest(BitcoinTestFramework):
         assert self.asset not in node.getfeeexchangerates()
         assert_equal(list(node.getfeeacceptancepolicy().keys()), ['gasset'])
 
-        # --- Automated (price-server-style) push: persist=false --------------
-        # Replaces the whole whitelist in memory without touching the config file.
-        node.setfeeexchangerates({'gasset': 100000000, self.asset: 50000000}, False)
+        # --- A price server never writes to a node: persist=false is refused --
+        assert_raises_rpc_error(-8, "persist=false is refused",
+            node.setfeeexchangerates, {'gasset': 100000000, self.asset: 50000000}, False)
+        assert_equal(node.getfeeexchangerates(), {'gasset': 100000000})
+
+        # --- The hand write ---------------------------------------------------
+        node.setfeeexchangerates({'gasset': 100000000, self.asset: 50000000})
         assert_equal(node.getfeeexchangerates(),
                      {'gasset': 100000000, self.asset: 50000000})
         assert_equal(node.getfeeacceptancepolicy()[self.asset]['rate'], 50000000)
@@ -71,13 +75,7 @@ class FeeExchangeRatesTest(BitcoinTestFramework):
         assert txid not in node.getrawmempool()
         assert_equal(node.gettransaction(txid)['confirmations'], 1)
 
-        # A persist=false push does NOT survive a restart: the whitelist reverts
-        # to whatever was last persisted (here, the default policy-asset entry).
-        # This is the fail-safe for a dead price server.
-        self.restart_node(0)
-        assert_equal(node.getfeeexchangerates(), {'gasset': 100000000})
-
-        # --- Operator (static) set: persist defaults to true -----------------
+        # --- A new hand write replaces it, and survives a restart -------------
         node.setfeeexchangerates({'gasset': 100000000, self.asset: 75000000})
         assert_equal(node.getfeeexchangerates()[self.asset], 75000000)
         # It survives a restart.
@@ -96,8 +94,8 @@ class FeeExchangeRatesTest(BitcoinTestFramework):
             assetamount=10, tokenamount=0, blind=False, fee_asset='gasset')['asset']
         self.generate(node, 1)
         assert other not in node.getfeeexchangerates()
-        # Re-admit self.asset (in memory) so the wallet can spend it.
-        node.setfeeexchangerates({'gasset': 100000000, self.asset: 50000000}, False)
+        # Re-admit self.asset so the wallet can spend it.
+        node.setfeeexchangerates({'gasset': 100000000, self.asset: 50000000})
         assert_raises_rpc_error(-6, None,
             node.sendtoaddress,
             address=addr, amount=1.0, assetlabel=self.asset, fee_asset_label=other)

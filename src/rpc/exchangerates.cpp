@@ -5,12 +5,14 @@
 #include <assetsdir.h>
 #include <exchangerates.h>
 #include <feeassets.h>
+#include <feepriceserver.h>
 #include <referenceprices.h>
 #include <rpc/register.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
 #include <txmempool.h>
+#include <util/system.h>
 #include <util/time.h>
 
 using node::NodeContext;
@@ -52,19 +54,18 @@ static RPCHelpMan setfeeexchangerates()
                 "as if it were listed at rate 0, and that applies to every asset including the fee/policy asset:\n"
                 "the reference unit is an abstract factor, never a token, so no asset is valued by default. Passing\n"
                 "{} therefore leaves this node accepting NO fee asset at all, which will empty its mempool.\n"
-                "\nThere is a single whitelist; \"static\" versus \"dynamic\" is only how it is operated, not a\n"
-                "protocol distinction. By default the set persists to " + exchange_rates_config_file + " so a\n"
-                "hand-configured (static) whitelist survives a restart. A price server that drives the whitelist\n"
-                "automatically (dynamic operation) should pass persist=false: it re-pushes every poll, so persisting\n"
-                "would only churn the file and, worse, leave a dead price server's last rates in force across a\n"
-                "restart instead of failing back to the persisted static whitelist.\n",
+                "\nThis is the hand write. There is a single whitelist: static when written by hand, and dynamic\n"
+                "when the node is connected to a price server and reads the list it publishes (setfeepriceserver).\n"
+                "A hand write ends that connection, and the whitelist stays static until the node is connected\n"
+                "again. The set is saved to " + exchange_rates_config_file + ", and the choice recorded in\n"
+                "settings.json, so it survives a restart. A price server never writes to a node.\n",
                 {
                     {"rates", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::NO, "",
                         {
                             {"asset", RPCArg::Type::NUM, RPCArg::Optional::NO, CreateExchangeRatesDescription()}
                         },
                     },
-                    {"persist", RPCArg::Type::BOOL, RPCArg::Default{true}, "Write the whitelist to " + exchange_rates_config_file + " so it survives a restart. Pass false for automated (price-server) pushes that are re-sent each poll."},
+                    {"persist", RPCArg::Type::BOOL, RPCArg::Default{true}, "Must be true: the hand write is saved to " + exchange_rates_config_file + ". false is refused, since a price server never writes to a node: connect the node to it with setfeepriceserver instead."},
                 },
                 RPCResult{RPCResult::Type::NONE, "", ""},
                 RPCExamples{
@@ -76,15 +77,20 @@ static RPCHelpMan setfeeexchangerates()
     UniValue json = request.params[0].get_obj();
     std::map<std::string, UniValue> jsonRates;
     json.getObjMap(jsonRates);
-    auto& exchangeRateMap = ExchangeRateMap::GetInstance();
+    if (!request.params[1].isNull() && !request.params[1].get_bool()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "persist=false is refused: a price server never writes to a node. Connect this node to the price "
+            "server instead, with setfeepriceserver and the address of the list it publishes");
+    }
     std::vector<std::string> errors;
-    if (!exchangeRateMap.LoadFromJSON(jsonRates, errors)) {
+    std::map<CAsset, CAmount> rates;
+    // Checked before anything changes, so a mistyped list neither writes
+    // nor disconnects the node from its price server.
+    if (!ExchangeRateMap::ParseJSON(jsonRates, rates, errors)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Error loading rates from JSON: %s", MakeUnorderedList(errors)));
     }
-    const bool persist = request.params[1].isNull() ? true : request.params[1].get_bool();
-    if (persist && !exchangeRateMap.SaveToJSONFile(errors)) {
-        throw JSONRPCError(RPC_DATABASE_ERROR, strprintf("Error saving exchange rates to JSON file %s: \n%s\n", exchange_rates_config_file, MakeUnorderedList(errors)));
-    };
+    std::string error;
+    if (!WriteFeeListByHand(rates, error)) throw JSONRPCError(RPC_DATABASE_ERROR, error);
     EnsureAnyMemPool(request.context).RecomputeFees();
     return NullUniValue;
 }
@@ -225,16 +231,106 @@ static RPCHelpMan getreferenceprices()
     };
 }
 
+static UniValue FeePriceServerToJSON()
+{
+    const FeeListSource src = GetFeeListSource();
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("connected", src.connected);
+    out.pushKV("whitelist", src.connected ? "dynamic" : "static");
+    out.pushKV("decided_by", src.decided_by);
+    if (src.connected) {
+        out.pushKV("url", src.url);
+        out.pushKV("default", src.by_default);
+        out.pushKV("has_list", src.have_list);
+        out.pushKV("list_written", src.last_written);
+        out.pushKV("list_published", src.list_published);
+        out.pushKV("last_attempt", src.last_attempt);
+        out.pushKV("last_error", src.last_error);
+    } else if (!src.ended.empty()) {
+        out.pushKV("disconnected_because", src.ended);
+    }
+    out.pushKV("network_price_server", DefaultFeePriceServer(gArgs));
+    out.pushKV("assets", (int64_t)ExchangeRateMap::GetInstance().GetRates().size());
+    return out;
+}
+
+static const std::vector<RPCResult> FEE_PRICE_SERVER_RESULT{
+    {RPCResult::Type::BOOL, "connected", "Whether this node is connected to a price server, whose published list it reads and which is then its whitelist's only source"},
+    {RPCResult::Type::STR, "whitelist", "\"dynamic\" when connected to a price server, \"static\" when written by hand"},
+    {RPCResult::Type::STR, "decided_by", "Where the choice in force was made: \"command line\", \"configuration file\", \"settings\" (the operator's last setfeepriceserver, hand write or desktop-wallet choice, recorded in settings.json), \"default\" (the network's price server), \"whitelist file\" (a list written by hand, which the network's default yields to) or \"none\""},
+    {RPCResult::Type::STR, "url", /*optional=*/true, "The address of the price server's published list"},
+    {RPCResult::Type::BOOL, "default", /*optional=*/true, "Whether the address is the network's price server"},
+    {RPCResult::Type::BOOL, "has_list", /*optional=*/true, "Whether a list from this price server is in force"},
+    {RPCResult::Type::NUM_TIME, "list_written", /*optional=*/true, "When the list in force was taken from the price server (" + UNIX_EPOCH_TIME + "), 0 if never"},
+    {RPCResult::Type::NUM_TIME, "list_published", /*optional=*/true, "When the price server says it published that list (" + UNIX_EPOCH_TIME + ")"},
+    {RPCResult::Type::NUM_TIME, "last_attempt", /*optional=*/true, "When this node last asked the price server (" + UNIX_EPOCH_TIME + ")"},
+    {RPCResult::Type::STR, "last_error", /*optional=*/true, "Why the last answer was refused or did not arrive; empty after a list was taken. The list in force is kept meanwhile"},
+    {RPCResult::Type::STR, "disconnected_because", /*optional=*/true, "Why the node disconnected from its price server, when it did since it started"},
+    {RPCResult::Type::STR, "network_price_server", "The network's price server for this chain (empty where there is none, as on the mainnet)"},
+    {RPCResult::Type::NUM, "assets", "How many assets the whitelist lists"},
+};
+
+static RPCHelpMan getfeepriceserver()
+{
+    return RPCHelpMan{"getfeepriceserver",
+                "\nWhether this node is connected to a price server, how, and when its fee whitelist was last written.\n"
+                "The whitelist is static when written by hand, and dynamic when the node is connected to a price server\n"
+                "and reads the list that server publishes.\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ, "", "", FEE_PRICE_SERVER_RESULT},
+                RPCExamples{
+                    HelpExampleCli("getfeepriceserver", "")
+                  + HelpExampleRpc("getfeepriceserver", "")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    {
+        return FeePriceServerToJSON();
+    }
+    };
+}
+
+static RPCHelpMan setfeepriceserver()
+{
+    return RPCHelpMan{"setfeepriceserver",
+                "\nConnect this node to a price server, its operator's own or another operator's, or disconnect it.\n"
+                "Connected, the node's fee whitelist is dynamic: the node reads the list the price server publishes,\n"
+                "now and every -feepriceserverpoll seconds, and that list is its only source. The node asks first and\n"
+                "connects only if the answer is a price server's published list; a price feed API's answer, or\n"
+                "anything else, is refused and changes nothing.\n"
+                "\nAn empty address disconnects: the list in force is kept, as a static whitelist saved to\n"
+                + exchange_rates_config_file + ". Either way the choice is recorded in settings.json.\n",
+                {
+                    {"url", RPCArg::Type::STR, RPCArg::Optional::NO, "The address of the price server's published list (http only): its /feewhitelist, or where its --publish-file is served; \"\" to disconnect"},
+                },
+                RPCResult{RPCResult::Type::OBJ, "", "", FEE_PRICE_SERVER_RESULT},
+                RPCExamples{
+                    HelpExampleCli("setfeepriceserver", "\"http://sequentiatestnet.com/feewhitelist\"")
+                  + HelpExampleCli("setfeepriceserver", "\"\"")
+                  + HelpExampleRpc("setfeepriceserver", "\"http://127.0.0.1:8089/feewhitelist\"")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+    {
+        std::string error;
+        if (!SetFeePriceServer(request.params[0].get_str(), error)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+        }
+        EnsureAnyMemPool(request.context).RecomputeFees();
+        return FeePriceServerToJSON();
+    }
+    };
+}
+
 void RegisterExchangeRatesRPCCommands(CRPCTable &t)
 {
 // clang-format off
-
 static const CRPCCommand commands[] =
 { //  category              actor (function)
   //  --------------------- ------------------------
     { "exchangerates",      &getfeeexchangerates,                  },
     { "exchangerates",      &getreferenceprices,                   },
     { "exchangerates",      &setfeeexchangerates,                  },
+    { "exchangerates",      &getfeepriceserver,                    },
+    { "exchangerates",      &setfeepriceserver,                    },
     { "exchangerates",      &getfeeacceptancepolicy,               },
     { "exchangerates",      &getfeeassetinfo,                      },
 };
