@@ -26,9 +26,11 @@ replaced: Bitcoin replaces X's anchor. Restarted, M finds the anchor gone, X
   anchoring is supreme, and the record never blocks a block Bitcoin's move
   makes possible.
 
-In both cases nodes 3 and 4 then return, a sibling of X is certified at H, and
-after a block index write M's record no longer holds X: a certified sibling on
-the active chain took its height.
+In both cases nodes 3 and 4 then return and a sibling of X is certified at H.
+After a block index write, M's record drops its entries for the certified
+sibling (the block index answers for it: the check holds it as certified) and
+keeps X: nothing else would hold X if Bitcoin later replaced the sibling's
+anchor and not X's.
 """
 
 import http.client
@@ -306,10 +308,11 @@ class PosSigningRecordAnchorTest(BitcoinTestFramework):
         at_h = m.getblockhash(h)
         assert at_h != x and m.getblockheader(at_h)["poscertified"]
         m.gettxoutsetinfo()  # a block index write
-        left = [e for e in m.getsigningrecord()["entries"] if e["hash"] == x]
-        assert not left, "%s: X stays in the record after a certified sibling took its height" % case
         rec = m.getsigningrecord()
-        self.record("%s drop" % case, "after the index write: X dropped; %d entr(ies), %d bytes on disk; appends %d, last %d us, slowest %d us, mean %.0f us" %
+        assert [e for e in rec["entries"] if e["hash"] == x], "%s: X left the record when a certified sibling took its height" % case
+        assert not [e for e in rec["entries"] if e["hash"] == at_h], "%s: the certified sibling stays in the record after the index write" % case
+        assert [h_ for h_ in rec["held"] if h_["hash"] == at_h and h_["certified"]], "%s: the check does not hold the certified sibling" % case
+        self.record("%s drop" % case, "after the index write: X kept, the certified sibling dropped (the index answers for it); %d entr(ies), %d bytes on disk; appends %d, last %d us, slowest %d us, mean %.0f us" %
                     (len(rec["entries"]), rec["file_bytes"], rec["appends"], rec["last_append_us"], rec["max_append_us"],
                      rec["total_append_us"] / max(1, rec["appends"])))
 
