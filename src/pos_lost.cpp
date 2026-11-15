@@ -985,7 +985,7 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     // PROTOTYPE LIMIT: the registry used is the active tip's. That is the
     // parent's only when no block since the fork point changed the stake
     // (true in the tests here); the specification needs the registry
-    // reconstructed at the parent (doc 04, "Lost blocks").
+    // reconstructed at the parent (doc 03 §3, "Transactions of a lost block").
     CBlockIndex parent_idx;
     parent_idx.nHeight = height - 1;
     parent_idx.m_anchor_height = parent_anchor_h;
@@ -1279,6 +1279,10 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         }
         BlockValidationState state;
         chainman.ActiveChainstate().ActivateBestChain(state);
+        // The children of a refused block were refused at their headers
+        // without being kept (bad-prevblk-lost-respend): ask every peer for
+        // headers again, so they are taken now and not at the next block.
+        ++g_anchor_refetch_epoch;
     }
 }
 

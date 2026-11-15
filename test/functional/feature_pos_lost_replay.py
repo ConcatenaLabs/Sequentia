@@ -20,7 +20,7 @@ import os
 import time
 from decimal import Decimal
 
-from feature_pos_lost_blocks import LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N
+from feature_pos_lost_blocks import LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W
 from test_framework.authproxy import JSONRPCException
 from test_framework.messages import tx_from_hex
 from test_framework.util import assert_equal
@@ -210,6 +210,71 @@ class LostReplayTest(LostBlocksTest):
         self.record("r3", "outcome", "block %s at height %d assembled by node 2: tx[1] = T; R not carried (its input is T's)" % (h["hash"][:12], h["height"]))
         self.sync_tips(HONEST + [LATE])
         self.realign()
+
+    # ------------------------------------------------------------ b1, b2
+    def b_setup(self, case):
+        """T certified in L while node 5 is offline; Bitcoin replaces L's anchor; a dishonest quorum
+        certifies X (R) on the fork point. Node 5 then starts with the seller as its only peer."""
+        a = self.nodes[SELLER]
+        self.stop_node(LATE)
+        online = [0, 1, 2, 3, 4]
+        st = self.gap(case, online=online)
+        x = self.respend_block(case, st, ALL_KEYS)
+        since = [self.log_size(i) for i in online]
+        self.start_node(LATE, extra_args=self.node_args(LATE))
+        self.connect_nodes(LATE, SELLER)
+        self.wait_until(lambda: self.nodes[LATE].getbestblockhash() == x["hash"], timeout=60)
+        self.record(case, "node 5 (never saw L) took X from the seller", "tip %s, certified" % x["hash"][:16])
+        return st, x
+
+    def case_b1(self):
+        self.log.info("(b1) a quorum certified X once; the honest chain goes on certified; node 5 on X moves")
+        st, x = self.b_setup("b1")
+        late = self.nodes[LATE]
+        for j in HONEST:
+            self.connect_nodes(LATE, j)
+        self.wait_until(lambda: st["L"] in self.lost(LATE), timeout=60)
+        time.sleep(3)
+        assert_equal(late.getbestblockhash(), x["hash"])
+        self.record("b1", "node 5 shown L", "holds L lost, stays on X (forward-only): %s" % (late.getbestblockhash() == x["hash"]))
+        keys = [1, 2, 3, 4, 5]
+        hs = []
+        for _ in range(4):
+            hs.append(self.produce(1, keys, leaders=[1, 2, 3, 4]))
+        assert_equal(self.nodes[1].getblock(hs[0]["hash"])["tx"][1], st["t_id"])
+        self.sync_tips(HONEST)
+        t0 = time.time()
+        self.record("b1", "honest chain", "4 certified blocks on the fork point (T first), tip height %d" % hs[-1]["height"])
+        self.wait_until(lambda: late.getbestblockhash() == self.nodes[1].getbestblockhash(), timeout=900)
+        line = self.log_has(LATE, "releasing local finality")
+        self.record("b1", "outcome", "node 5 moved to the honest chain %.0f s after it was 4 certified blocks ahead; %s" %
+                    (time.time() - t0, (line[0].split("] ", 3)[-1][:200] if line else "no release line")))
+        self.mesh(range(N))
+        self.realign()
+
+    def case_b2(self):
+        self.log.info("(b2) the quorum stays dishonest: X's chain goes on certified; holders rejoin at the lapse")
+        st, x = self.b_setup("b2")
+        a = self.nodes[SELLER]
+        xs = [x]
+        for _ in range(3):
+            xs.append(self.produce(SELLER, ALL_KEYS, leaders=[SELLER]))
+        for j in HONEST:
+            self.connect_nodes(LATE, j)
+        time.sleep(3)
+        heights = {i: self.nodes[i].getblockcount() for i in HONEST}
+        assert all(not self.in_chain(self.nodes[i], x["hash"]) for i in HONEST)
+        self.record("b2", "split", "X's chain certified to height %d on the seller and node 5; honest nodes refuse it (heights %s)" %
+                    (xs[-1]["height"], heights))
+        anchor_l = self.nodes[1].getlostblocks()["blocks"]
+        a_l = [b["anchorheight"] for b in anchor_l if b["hash"] == st["L"]][0]
+        need = a_l + W + 1
+        t0 = time.time()
+        self.btc_mine(max(0, need - self.btc().getblockcount()))
+        self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == a.getbestblockhash() for i in HONEST), timeout=900)
+        self.record("b2", "outcome", "Bitcoin at %d > a_L + W = %d: every honest node took X's chain in %.1f s; R mined: %s" %
+                    (self.btc().getblockcount(), a_l + W, time.time() - t0, self.block_of(st["r_id"], self.nodes[1]) is not None))
+        self.mesh(range(N))
 
     def run_test(self):
         try:

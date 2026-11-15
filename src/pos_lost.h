@@ -5,7 +5,8 @@
 #ifndef BITCOIN_POS_LOST_H
 #define BITCOIN_POS_LOST_H
 
-// SEQUENTIA: lost blocks (doc/sequentia/04-proof-of-stake.md, "Lost blocks").
+// SEQUENTIA: lost blocks (doc/sequentia/03-bitcoin-anchoring.md §3,
+// "Transactions of a lost block").
 //
 // A lost block is a block that carries its parent's full certification
 // quorum, left the active chain because Bitcoin replaced an anchor on its

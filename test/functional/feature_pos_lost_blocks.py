@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Sequentia developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Lost blocks (doc 04, "Lost blocks"), attacked.
+"""Lost blocks (doc 03 §3, "Transactions of a lost block"), attacked.
 
 A transaction T is certified in block L, Bitcoin then replaces L's anchor, and
 the seller who signed T has a conflicting spend R built into a block. Every
@@ -457,9 +457,11 @@ class LostBlocksTest(BitcoinTestFramework):
         self.record("c1", "node 5 restarted, seller its only peer", "tip %s, X %s, L lost here: %s" %
                     (self.nodes[LATE].getbestblockhash()[:16], self.status_of(self.nodes[LATE], x["hash"]), st["L"] in self.lost(LATE)))
         self.connect_nodes(LATE, 1)
-        self.wait_until(lambda: self.status_of(self.nodes[LATE], x["hash"]) == "invalid" or st["L"] in self.lost(LATE), timeout=30)
-        self.record("c1", "node 5 with an honest peer", "X %s, L lost: %s" % (self.status_of(self.nodes[LATE], x["hash"]), st["L"] in self.lost(LATE)))
+        self.wait_until(lambda: st["L"] in self.lost(LATE), timeout=30)
+        self.record("c1", "node 5 with an honest peer", "X %s, L lost: %s (forward-only: an accepted block stays; it rejoins by reconciliation, case b1)" %
+                    (self.status_of(self.nodes[LATE], x["hash"]), st["L"] in self.lost(LATE)))
         h = self.produce(1, [1], leaders=[1], txs_must=[st["t_id"]])
+        self.nodes[LATE].invalidateblock(x["hash"])  # the harness, not the rule, moves it on
         self.connect_nodes(LATE, 2)
         self.sync_tips(HONEST + [LATE])
         self.record("c1", "outcome", "node 5 on the honest chain with T at height %s" % self.block_of(st["t_id"], self.nodes[LATE]))
@@ -476,6 +478,9 @@ class LostBlocksTest(BitcoinTestFramework):
                     (late_tip[:16], on_x, self.block_of(st["r_id"], self.nodes[LATE]) is not None))
         t0 = time.time()
         self.connect_nodes(LATE, 3)
+        if on_x:
+            self.wait_until(lambda: st["L"] in self.lost(LATE), timeout=60)
+            self.nodes[LATE].invalidateblock(x["hash"])  # the harness, not the rule, moves it on (case b1)
         self.wait_until(lambda: self.nodes[LATE].getbestblockhash() == self.nodes[3].getbestblockhash(), timeout=60)
         self.record("c2", "after an honest peer", "on the honest chain in %.1f s; X %s; T at height %s" %
                     (time.time() - t0, self.status_of(self.nodes[LATE], x["hash"]), self.block_of(st["t_id"], self.nodes[LATE])))
