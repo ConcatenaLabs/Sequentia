@@ -107,8 +107,19 @@ bool WalletInit::ParameterInteraction() const
          return InitError(Untranslated("A version conflict was detected between the run-time BerkeleyDB library and the one used during compilation."));
      }
 #endif
-    if (gArgs.IsArgSet("-testfeedecisiondelay") && !Params().MineBlocksOnDemand()) {
-        return InitError(Untranslated("-testfeedecisiondelay is for test chains only: it holds every send between building and committing it."));
+    if (gArgs.IsArgSet("-testfeedecisiondelay")) {
+        // Named chains are public networks or their parameters; the switch is
+        // for regtest and custom chains, where a test controls every block.
+        // (MineBlocksOnDemand() does not tell them apart: the public testnet
+        // sets the flag it reads.)
+        const std::string chain = Params().NetworkIDString();
+        for (const std::string& named : {CBaseChainParams::MAIN, CBaseChainParams::SEQUENTIA, CBaseChainParams::TESTNET,
+                                         CBaseChainParams::SIGNET, CBaseChainParams::LIQUID1,
+                                         CBaseChainParams::LIQUID1TEST, CBaseChainParams::LIQUIDTESTNET}) {
+            if (chain == named) {
+                return InitError(Untranslated("-testfeedecisiondelay is for private test chains only (regtest or a custom chain): it holds every send between building and committing it."));
+            }
+        }
     }
     if (gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
         for (const std::string& wallet : gArgs.GetArgs("-wallet")) {

@@ -2637,12 +2637,31 @@ std::optional<std::string> FeeRefusalUnderList(const CWallet& wallet, const CTra
     AssertLockHeld(g_fee_decision_mutex);
     if (!g_con_any_asset_fees || !wallet.GetBroadcastTransactions()) return std::nullopt;
     const std::optional<interfaces::MempoolRefusal> refusal = wallet.chain().checkMempoolAccept(tx);
-    if (!refusal) return std::nullopt;
+    const CAsset fee_asset = tx->GetFeeAsset(::policyAsset);
+    if (!refusal) {
+        // The node takes the transaction. The wallet's own ceiling (-maxtxfee)
+        // is judged at the rate in force too, as the relay judges it a moment
+        // later under this same lock: a fee asset whose rate rose makes the
+        // same fee worth more, and a transaction the ceiling stopped would be
+        // kept by the wallet, unsent, with its txid returned to the caller.
+        CAmount fee{0};
+        for (const CTxOut& out : tx->vout) {
+            if (out.IsFee() && out.nAsset.IsExplicit() && out.nValue.IsExplicit() && out.nAsset.GetAsset() == fee_asset) {
+                fee += out.nValue.GetAmount();
+            }
+        }
+        if (wallet.m_default_max_tx_fee > 0 &&
+            ExchangeRateMap::GetInstance().ConvertAmountToValue(fee, fee_asset).GetValue() > wallet.m_default_max_tx_fee) {
+            return strprintf("The fee this transaction pays is now worth more than this wallet's limit (-maxtxfee): the "
+                             "fee asset's rate in this node's fee whitelist changed while the transaction was being "
+                             "built or reviewed. Nothing was sent; review the new fee and send again.");
+        }
+        return std::nullopt;
+    }
     if (refusal->reason != "min relay fee not met" && refusal->reason != "insufficient fee" &&
         refusal->reason != "mempool min fee not met") {
         return std::nullopt;
     }
-    const CAsset fee_asset = tx->GetFeeAsset(::policyAsset);
     if (ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, fee_asset).GetValue() <= 0) {
         return strprintf("This node no longer accepts %s for fees: its fee whitelist changed while the transaction "
                          "was being built or reviewed. Nothing was sent; send again and choose another fee asset.",

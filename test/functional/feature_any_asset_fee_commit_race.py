@@ -15,13 +15,16 @@ nothing is sent and the wallet says why.
 The race is forced: -testfeedecisiondelay holds the send between building the
 transaction and committing it, and the list is written by hand in that gap.
   * the fee asset removed, or set to zero: nothing sent;
-  * its rate raised so the fee is worth less than required: nothing sent;
-  * its rate lowered (the fee is worth more): sent;
+  * its rate lowered so the fee is worth less than required: nothing sent;
+  * its rate raised (the fee is worth more): sent;
+  * its rate raised so far that the fee is worth more than the wallet's
+    ceiling (-maxtxfee): nothing sent, and the wallet keeps no transaction;
   * another asset's rate changed, another asset added or removed, the same
     list written again: sent;
   * an issuance: the same.
-The hand write does not wait for the held send. The switch is refused on a
-chain that does not mine on demand.
+The hand write does not wait for the held send. The switch is refused on the
+mainnet's and on the public testnet's parameters: it is for regtest and custom
+chains.
 """
 
 import threading
@@ -86,12 +89,20 @@ class AnyAssetFeeCommitRaceTest(BitcoinTestFramework):
             self.log.info("Issuance: %s" % name)
             self.race(self.issue, new_list, refusal)
 
-        self.log.info("The switch is refused where blocks are not mined on demand")
+        self.log.info("A rate raised past the wallet's ceiling: nothing sent, nothing kept")
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-maxtxfee=0.1"])
+        self.race(self.send, changed(set={self.asset: 10 ** 18}), "worth more than this wallet's limit")
+        self.race(self.send, changed(set={self.asset: 200000000 * 2}), None)
+
+        self.log.info("The switch is refused on the mainnet's and the public testnet's parameters")
         self.stop_node(0)
-        self.nodes[0].assert_start_raises_init_error(
-            extra_args=self.extra_args[0] + ["-chain=sequentia"],
-            expected_msg="Error: -testfeedecisiondelay is for test chains only",
-            match=ErrorMatch.PARTIAL_REGEX)
+        for chain in ("sequentia", "test"):
+            # No network either way: before the refusal existed for it, a node
+            # started like this on the public testnet's parameters.
+            self.nodes[0].assert_start_raises_init_error(
+                extra_args=self.extra_args[0] + ["-chain=%s" % chain, "-connect=0", "-listen=0", "-dnsseed=0"],
+                expected_msg="Error: -testfeedecisiondelay is for private test chains only",
+                match=ErrorMatch.PARTIAL_REGEX)
 
     def send(self, rpc):
         return rpc.sendtoaddress(address=self.nodes[0].getnewaddress(), amount=Decimal("1"), assetlabel=self.asset,

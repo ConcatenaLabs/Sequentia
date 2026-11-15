@@ -158,12 +158,14 @@ bool CreateTransaction(CWallet& wallet, const std::vector<CRecipient>& vecSend, 
  */
 bool FundTransaction(CWallet& wallet, CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosInOut, bilingual_str& error, bool lockUnspents, const std::set<int>& setSubtractFeeFromOutputs, CCoinControl, bool ignore_blind_fail = true, std::vector<bilingual_str>* warnings = nullptr);
 /**
- * SEQUENTIA: whether this node would refuse tx for its fee under the fee
- * whitelist in force now, judged by the mempool's own acceptance test. Called
- * with g_fee_decision_mutex held, so the list cannot change before the commit
- * that follows. Returns what to tell the user, or nothing when the fee is
- * accepted (whatever else in the list changed) or when the transaction is
- * refused for another reason, which the commit reports as before.
+ * SEQUENTIA: whether tx would be stopped for its fee under the fee whitelist
+ * in force now: refused by the mempool's own acceptance test, or, when the
+ * mempool takes it, worth more at the current rate than this wallet's ceiling
+ * (-maxtxfee), which the relay applies at commit. Called with
+ * g_fee_decision_mutex held, so the list cannot change before the commit that
+ * follows. Returns what to tell the user, or nothing when the fee is accepted
+ * (whatever else in the list changed) or when the transaction is refused for
+ * another reason, which the commit reports as before.
  */
 std::optional<std::string> FeeRefusalUnderList(const CWallet& wallet, const CTransactionRef& tx);
 
