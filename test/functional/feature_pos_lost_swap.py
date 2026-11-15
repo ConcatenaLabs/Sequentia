@@ -458,7 +458,7 @@ class LostSwapTest(LostBlocksTest):
         recs = self.records_in(n1, h["hash"])
         assert len(recs) == 1
         self.sync_tips(range(N))
-        self.record("sC", "record", "block %s at height %d (anchor %d): %d bytes; binds the lock until anchor %d" %
+        self.record("sC", "record", "block %s at height %d (anchor %d): %d bytes; binds the lock until the lapse (anchor above %d once LC's height is rebuilt)" %
                     (h["hash"][:12], h["height"], h["block"]["anchorheight"], len(recs[0]["scriptPubKey"]["hex"]) // 2,
                      st["LC"]["block"]["anchorheight"] + W))
         # A node synced from nothing: no lost block held; it judges from the chain alone.
@@ -476,8 +476,10 @@ class LostSwapTest(LostBlocksTest):
         self.record("sC", "the node synced from nothing", (line[0].split("] ", 3)[-1] if line else "no refusal line")[:280])
         assert line
         self.realign()
-        # The window ends: Bitcoin passes the lost block's anchor + W; the refund is mined.
-        end = st["LC"]["block"]["anchorheight"] + W
+        # The lapse (doc 03): the chain rebuilds LC's height, then W Bitcoin
+        # blocks pass above both LC's anchor and the anchor at that height;
+        # the refund is mined.
+        end = self.pass_lapse(1)
         b = self.btc()
         if b.getblockcount() <= end:
             b.generatetoaddress(end + 1 - b.getblockcount(), self.bbuyer.getnewaddress())
