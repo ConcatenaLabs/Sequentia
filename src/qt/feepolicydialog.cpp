@@ -427,7 +427,7 @@ void FeePolicyDialog::refresh()
     }
     if (accepted == 0) {
         setStatus(m_ps_state.isObject() && m_ps_state["connected"].isTrue()
-                      ? tr("No asset is accepted for fees yet, so this node cannot send until its price server sends a list.")
+                      ? tr("No asset is accepted for fees yet, so this node cannot send until it has read a list from its price server.")
                       : tr("No asset is accepted for fees yet, so this node cannot send. Add one above, connect to a price server, or run your own."),
                   true);
     } else {
