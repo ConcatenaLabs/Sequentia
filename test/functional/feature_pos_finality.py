@@ -24,7 +24,7 @@ never by how the rival arrived.
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, pos_sign_after_share_lock
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 
@@ -88,7 +88,7 @@ class PosFinalityTest(BitcoinTestFramework):
         # comparator ranks the lower hash first: B is rebuilt until it is the
         # lower, so that only the finality gate can keep A.
         for _ in range(30):
-            res_b = n1.generateposblock(leader, [m1, m2])
+            res_b = pos_sign_after_share_lock(n1.generateposblock, leader, [m1, m2])
             b = res_b['hash']
             if hash_order(b) < hash_order(a):
                 break
