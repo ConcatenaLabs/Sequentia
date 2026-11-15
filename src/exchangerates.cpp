@@ -28,8 +28,8 @@ CValue ExchangeRateMap::ConvertAmountToValue(const CAmount& amount, const CAsset
         // branch for the policy asset means either that the seed was replaced
         // by a whitelist that leaves it out, which is an operator policy and
         // refusing is the honest reading of it (the same policy stated as an
-        // explicit rate of 0), or that the chain starts unseeded (the mainnet)
-        // and nobody has listed it yet.
+        // explicit rate of 0), or that the chain starts unseeded (the mainnet
+        // and the testnet) and nobody has listed it yet.
         return CValue(0);
     }
     auto scaled_value = it->second.m_scaled_value;

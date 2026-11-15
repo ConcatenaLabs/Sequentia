@@ -1465,6 +1465,13 @@ public:
         // confidential one (getnewaddress "" "blech32" or -blindedaddresses=1).
         m_default_blinded_addresses = false;
 
+        // No asset is accepted for fees merely by default, here as on the
+        // mainnet: a node accepts what its list says once it is written, by
+        // its operator or by a price server, and nothing before. A data
+        // directory still holding the seed this chain once started with has
+        // it moved aside at startup (init.cpp), not loaded.
+        m_seed_fee_whitelist = false;
+
         // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_test), std::end(chainparams_seed_test));
 
         // This is the default for -checkblockindex, which turns on

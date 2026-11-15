@@ -48,18 +48,27 @@ asset, SEQ, is unlisted-means-refused like everything else.
 What a never configured node accepts depends on the chain
 (`CChainParams::SeedFeeWhitelist`):
 
-- **Mainnet (`sequentia`) starts empty.** The node accepts no asset, and says so
-  at startup. It validates the chain and its wallet receives as usual, but it
-  relays no transaction and its wallet refuses to send, until the operator
-  writes the whitelist by hand or sets up a price server
+- **The mainnet (`sequentia`) and the testnet (`test`) start empty.** The node
+  accepts no asset, and says so at startup. It validates the chain and its
+  wallet receives as usual, but it relays no transaction and its wallet refuses
+  to send, until the whitelist is written by hand or by a price server
   ([§5](#5-the-price-server)). No asset is pre-loaded, so none is favoured, and
   the node does not appear to work before somebody has decided what it accepts
   and at what price.
-- **The testnet and custom chains start from a seed**: the map is constructed
-  holding SEQ at `1e8` (`ExchangeRateMap::ResetToBootstrapRates`), so a test
-  node can send without any setup, and any write that replaces the table
-  replaces the seed along with it. A custom chain can start empty as mainnet
-  does with `-con_seed_fee_whitelist=0`.
+- **Custom chains start from a seed**: the map is constructed holding SEQ at
+  `1e8` (`ExchangeRateMap::ResetToBootstrapRates`), so a regtest node can send
+  without any setup, and any write that replaces the table replaces the seed
+  along with it. `-con_seed_fee_whitelist=0` makes a custom chain start empty as
+  the public chains do.
+
+The testnet once seeded SEQ as well, and a node saved its whitelist to
+`exchangerates.json` at every start, so a testnet data directory can hold that
+seed without anyone having chosen it. On a chain that no longer seeds, a file
+holding the policy asset at `1e8` and nothing else is therefore moved aside to
+`exchangerates.json.old-seed` at startup rather than loaded, and the node starts
+empty. Any other content is the operator's list and is loaded as written, as is
+a file named with `-initialexchangeratesjsonfile`. The mainnet never seeded, so
+there every file is loaded.
 
 An empty whitelist is a state the operator can also return to on any chain, by
 writing `{}`. The node then behaves as an unconfigured mainnet node does.
@@ -150,10 +159,10 @@ affordance in front of the user, not a rule hidden in the back end.
 ## 4. Fee floors and replacement, in reference units
 
 Every configured fee floor is denominated in the reference unit, so the mempool
-and miner treat all assets uniformly. Where the seed is in place it prices SEQ
-at 1:1 with rfa, so a SEQ-atom floor equals an rfa floor there; a producer that
-re-prices SEQ, or drops it in favour of other assets, changes that equivalence
-while the floors stay rfa-denominated.
+and miner treat all assets uniformly. Where the seed is in place (custom
+chains) it prices SEQ at 1:1 with rfa, so a SEQ-atom floor equals an rfa floor
+there; a producer that re-prices SEQ, or drops it in favour of other assets,
+changes that equivalence while the floors stay rfa-denominated.
 
 - **Mempool acceptance** (`MemPoolAccept::CheckFeeRate`) compares the
   rfa-converted modified fee against the rolling mempool minimum (itself an rfa

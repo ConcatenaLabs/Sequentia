@@ -69,6 +69,7 @@
 #include <util/check.h>
 #include <util/moneystr.h>
 #include <util/strencodings.h>
+#include <util/settings.h>
 #include <util/string.h>
 #include <util/syscall_sandbox.h>
 #include <util/system.h>
@@ -757,6 +758,19 @@ static bool AppInitServers(NodeContext& node)
     if (args.GetBoolArg("-rest", DEFAULT_REST_ENABLE)) StartREST(&node);
     StartHTTPServer();
     return true;
+}
+
+/** SEQUENTIA: whether a fee whitelist file holds the policy asset at the
+ *  reference rate and nothing else: exactly what a node that seeded its
+ *  whitelist saved at every start, with no operator involved. */
+static bool IsOldSeedFile(const fs::path& path)
+{
+    std::map<std::string, util::SettingsValue> json;
+    std::vector<std::string> errors;
+    if (!util::ReadSettings(path, json, errors) || json.size() != 1) return false;
+    const auto& [key, value] = *json.begin();
+    return GetAssetFromString(key) == ::policyAsset && value.isNum() &&
+           value.getValStr() == ToString(exchange_rate_scale);
 }
 
 // Parameter interaction based on rules
@@ -1502,12 +1516,31 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // If fees can be paid in any asset, node operators need to be able to specify asset exchange
         // rates using either the static config file and/or the exchange rates RPCs.
         ExchangeRateMap& exchangeRateMap = ExchangeRateMap::GetInstance();
-        // SEQUENTIA: on a chain that does not seed the whitelist (the mainnet),
-        // an unconfigured node accepts no fee asset at all. Cleared before the
-        // load, so a whitelist the operator has written is kept: the file, when
-        // there is one, replaces the table either way.
+        // SEQUENTIA: on a chain that does not seed the whitelist (the mainnet
+        // and the testnet), an unconfigured node accepts no fee asset at all.
+        // Cleared before the load, so a whitelist the operator has written is
+        // kept: the file, when there is one, replaces the table either way.
         if (!Params().SeedFeeWhitelist()) exchangeRateMap.ClearRates();
         std::string file_path_string = gArgs.GetArg("-initialexchangeratesjsonfile", "");
+        // A chain that once seeded the whitelist and no longer does (the
+        // testnet) has data directories whose exchangerates.json holds nothing
+        // but that seed: the node saved its whitelist at every start, so the
+        // seed was written there without anyone choosing it. Loading it would
+        // keep the one-asset list the open fee market withholds. Such a file is
+        // moved aside, not loaded. The mainnet never seeded, so a file there is
+        // always its operator's, whatever it holds.
+        if (!Params().SeedFeeWhitelist() && Params().NetworkIDString() != CBaseChainParams::SEQUENTIA &&
+            file_path_string.empty()) {
+            const fs::path rates_file = AbsPathForConfigVal(fs::PathFromString(exchange_rates_config_file));
+            if (fs::exists(rates_file) && IsOldSeedFile(rates_file)) {
+                const fs::path aside = fs::PathFromString(fs::PathToString(rates_file) + ".old-seed");
+                if (!RenameOver(rates_file, aside)) {
+                    return InitError(strprintf(_("Unable to move the old seeded fee list %s aside"), fs::PathToString(rates_file)));
+                }
+                LogPrintf("%s held only the old seeded fee list (the policy asset alone, which nobody chose); "
+                          "moved it to %s rather than loading it\n", fs::PathToString(rates_file), fs::PathToString(aside));
+            }
+        }
         std::vector<std::string> errors;
         if (!file_path_string.empty()) {
             fs::path file_path = GetConfigFile(file_path_string);

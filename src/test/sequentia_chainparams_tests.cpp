@@ -339,23 +339,24 @@ BOOST_AUTO_TEST_CASE(fresh_chains_have_no_utxo_recovery)
     SelectParams(CBaseChainParams::REGTEST);
 }
 
-//! The mainnet node starts with an EMPTY fee whitelist; the other chains seed it.
+//! Neither the mainnet nor the testnet starts with an asset on its fee list.
 //!
 //! A node that came up already accepting the policy asset would make that asset
 //! the network's fee currency by default, which is the one privilege the open
 //! fee market withholds. On the mainnet the operator writes the whitelist, by
 //! hand or through a price server, before the node will send or relay anything.
-//! The testnet keeps the seed: its price server ships wired to a feed.
-BOOST_AUTO_TEST_CASE(fee_whitelist_is_seeded_everywhere_but_mainnet)
+//! On the testnet the node follows the network's price server and takes the list
+//! it publishes. Custom chains keep the seed unless -con_seed_fee_whitelist=0.
+BOOST_AUTO_TEST_CASE(fee_whitelist_is_seeded_on_no_public_chain)
 {
-    {
+    for (const std::string& chain : {CBaseChainParams::SEQUENTIA, CBaseChainParams::TESTNET}) {
         ArgsManager args;
-        const auto params = CreateChainParams(args, CBaseChainParams::SEQUENTIA);
-        BOOST_CHECK(!params->SeedFeeWhitelist());
+        const auto params = CreateChainParams(args, chain);
+        BOOST_CHECK_MESSAGE(!params->SeedFeeWhitelist(), chain);
     }
     {
         ArgsManager args;
-        const auto params = CreateChainParams(args, CBaseChainParams::TESTNET);
+        const auto params = CreateChainParams(args, "elementsregtest");
         BOOST_CHECK(params->SeedFeeWhitelist());
     }
     SelectParams(CBaseChainParams::REGTEST);

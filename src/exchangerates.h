@@ -55,7 +55,7 @@ public:
      * exchange_rate_scale.
      *
      * SEQUENTIA: this SEED is the entire bootstrap mechanism. Where it is kept
-     * (the testnet and custom chains) it is what lets a node that has never
+     * (custom chains) it is what lets a node that has never
      * been configured accept fees at all, and it is why the converters need no
      * special case for the policy asset: an unlisted asset is unlisted,
      * whichever asset it is. The reference unit stays an abstract factor and is
@@ -63,9 +63,9 @@ public:
      * asset, which an operator or price-server sidecar is free to change, set
      * to 0 (refuse), or drop entirely by replacing the whitelist.
      *
-     * A chain whose CChainParams::SeedFeeWhitelist() is false (the mainnet)
-     * discards the seed at startup, so an unconfigured node there accepts
-     * nothing until its operator writes the whitelist.
+     * A chain whose CChainParams::SeedFeeWhitelist() is false (the mainnet
+     * and the testnet) discards the seed at startup, so an unconfigured node
+     * there accepts nothing until its whitelist is written.
      */
     void ResetToBootstrapRates();
 

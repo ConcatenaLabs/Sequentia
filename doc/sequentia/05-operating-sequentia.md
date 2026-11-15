@@ -184,16 +184,20 @@ asset. An asset that is **not listed is not accepted** - the policy asset
 included. There is no exception and no implicit entry: the table is the whole
 truth.
 
-**On mainnet the table starts empty, and filling it is the first thing to do.**
+**On the mainnet and the testnet the table starts empty, and filling it is the
+first thing to do.**
 Until then the node prints, at startup and in `debug.log`, that it accepts no
 asset for fees. It still syncs and validates, and its wallet still receives,
 but it relays nothing and every send is refused with a message naming the
 cause. Either write the whitelist yourself (`setfeeexchangerates`, or
 `exchangerates.json` in the data directory before starting) or set up the price
 server described below; the desktop wallet offers both on first run under
-Settings → Fee acceptance. The testnet and custom chains instead start with the
-policy asset listed at 1:1, so that a test node needs no setup;
-`-con_seed_fee_whitelist=0` makes a custom chain start empty as mainnet does.
+Settings → Fee acceptance. A testnet data directory whose `exchangerates.json`
+holds only the policy asset at 1:1, the seed the testnet once started with, has
+that file moved aside to `exchangerates.json.old-seed` rather than loaded.
+Custom chains start with the policy asset listed at 1:1, so that a regtest node
+needs no setup; `-con_seed_fee_whitelist=0` makes a custom chain start empty as
+the public chains do.
 
 `getfeeacceptancepolicy` returns the current acceptance set - what the node
 actually uses when valuing mempool transactions and building blocks.
