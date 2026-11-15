@@ -30,6 +30,8 @@ SET_DOC_OPTIONAL.update(['-con_fpowallowmindifficultyblocks', '-con_fpownoretarg
 # SEQUENTIA: hidden chain parameters, registered via AddHiddenArgs in init.cpp
 # alongside the -con_* arguments above, so they carry no AddArg documentation.
 SET_DOC_OPTIONAL.update(['-con_utxo_recovery_retire', '-con_utxo_recovery_create'])
+# SEQUENTIA: settings.json's record that the fee whitelist file was checked for the old seed; never set by hand.
+SET_DOC_OPTIONAL.update(['-feelistseedchecked'])
 
 
 def lint_missing_argument_documentation():

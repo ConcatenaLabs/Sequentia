@@ -87,8 +87,7 @@ void RecordChoice(const std::string& url)
     });
     std::vector<std::string> errors;
     if (!gArgs.WriteSettingsFile(&errors)) {
-        LogPrintf("FeePriceServer: could not record the choice in the settings file (%s); "
-                  "it holds until the node stops\n", MakeUnorderedList(errors));
+        LogPrintf("FeePriceServer: could not record the choice in the settings file (%s); it holds until the node stops\n", MakeUnorderedList(errors));
     }
 }
 
@@ -217,8 +216,8 @@ bool InitFeeList(std::string& error)
                 error = strprintf("Unable to move the old seeded fee list %s aside", fs::PathToString(rates_file));
                 return false;
             }
-            LogPrintf("%s held only the old seeded fee list (the policy asset alone, which nobody chose); "
-                      "moved it to %s rather than loading it\n", fs::PathToString(rates_file), fs::PathToString(aside));
+            LogPrintf("%s held only the old seeded fee list (the policy asset alone, which nobody chose); moved it to %s rather than loading it\n",
+                      fs::PathToString(rates_file), fs::PathToString(aside));
         }
         gArgs.LockSettings([](util::Settings& settings) { settings.rw_settings["feelistseedchecked"] = true; });
         std::vector<std::string> errors;
@@ -231,8 +230,7 @@ bool InitFeeList(std::string& error)
     // The chain's default yields to a list the operator wrote; an address the
     // operator chose does not, since that choice is the newer one.
     if (!url.empty() && g_fee_price_server_by_default && (!initial_file.empty() || fs::exists(rates_file))) {
-        LogPrintf("FeePriceServer: this node keeps the static fee whitelist its operator wrote (%s) and is not "
-                  "connected to the price server at %s; setfeepriceserver connects it\n",
+        LogPrintf("FeePriceServer: this node keeps the static fee whitelist its operator wrote (%s) and is not connected to the price server at %s; setfeepriceserver connects it\n",
                   initial_file.empty() ? fs::PathToString(rates_file) : initial_file, url);
         url.clear();
     }
@@ -259,7 +257,7 @@ bool InitFeeList(std::string& error)
     }
 
     if (url.rfind("http://", 0) != 0) {
-        error = strprintf("-feepriceserver=%s: only http:// addresses are supported", url);
+        error = strprintf("-feepriceserver=%s: only plain-HTTP addresses are supported", url);
         return false;
     }
 
@@ -366,9 +364,8 @@ void NoteOperatorFeeListWrite(const std::string& how)
     const FeeListSource src = GetFeeListSource();
     if (!DisconnectFeePriceServer(strprintf("the fee whitelist was written by %s", how))) return;
     RecordChoice("");
-    LogPrintf("FeePriceServer: the fee whitelist was written by %s, so this node is no longer connected to the "
-              "price server at %s. From now on the whitelist is what is written to it; setfeepriceserver "
-              "connects it again\n", how, src.url);
+    LogPrintf("FeePriceServer: the fee whitelist was written by %s, so this node is no longer connected to the price server at %s. From now on the whitelist is what is written to it; setfeepriceserver connects it again\n",
+              how, src.url);
 }
 
 bool SetFeePriceServer(const std::string& url, std::string& error)
@@ -389,7 +386,7 @@ bool SetFeePriceServer(const std::string& url, std::string& error)
         return true;
     }
     if (url.rfind("http://", 0) != 0) {
-        error = "only http:// addresses are supported";
+        error = "only plain-HTTP addresses are supported";
         return false;
     }
     // Ask first and change nothing unless the answer is a price server's list,
