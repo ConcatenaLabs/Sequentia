@@ -13,7 +13,12 @@ Cases (LOST_CASES):
       back with a fresh proof and the same id; the seller's refund is refused;
   sC  the claim is lost and the payment is gone for good; the record holds the
       lock against the refund until the window ends (a node synced from
-      nothing judges it from the chain alone); then the seller takes it back.
+      nothing judges it from the chain alone); then the seller takes it back;
+  sD  the claim and 121 descendants are lost: their records do not fit one
+      block and are spread over the next ones, each record within its bytes;
+  sR  a stake change in the lost branch before the claim: the claim's block
+      certificate does not verify under the registry the record is judged with;
+      the holders' refusal holds the lock until the window ends.
 """
 
 import os
@@ -31,7 +36,7 @@ from test_framework.messages import tx_from_hex
 from test_framework.script import CScript
 from test_framework.util import assert_equal
 
-CASES = os.environ.get("LOST_CASES", "sA,sB,sC").split(",")
+CASES = os.environ.get("LOST_CASES", "sA,sB,sC,sD,sR").split(",")
 
 
 class LostSwapTest(LostBlocksTest):
@@ -280,6 +285,142 @@ class LostSwapTest(LostBlocksTest):
         self.sync_tips(HONEST + [LATE])
         self.record("sB", "outcome", "the claim %s, re-proven (Bitcoin block %d), mined at height %d with the same id" %
                     (st["c_id"][:12], pr["height"], hc["height"]))
+        self.realign()
+
+
+    # ---------------------------------------------------------------- sD
+    def case_sD(self):
+        self.log.info("(sD) records that do not fit one block are spread over the next ones")
+        n1 = self.nodes[1]
+        nkids = int(os.environ.get("LOST_SD_KIDS", "120"))
+        # As lost_claim, with descendants of the claim certified in the same lost branch.
+        self.wallets()
+        b = self.btc()
+        h0 = b.getblockcount()
+        lock = self.make_lock(50_000_000, h0, h0 + 50, h0)
+        n1.sendrawtransaction(lock["hex"])
+        self.produce(1, ALL_KEYS, txs_must=[lock["txid"]])
+        for _ in range(bp.FLOOR_DEPTH + 1):
+            self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        pay = self.pay(lock)
+        p_hash = b.generatetoaddress(1, self.bbuyer.getnewaddress())[0]
+        p = b.getblockcount()
+        self.anchored_block(p)
+        c, pr = self.buyer_claim(lock, pay)
+        c_id = c.rehash()
+        n1.sendrawtransaction(c.serialize().hex())
+        LC = self.produce(1, ALL_KEYS, txs_must=[c_id])
+        # A child splitting the claim's coin, and a grandchild per output, certified on top.
+        val = Decimal(lock["asset_amount"]) / Decimal(100000000)
+        addrs = [n1.getnewaddress() for _ in range(nkids)]
+        outs = [{ad: Decimal("0.05")} for ad in addrs]
+        outs.append({n1.getnewaddress(): val - Decimal("0.05") * nkids - Decimal("0.01")})
+        outs.append({"fee": Decimal("0.01")})
+        raw = n1.createrawtransaction([{"txid": c_id, "vout": 0}], outs)
+        kid = n1.sendrawtransaction(n1.signrawtransactionwithwallet(raw)["hex"])
+        L2 = self.produce(1, ALL_KEYS, txs_must=[kid])
+        kdec = n1.getrawtransaction(kid, 1)
+        gkids = []
+        for o in kdec["vout"]:
+            if o["scriptPubKey"].get("address") in addrs:
+                r = n1.createrawtransaction([{"txid": kid, "vout": o["n"]}], [{n1.getnewaddress(): Decimal("0.049")}, {"fee": Decimal("0.001")}])
+                gkids.append(n1.sendrawtransaction(n1.signrawtransactionwithwallet(r)["hex"]))
+        L3 = self.produce(1, ALL_KEYS, txs_must=gkids[:1])
+        self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        self.record("sD", "lost branch", "claim %s in LC (h %d), its child in h %d, %d grandchildren in h %d; all anchored at Bitcoin %d" %
+                    (c_id[:12], LC["height"], L2["height"], len(gkids), L3["height"], p))
+        b.invalidateblock(p_hash)
+        b.generatetoaddress(2, self.bbuyer.getnewaddress())
+        self.wait_lost(LC["hash"], HONEST)
+        since = [self.log_size(i) for i in range(N)]
+        recorded = set()
+        per_block = []
+        for _ in range(8):
+            h = self.produce(1, ALL_KEYS, leaders=[SELLER])
+            recs = self.records_in(n1, h["hash"])
+            nbytes = sum(len(r["scriptPubKey"]["hex"]) // 2 for r in recs)
+            ids = set()
+            for line in self.log_has(1, "Lost blocks: block %s at height %d records" % (h["hash"], h["height"]), since[1]):
+                pass
+            per_block.append((h["height"], len(recs), nbytes))
+            if not recs and per_block[:-1] and per_block[-2][1] == 0:
+                break
+        self.sync_tips(HONEST + [LATE])
+        lines = self.log_has(1, "records", since[1])
+        tmpl = self.log_has(1, "to record of", since[1])
+        self.record("sD", "records per block (height, outputs, bytes)", per_block)
+        self.record("sD", "plans", [l.split("template on ", 1)[-1][66:260] for l in tmpl[:4]])
+        assert sum(1 for x in per_block if x[1]) >= 2, per_block
+        assert all(x[2] <= 25000 + 200 for x in per_block)
+        # The seller's refund of the lock, forced: refused from the chain's records.
+        r = self.refund(lock)
+        x = self.force_on_seller("sD", [r.serialize().hex()])
+        self.refused_by_any("sD", HONEST + [LATE], x["hash"], since)
+        self.realign()
+
+    # ---------------------------------------------------------------- sR
+    def case_sR(self):
+        self.log.info("(sR) a stake change in the lost branch before the claim")
+        n1 = self.nodes[1]
+        a = self.nodes[SELLER]
+        self.wallets()
+        b = self.btc()
+        h0 = b.getblockcount()
+        lock = self.make_lock(50_000_000, h0, h0 + 50, h0)
+        n1.sendrawtransaction(lock["hex"])
+        self.produce(1, ALL_KEYS, txs_must=[lock["txid"]])
+        for _ in range(bp.FLOOR_DEPTH + 1):
+            self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        pay = self.pay(lock)
+        p_hash = b.generatetoaddress(1, self.bbuyer.getnewaddress())[0]
+        p = b.getblockcount()
+        self.anchored_block(p)
+        # L1: a new staker K locks stake (its key never signs).
+        from feature_pos_lost_blocks import make_key
+        k_wif, k_pub = make_key()
+        script = a.getstakescript(k_pub, 5)["script"]
+        coin = self.fund()
+        reg_raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}],
+                                         [{"data": ""}] if False else [{a.getnewaddress(): Decimal("0.0001")}, {"fee": Decimal("0.0001")}])
+        rt = tx_from_hex(reg_raw)
+        from test_framework.messages import CTxOut, CTxOutValue, CTxOutAsset
+        rt.vout[0] = CTxOut(int(Decimal(coin["amount"] - Decimal("0.0001")) * 100000000), CScript(bytes.fromhex(script)))
+        rt.vout[0].nAsset = CTxOutAsset(bytes.fromhex(self.asset)[::-1])
+        reg_hex = a.signrawtransactionwithwallet(rt.serialize().hex())["hex"]
+        reg = n1.sendrawtransaction(reg_hex)
+        reg_before = sorted(n1.getstakerinfo().keys())
+        L1 = self.produce(1, ALL_KEYS, txs_must=[reg])
+        reg_after = n1.getstakerinfo()
+        assert k_pub in reg_after
+        c, pr = self.buyer_claim(lock, pay)
+        c_id = c.rehash()
+        n1.sendrawtransaction(c.serialize().hex())
+        LC = self.produce(1, ALL_KEYS, txs_must=[c_id])
+        self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        assert n1.getblockheader(LC["hash"])["poscertified"]
+        self.record("sR", "lost branch", "L1 (h %d) registers K's stake (%d stakers -> %d); claim %s in certified LC (h %d); anchored at Bitcoin %d" %
+                    (L1["height"], len(reg_before), len(reg_after), c_id[:12], LC["height"], p))
+        b.invalidateblock(p_hash)
+        b.generatetoaddress(2, self.bbuyer.getnewaddress())
+        self.wait_lost(LC["hash"], HONEST)
+        since = [self.log_size(i) for i in range(N)]
+        rows = []
+        for _ in range(3):
+            h = self.produce(1, ALL_KEYS, leaders=[SELLER])
+            recs = self.records_in(n1, h["hash"])
+            rows.append((h["height"], reg in n1.getblock(h["hash"])["tx"], len(recs)))
+        self.sync_tips(HONEST + [LATE])
+        why = self.log_has(1, "cannot be recorded", since[1])
+        self.record("sR", "honest blocks (height, K's stake replayed, records)", rows)
+        self.record("sR", "node 1", why[0].split("Lost blocks: ", 1)[-1][:260] if why else "no 'cannot be recorded' line")
+        # The seller's refund, forced: refused by the holders, whether or not a record exists.
+        r = self.refund(lock)
+        x = self.force_on_seller("sR", [r.serialize().hex()])
+        self.refused_by_any("sR", HONEST, x["hash"], since)
         self.realign()
 
     # ---------------------------------------------------------------- sC
