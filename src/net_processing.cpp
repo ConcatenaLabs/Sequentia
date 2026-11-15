@@ -18,6 +18,7 @@
 #include <merkleblock.h>
 #include <netbase.h>
 #include <netmessagemaker.h>
+#include <pos_lost.h>
 #include <pos_producer.h>
 #include <node/blockstorage.h>
 #include <policy/fees.h>
@@ -1286,6 +1287,7 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 void PeerManagerImpl::FinalizeNode(const CNode& node)
 {
     NodeId nodeid = node.GetId();
+    LostPeerGone(nodeid);
     int misbehavior{0};
     {
     LOCK(cs_main);
@@ -4385,6 +4387,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::POSLOST) {
+        // Evidence for the lost-block rule: judged on the lost-block pass
+        // (it asks the Bitcoin daemon, so not on this thread).
+        LostEvidenceMsg evidence;
+        vRecv >> evidence;
+        LostQueueEvidence(pfrom.GetId(), std::move(evidence));
+        return;
+    }
+
     if (msg_type == NetMsgType::GETPOSCERT) {
         // A share-locked member asking whether anyone certified `hash` (3B):
         // answer with the certificate if we hold one; silence otherwise.
@@ -5003,6 +5014,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
     // If we get here, the outgoing message serialization version is set and can't change.
     const CNetMsgMaker msgMaker(pto->GetCommonVersion());
+
+    // SEQUENTIA: lost-block evidence this peer has not been sent.
+    for (const LostEvidenceMsg& evidence : LostToSend(pto->GetId())) {
+        m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::POSLOST, evidence));
+    }
 
     const auto current_time{GetTime<std::chrono::microseconds>()};
 

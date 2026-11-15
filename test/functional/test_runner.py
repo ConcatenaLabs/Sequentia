@@ -299,6 +299,7 @@ BASE_SCRIPTS = [
     'feature_pos_fork_choice.py',
     'feature_pos_finality.py',
     'feature_pos_finality_kept.py',
+    'feature_pos_lost_blocks.py',
     'feature_pos_split_equivocation.py',
     'feature_pos_certified_parent_quorum.py',
     'feature_pos_certified_stall_quorum.py',

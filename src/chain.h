@@ -166,6 +166,10 @@ enum BlockStatus : uint32_t {
     //! Pure bookkeeping, outside every validity and failure mask.
     BLOCK_POS_CERT_DECIDED   =  1024,
     BLOCK_POS_CERTIFIED      =  2048,
+    //! SEQUENTIA: refused because it spends what a lost block's transaction
+    //! spends (pos_lost.h). Set with BLOCK_FAILED_VALID; the lost-block pass
+    //! clears both when the evidence or Bitcoin's view no longer binds it.
+    BLOCK_FAILED_LOST        =  4096,
 };
 
 /** The block chain is a tree shaped structure starting with the

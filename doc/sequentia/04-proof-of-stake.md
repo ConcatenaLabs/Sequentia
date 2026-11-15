@@ -1009,6 +1009,103 @@ PoS chain has no Bitcoin to be modulo of, so the gate is absolute there.) The
 gate and the watcher must therefore be coupled: enforced iff
 `!con_bitcoin_anchor || validateanchor`.
 
+### Lost blocks
+
+A transaction that a full quorum certified can leave the chain without anyone
+misbehaving: Bitcoin replaces the anchor of its block, and every node follows
+(§6, and [`03-bitcoin-anchoring.md`](03-bitcoin-anchoring.md)). Without a further
+rule, whoever leads the next block can then include a conflicting spend of the
+same coins. That is the gap a swap against on-chain bitcoin falls into: the
+buyer's payment is mined again on Bitcoin, and the lock it paid for has been
+respent. The lost-block rule closes the gap as a validity rule that every full
+node checks from evidence anyone can show. It does not depend on what committee
+members choose to sign.
+
+**Definitions.** A *lost block* is a block that
+- carries its parent's full certification quorum, or is an ancestor of such a
+  block on the same branch;
+- is off the active chain, with a block of its branch above the fork point
+  whose anchor is not on Bitcoin's best chain as this node's daemon sees it
+  (the view the anchor gate R3 uses);
+- descends from a block of the active chain, its *fork point* F.
+
+The window `W` is counted in Bitcoin blocks of the anchor (`-poslostwindow`,
+6; a consensus value).
+
+**The rule.** A block B built on a chain that contains F is not valid while
+`anchor(B) <= anchor(L) + W` if one of its transactions spends an outpoint that a
+transaction t of a lost block L spends, unless it is t itself (the same id). It
+applies to every block: certified, below the quorum, or escaping a stall. A
+transaction that is already in B's chain has spent the outpoint, so nothing can
+spend it again.
+
+**Evidence.** The lost block itself, with its certificate (the header's proof)
+and the Bitcoin headers from the first block off Bitcoin's best chain up to its
+anchor, is the evidence. A node that connected L and saw it leave holds L. Any
+other node judges L when it receives it, by the P2P message `poslost` or by
+`submitlostblock`. L's parent must be on the active chain or already held; L's
+structure, merkle root and leader signature must check; the Bitcoin headers are
+submitted to the node's own daemon, so a stale block it never saw becomes known
+there, and a forged one costs a Bitcoin block's proof of work. Its certificate
+is verified against its parent's stake state. Each node sends every peer the
+lost blocks it holds, parents first. `getlostblocks` lists them and
+`getlostblock` returns one.
+
+**Refusal.** A block the rule refuses is marked failed (`BLOCK_FAILED_LOST`),
+fork choice moves to another candidate, and no peer is punished, for that block
+or for one built on it: the rule rests on evidence the peer may not hold. When
+the evidence changes (a lost block arrives, leaves, or returns to the active
+chain), the node judges again the blocks it refused and the blocks of its active
+chain above every fork point. A block of the active chain that the new evidence
+binds is invalidated, and the chain reorganizes, finalized blocks included: this
+is a validity rule, and immediate finality does not protect an invalid block.
+**Precedence:** Bitcoin anchoring, then checkpoints, then this rule, then immediate
+finality. The rule never keeps a block whose anchor Bitcoin replaced, and when
+Bitcoin returns to L's branch L reconnects and binds nothing.
+
+**Release.** A lost transaction stops binding when it is in the chain, when its
+branch returns, or for any block anchored more than `W` above it. A transaction
+that can never be valid again (its inputs are gone, or it proves a Bitcoin
+payment that Bitcoin no longer has) cannot be told apart from the chain alone,
+so its outpoints wait out `W`. That wait falls on whoever wants to spend those
+coins differently; a fee bump or a refund of a lost transaction waits too.
+
+**Producers and the mempool.** The mempool refuses a spend that conflicts with
+a bound lost transaction (`txn-lost-conflict`), removes one it already holds,
+and takes the lost transactions back first in line for the next block, so an
+honest producer never builds a block the rule refuses and mines the original at
+its first turn.
+
+**What it guarantees, and what remains.**
+- With an honest quorum, the original is mined at the first honest block.
+  A seller who leads alone can only make escaping-stall blocks, which every
+  node holding L refuses; the chain stalls rather than respends.
+- A dishonest quorum that certifies the respend is refused by every node that
+  holds L. Observers see the block as invalid in `getchaintips`. Once Bitcoin
+  is more than `W` blocks above `anchor(L)`, the quorum can certify a respend
+  anchored above that, and every node accepts it. The rule delays this theft by
+  `W`; it does not prevent it.
+- A late reveal: a dishonest quorum that certifies a block S in secret, on a
+  Bitcoin block that then goes stale (a natural reorganization, or a block it
+  mines and withholds), and reveals S, makes every node that receives S undo
+  each block since S's fork point that conflicts with S's spends, finalized or
+  not, as long as that block is anchored at most `W` above S.
+- A node that never receives the evidence (eclipsed by the seller) follows the
+  respend. It converges when it meets any node that holds the evidence.
+  Evidence is kept until the active tip anchors `2W` above it. A node that
+  first syncs after that point has no evidence: if the seller's chain is
+  longer, that node follows it, and the nodes that held the evidence stay
+  where they are only because their blocks are final.
+- A node that does not run the rule follows a respend that a dishonest quorum
+  certified, which splits it from the nodes that do run the rule.
+
+**Activation.** From genesis on a fresh chain. On a running chain, from a height
+bound to that chain's genesis hash ([`CONTRIBUTING.md`](../../CONTRIBUTING.md)),
+with every node upgraded, since nodes without the rule follow a respend that
+nodes with it refuse.
+
+Tested in `feature_pos_lost_blocks.py`.
+
 ## 7. Anchor freshness for real-time swaps
 
 Real-time cross-chain atomic swaps need the Sequentia tip to reference the

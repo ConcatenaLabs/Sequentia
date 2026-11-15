@@ -306,6 +306,12 @@ extern const char* POSCERT;
  * on the first block and heard nothing for a grace round.
  */
 extern const char* GETPOSCERT;
+/**
+ * SEQUENTIA: poslost carries one block of a lost branch with its certificate
+ * and the Bitcoin headers of its stale anchor (pos_lost.h): the evidence the
+ * lost-block rule needs, relayed to every peer.
+ */
+extern const char* POSLOST;
 }; // namespace NetMsgType
 
 /* Get a vector of all valid message types (see above) */

@@ -37,6 +37,7 @@
 #include <bls.h>
 #include <musig.h>
 #include <pos.h>
+#include <pos_lost.h>
 #include <vrf.h>
 #include <policy/value.h>
 #include <primitives/block.h>
@@ -1003,6 +1004,14 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         // Transaction with the same non-witness data but different witness (same txid, different
         // wtxid) already exists in the mempool.
         return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-same-nonwitness-data-in-mempool");
+    }
+
+    // SEQUENTIA: a spend that a lost block's transaction makes is refused
+    // while the next block is bound by it (pos_lost.h).
+    if (const CBlockIndex* lost_tip = m_active_chainstate.m_chain.Tip()) {
+        if (std::optional<uint256> lost = LostConflict(tx, lost_tip->m_anchor_height)) {
+            return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-lost-conflict", lost->GetHex());
+        }
     }
 
     // Check for conflicts with in-memory transactions
@@ -3468,6 +3477,11 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         return error("%s: CheckPosStakeRules: %s", __func__, state.ToString());
     }
 
+    // SEQUENTIA: lost blocks (pos_lost.h). Every block, certified or not.
+    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, state)) {
+        return error("%s: LostCheckBlock: %s", __func__, state.ToString());
+    }
+
     // Check that all non-zero policyAsset coinbase outputs pay to the required destination
     const CScript& mandatory_coinbase_destination = m_params.GetConsensus().mandatory_coinbase_destination;
     if (mandatory_coinbase_destination != CScript()) {
@@ -5000,6 +5014,9 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
 
     UpdateTip(pindexDelete->pprev);
 
+    // SEQUENTIA: the lost-block pass judges whether it left for Bitcoin's sake.
+    LostNoteDisconnected(pindexDelete, pblock);
+
     // SEQUENTIA PoS: exact inverse of the ConnectTip stake mirroring. A
     // missed update would silently desync the consensus-feeding registry
     // from peers (different weights ⇒ different sortition results), so a
@@ -5157,6 +5174,17 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
             // default 5s), which bounds recovery latency without any hot loop. The
             // partially-modified `view` is discarded unflushed exactly as on the
             // error path below, so no chainstate change leaks out.
+            // SEQUENTIA: a block the lost-block rule refuses is marked failed
+            // with a marker of its own, so that fork choice moves on to another
+            // candidate, and the lost-block pass revives it when the evidence
+            // or Bitcoin's view no longer binds it. No peer is punished
+            // (BLOCK_RECENT_CONSENSUS_CHANGE).
+            if (state.GetRejectReason() == "bad-txns-lost-respend") {
+                InvalidBlockFound(pindexNew, state);
+                pindexNew->nStatus |= BLOCK_FAILED_LOST;
+                LostNoteRefused(pindexNew);
+                return error("%s: ConnectBlock %s refused, %s", __func__, pindexNew->GetBlockHash().ToString(), state.ToString());
+            }
             if (state.GetResult() == BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE) {
                 LogPrintf("STALLING further progress in ConnectTip: block %s (height %d) cannot be verified against the parent chain right now (%s). " /* Continued */
                           "Chain will not grow until the parent chain daemon is reachable again; the block will be retried, NOT marked invalid.\n",
@@ -6746,9 +6774,19 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     AssertLockHeld(cs_main);
     // SEQUENTIA: building on a block only a parent-chain reorg made invalid is
     // not misbehaviour (see IsAnchorOrphaned).
+    // Nor is building on a block refused under the lost-block rule, which
+    // rests on evidence the peer may not hold (pos_lost.h).
+    const auto lost_refused = [&](const CBlockIndex* p) {
+        const CBlockIndex* root = p;
+        while (root->pprev != nullptr && (root->pprev->nStatus & BLOCK_FAILED_MASK)) root = root->pprev;
+        return (root->nStatus & BLOCK_FAILED_LOST) != 0;
+    };
     const auto invalid_prev = [&](const CBlockIndex* prev) {
         if (IsAnchorOrphaned(prev)) {
             return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-prevblk-anchor-orphaned");
+        }
+        if (lost_refused(prev)) {
+            return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-prevblk-lost-respend");
         }
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
     };
@@ -6773,6 +6811,9 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 // watcher has dropped so far (see IsAnchorOrphaned).
                 if (IsAnchorOrphaned(pindex)) {
                     return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "duplicate-anchor-orphaned");
+                }
+                if (lost_refused(pindex)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "duplicate-lost-respend");
                 }
                 return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate");
             }

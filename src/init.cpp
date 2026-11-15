@@ -13,6 +13,7 @@
 #include <banman.h>
 #include <anchor.h>
 #include <pos.h>
+#include <pos_lost.h>
 #include <supervision.h>
 #include <pos_producer.h>
 #include <key_io.h>
@@ -262,7 +263,10 @@ void Shutdown(NodeContext& node)
     // Join the anchor watcher first: it captures node.chainman, so it must finish
     // before chainman is torn down below. ShutdownRequested() is already set by the
     // time we reach Shutdown(), so the watcher's poll loop exits promptly.
-    if (node.anchor_watch_thread.joinable()) node.anchor_watch_thread.join();
+    if (node.anchor_watch_thread.joinable()) {
+        node.anchor_watch_thread.join();
+        LostShutdown();
+    }
     if (node.anchor_retry_thread.joinable()) node.anchor_retry_thread.join();
     if (node.chainman && node.chainman->m_load_block.joinable()) node.chainman->m_load_block.join();
     if (node.scheduler) node.scheduler->stop();
@@ -697,6 +701,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-posdebugroundskewms", "SEQUENTIA TEST ONLY: add this many milliseconds of clock skew to the autonomous producer's gossip round scheduler, to measure how much inter-node synchrony loss the round anchor tolerates before rounds desync. Never set this on a real node.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posanchorrecoverywait=<n>", "SEQUENTIA: seconds the autonomous producer refuses to treat a height as vacant while a quorum-certified block at that height awaits anchor-reorg recovery (committee-equivocation prevention: it neither proposes nor countersigns a rival there). The hold ends early when the block is restored or its anchor is confirmed off the parent chain's best chain; 0 disables the guard. (default: 30)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posescapestallmtpgap=<n>", strprintf("SEQUENTIA: seconds of parent-chain (Bitcoin) median-time-past that must separate a sub-quorum (escaping-stall) block's anchor from its parent's anchor, in addition to the consensus anchor-height gap. Real-time stall evidence: during a parent-chain block-storm heights advance in seconds, so the height gap alone can be met with the chain fully alive (the 2026-07-17 finality partition). 0 disables. Skipped with -validateanchor=0. (default: %d)", (int)DEFAULT_POS_ESCAPE_STALL_MTP_GAP), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-poslostwindow=<n>", strprintf("SEQUENTIA: the lost-block window, in Bitcoin blocks of the anchor: a block that left because Bitcoin replaced an anchor of its branch binds the blocks anchored at most this many Bitcoin blocks above its own anchor (a consensus value; every node must use the same) (default: %u)", DEFAULT_POS_LOST_WINDOW), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
+    argsman.AddArg("-posdebugignorelost", "SEQUENTIA, testing only: do not enforce the lost-block rule (to build an attacker's blocks)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posfinalitydelayms=<n>", strprintf("SEQUENTIA: finality observation window in milliseconds. A quorum-certified block becomes immediately final only after it has been on the active chain this long without a competing quorum-certified block at the same height; if one appears (provable equivocation by committee members), every node converges on the same block via the deterministic fork-choice comparator. Local fork-choice timing, not a consensus rule. 0 = final on connection. (default: %d)", DEFAULT_POS_FINALITY_DELAY_MS), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posfinalityholdms=<n>", strprintf("SEQUENTIA: longest this node keeps a height undecided after verifying a competing quorum certificate for it whose block it has not yet received and judged. Local fork-choice timing, not a consensus rule. (default: %d)", DEFAULT_POS_FINALITY_HOLD_MS), ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
     argsman.AddArg("-posreconcile", "SEQUENTIA: enable the finality reconciliation monitor. When this node's finalized branch has received no quorum-certified block for -posreconcilepatience seconds while a rival branch carries quorum certificates strictly above the local finalized height with anchors settled on the parent best chain, release the local finalized point and adopt the network's branch (heals a finality partition; the local blocks are not invalidated, they become inactive history). Requires -validateanchor. (default: true)", ArgsManager::ALLOW_ANY, OptionsCategory::ELEMENTS);
@@ -2429,6 +2435,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             });
         } else {
             ChainstateManager* anchor_chainman = node.chainman.get();
+            CTxMemPool* lost_mempool = node.mempool.get();
+            LostInit();
             const int64_t anchor_poll = std::max<int64_t>(1, gArgs.GetIntArg("-anchorpollinterval", DEFAULT_ANCHOR_POLL_INTERVAL));
             // Run the anchor watcher on its OWN thread, not the main scheduler.
             // When a parent reorg orphans an anchor, AnchorWatchTask calls
@@ -2438,7 +2446,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             // that thread wait on itself -> self-deadlock (and cs_main is held the
             // whole time, freezing every other thread). On a dedicated thread the
             // free scheduler drains the queue and the watcher makes progress.
-            node.anchor_watch_thread = std::thread(&util::TraceThread, "anchorwatch", [anchor_chainman, anchor_poll] {
+            node.anchor_watch_thread = std::thread(&util::TraceThread, "anchorwatch", [anchor_chainman, anchor_poll, lost_mempool] {
                 while (!ShutdownRequested()) {
                     // A parent-chain RPC reply that doesn't parse (e.g. a field a given Bitcoin Core
                     // version returns as null instead of an integer) must never escape this thread:
@@ -2447,6 +2455,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     // transient skipped tick and retry next interval.
                     try {
                         AnchorWatchTask(*anchor_chainman);
+                        LostMaintain(*anchor_chainman, lost_mempool);
                     } catch (const std::exception& e) {
                         LogPrintf("WARNING: anchor watcher tick failed, retrying next interval: %s\n", e.what());
                     } catch (...) {

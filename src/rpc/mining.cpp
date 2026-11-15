@@ -20,6 +20,7 @@
 #include <musig.h>
 #include <bls.h>
 #include <pos.h>
+#include <pos_lost.h>
 #include <pos_producer.h>
 #include <vrf.h>
 #include <node/context.h>
@@ -1873,6 +1874,57 @@ static RPCHelpMan musigverify()
     };
 }
 
+
+static RPCHelpMan getlostblocks()
+{
+    return RPCHelpMan{"getlostblocks",
+        "\nThe lost blocks this node holds as evidence (doc/sequentia/04-proof-of-stake.md, \"Lost blocks\").\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
+        RPCExamples{HelpExampleCli("getlostblocks", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue { return LostGetInfo(); }};
+}
+
+static RPCHelpMan getlostblock()
+{
+    return RPCHelpMan{"getlostblock",
+        "\nOne lost block's evidence: the block (with its certificate) and the Bitcoin headers of its stale anchor.\n",
+        {{"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the block hash"}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
+        RPCExamples{HelpExampleCli("getlostblock", "\"<hash>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            std::optional<LostEvidenceMsg> ev = LostGetEvidence(ParseHashV(request.params[0], "blockhash"));
+            if (!ev) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "no such lost block");
+            CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
+            ss << ev->block;
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("block", HexStr(ss));
+            UniValue headers(UniValue::VARR);
+            for (const auto& h : ev->btc_headers) headers.push_back(HexStr(h));
+            out.pushKV("bitcoinheaders", headers);
+            return out;
+        }};
+}
+
+static RPCHelpMan submitlostblock()
+{
+    return RPCHelpMan{"submitlostblock",
+        "\nOffer one block of a lost branch as evidence, as a peer's poslost message would. Returns \"\" when it was taken, else why not.\n",
+        {{"block", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the block, hex"},
+         {"bitcoinheaders", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "the Bitcoin headers of its stale anchor, parents first",
+            {{"", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "header hex"}}}},
+        RPCResult{RPCResult::Type::STR, "", "the verdict"},
+        RPCExamples{HelpExampleCli("submitlostblock", "\"<hex>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            LostEvidenceMsg msg;
+            if (!DecodeHexBlk(msg.block, request.params[0].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+            if (!request.params[1].isNull()) {
+                for (const UniValue& h : request.params[1].get_array().getValues()) msg.btc_headers.push_back(ParseHex(h.get_str()));
+            }
+            return LostAcceptEvidence(EnsureAnyChainman(request.context), msg);
+        }};
+}
+
 static RPCHelpMan generateposblock()
 {
     return RPCHelpMan{"generateposblock",
@@ -2535,6 +2587,9 @@ static const CRPCCommand commands[] =
     { "mining",             &getblocktemplate,         },
     { "generating",         &combineblocksigs,         },
     { "generating",         &generateposblock,         },
+    { "hidden",             &getlostblocks,            },
+    { "hidden",             &getlostblock,             },
+    { "hidden",             &submitlostblock,          },
     { "generating",         &getposblocktemplate,      },
     { "generating",         &submitposblock,           },
     { "util",               &vrfprove,                 },
