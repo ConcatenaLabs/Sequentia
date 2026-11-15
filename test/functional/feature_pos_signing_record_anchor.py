@@ -14,12 +14,13 @@ M and node2 alone: M share-signs a block X at height H that cannot certify,
 and is killed (SIGKILL) at once. While it is down:
 
 undecided: restarted first with its parent-chain daemon unreachable, M
-  cannot judge X's anchor, and signs nothing at H, a rival or not.
-standing: Bitcoin keeps X's anchor. Restarted, M rebuilds its share-lock from
-  the record and does not sign a rival at H before it has asked its peers for
-  X's certificate (the escape: the query, then one grace round), and then it
-  does sign one (liveness). Before the record M signed the next round's rival
-  at once.
+  cannot judge X's anchor, and signs nothing at H, a rival or not; once the
+  daemon answers again, in the same run, M signs at H.
+standing: Bitcoin keeps X's anchor. Restarted, M holds X from the record and
+  does not sign a rival at H before it has asked its peers for X's
+  certificate and one grace round has passed (the escape), and then it does
+  sign one (liveness). Before the record M signed the next round's rival at
+  once.
 replaced: Bitcoin replaces X's anchor. Restarted, M finds the anchor gone, X
   holds nothing, and M signs a new block at H without asking about X: Bitcoin
   anchoring is supreme, and the record never blocks a block Bitcoin's move
@@ -228,12 +229,30 @@ class PosSigningRecordAnchorTest(BitcoinTestFramework):
             col = m.add_p2p_connection(ShareCollector())
             time.sleep(WAIT_S)
             text = self.log_since(M, pos)
-            waiting = "holding height %d: signed %s there before the restart; waiting for the parent chain to judge its anchor" % (h, x)
+            waiting = "holding height %d: signed %s there; waiting for the parent chain to judge its anchor" % (h, x)
             assert waiting in text, "undecided: M did not wait for the anchor's verdict"
             mine = [b for b, pk in col.shares if pk == self.stakers[M - 1][1]]
             assert not mine, "undecided: M signed %s with its anchor unjudged" % mine
             assert "PoS gossip: signed" not in text
             self.record("undecided", "parent daemon unreachable: M held height %d for %d s and signed nothing" % (h, WAIT_S))
+            # The daemon answers again: the wait ends with it, in the same run.
+            pos = self.log_size(M)
+            t_open = time.time()
+            gate.shut = False
+            signed = None
+            while signed is None and time.time() < t_open + 60:
+                for ln in self.log_since(M, pos).splitlines():
+                    mm = re.search(r"PoS gossip: signed ([0-9a-f]{64}) at height (\d+)", ln)
+                    if mm and int(mm.group(2)) == h:
+                        signed = mm.group(1)
+                        break
+                if signed is None:
+                    time.sleep(0.05)
+            assert signed, "undecided: the daemon answers again, and M still signs nothing at %d" % h
+            if signed != x:
+                assert "share-lock at %s" % x in self.log_since(M, pos), "undecided: M signed a rival of X without asking about X"
+            self.record("undecided ends", "the daemon answered again: M signed %s at %d %.1f s later, in the same run" %
+                        (signed[:16], h, time.time() - t_open))
             self.stop_node(M)
             gate.close()
         pos = self.log_size(M)
@@ -259,17 +278,17 @@ class PosSigningRecordAnchorTest(BitcoinTestFramework):
         assert signed_rival, "%s: the restarted M never signed at height %d" % (case, h)
         text = self.log_since(M, pos)
         before = text.split("PoS gossip: signed %s" % signed_rival, 1)[0]
-        restored = "share-lock restored from the signing record: signed %s at height %d" % (x, h)
+        escaped = "no certificate for %s at height %d within a round" % (x, h)
         queried = "share-lock at %s" % x
-        replaced = "signed %s at height %d before the restart; Bitcoin replaced its anchor" % (x, h)
+        replaced = "signed %s at height %d; Bitcoin replaced its anchor" % (x, h)
         if case == "standing":
-            assert restored in before, "standing: M did not rebuild its share-lock from the record"
             assert queried in before, "standing: M signed a rival of X before asking for X's certificate"
+            assert escaped in before, "standing: M signed a rival of X before X's grace round passed"
             self.record("standing", "M rebuilt the share-lock on X, asked for X's certificate, then signed %s at %d, %.1f s after its start" %
                         (signed_rival[:16], h, time.time() - t_start))
         else:
             assert replaced in text, "replaced: M did not judge X's anchor replaced"
-            assert restored not in text and queried not in before, "replaced: X held its height though Bitcoin replaced its anchor"
+            assert escaped not in text and queried not in before, "replaced: X held its height though Bitcoin replaced its anchor"
             self.record("replaced", "X's anchor gone: M signed %s at %d without asking about X" % (signed_rival[:16], h))
         # Everyone back: a sibling of X is certified at H.
         for i in (3, 4):

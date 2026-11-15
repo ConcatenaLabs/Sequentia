@@ -191,6 +191,7 @@ class PosSigningRecordTest(BitcoinTestFramework):
             peer_chain = {k: n2.getblockhash(k) for k in range(1, n2.getblockcount() + 1)}
             self.start_node(0, extra_args=self.args_for(0))
             restart_tip = n0.getblockcount()
+            held = [b for b in n0.getsigningrecord()["held"] if b["hash"] == x]
             self.log.info("holder %d: killed after certifying %s at %d; restarted at tip %d; peers at %d" %
                           (it, x[:16], h, restart_tip, max(peer_chain) if peer_chain else 0))
             time.sleep(ISOLATED_S)
@@ -201,10 +202,8 @@ class PosSigningRecordTest(BitcoinTestFramework):
                 assert want is None or mine == want, \
                     "holder %d: alone, node0 certified %s at height %d, a rival of %s it signed" % (it, mine[:16], k, want[:16])
             self.log.info("holder %d: alone %d s, node0 at %d: no rival of a block it signed" % (it, ISOLATED_S, top))
-            with open(n0.debug_log_path, encoding="utf-8", errors="replace") as f:
-                text = f.read()
             if restart_tip < h:
-                assert "share-lock restored from the signing record" in text, "the record restored no share-lock"
+                assert held and held[0]["restored"], "the record restored no share-lock: %s" % held
             self.mesh()
             self.wait_until(lambda: len({n.getbestblockhash() for n in self.nodes}) == 1, timeout=120)
             self.sync_blocks(timeout=60)
