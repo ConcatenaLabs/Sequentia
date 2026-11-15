@@ -23,6 +23,22 @@ The parent (Bitcoin testnet) only changes every ~10 minutes, so a 10 s TTL is
 far fresher than the anchor needs. Auth headers are ignored (the public endpoint
 needs none) — point the nodes' -mainchainrpcuser/-password at anything.
 
+What it keeps about its callers: the time each client address last made a
+call, in memory only, for a day (SEEN_TTL), for at most SEEN_MAX addresses
+(SEQ_PROXY_SEEN_MAX, default 100000); an entry older than a day is dropped,
+and a restart forgets them all. Nothing else is recorded, and no request is
+logged. The record answers one question, whether a given address has been
+using this endpoint lately, and only to the machine the proxy runs on, so it
+says how far it can be trusted: "since" is when the record began (the
+proxy's start), and "dropped_last" is the last time it was full and left a
+new caller out (null when never). An address absent from the record has made
+no call since "since", except possibly at "dropped_last" and before. The
+answers, to loopback callers only (anyone else gets 404):
+  GET /last-seen?addr=<address>
+      {"addr": ..., "last": <seconds or null>, "since": <seconds>, "dropped_last": <seconds or null>}
+  GET /last-seen
+      {"since": ..., "dropped_last": ..., "seen": {<address>: <seconds>, ...}}
+
 Run it and leave it open:  python3 testnet-rpc-cache-proxy.py
 """
 
@@ -33,6 +49,7 @@ import socketserver
 import subprocess
 import threading
 import time
+import urllib.parse
 
 # Upstream Bitcoin RPC endpoint and listen address are env-configurable so the
 # same proxy serves testnet3, testnet4, or any gateway:
@@ -54,6 +71,61 @@ _cache = {}                      # key -> (expiry, result_obj)
 _locks = {}                      # key -> Lock (in-flight dedup)
 _guard = threading.Lock()
 _stats = {"hits": 0, "upstream": 0}
+
+SEEN_TTL = 86400.0               # seconds a caller's last-call time is kept
+SEEN_MAX = int(os.environ.get("SEQ_PROXY_SEEN_MAX", "100000"))  # addresses kept at most
+_seen = {}                       # client address -> unix time of its last call
+_seen_guard = threading.Lock()
+_seen_pruned = [0.0]
+_seen_since = time.time()        # when the record began
+_seen_dropped = [None]           # last time a new caller was left out: the record was full
+
+
+def _norm_addr(addr):
+    """An IPv4 caller on a dual-stack socket arrives as ::ffff:a.b.c.d."""
+    return addr[7:] if addr.startswith("::ffff:") and "." in addr else addr
+
+
+def _prune(now):
+    _seen_pruned[0] = now
+    for a in [a for a, t in _seen.items() if now - t > SEEN_TTL]:
+        del _seen[a]
+
+
+def _note_caller(addr, now=None):
+    """Record a call. When the record is full, a new address is left out and
+    the time noted, so that the record says it may have missed a caller:
+    evicting an entry instead would let a flood of addresses erase one."""
+    now = time.time() if now is None else now
+    a = _norm_addr(addr)
+    with _seen_guard:
+        if now - _seen_pruned[0] > 60:
+            _prune(now)
+        if a not in _seen and len(_seen) >= SEEN_MAX:
+            if now - _seen_pruned[0] > 1:
+                _prune(now)
+            if len(_seen) >= SEEN_MAX:
+                _seen_dropped[0] = now
+                return
+        _seen[a] = now
+
+
+def _last_seen(addr=None, now=None):
+    """The record of one address, or of all, with how far it can be trusted."""
+    now = time.time() if now is None else now
+    with _seen_guard:
+        dropped = None if _seen_dropped[0] is None else int(_seen_dropped[0])
+        head = {"since": int(_seen_since), "dropped_last": dropped}
+        if addr is not None:
+            a = _norm_addr(addr)
+            t = _seen.get(a)
+            return dict({"addr": a, "last": int(t) if t is not None and now - t <= SEEN_TTL else None}, **head)
+        return dict(head, seen={a: int(t) for a, t in _seen.items() if now - t <= SEEN_TTL})
+
+
+def _is_loopback(addr):
+    a = _norm_addr(addr)
+    return a == "::1" or a.startswith("127.")
 
 # When this proxy is exposed beyond localhost (e.g. over a tailnet to an external
 # tester), block everything that isn't a read-only block/chain query: node
@@ -108,7 +180,24 @@ def _with_id(obj, rid):
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def do_GET(self):
+        url = urllib.parse.urlsplit(self.path)
+        if url.path != "/last-seen" or not _is_loopback(self.client_address[0]):
+            self._reply(404, b'{"error":"not found"}')
+            return
+        q = urllib.parse.parse_qs(url.query)
+        out = _last_seen(q["addr"][0]) if "addr" in q else _last_seen()
+        self._reply(200, json.dumps(out).encode())
+
+    def _reply(self, code, out):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
     def do_POST(self):
+        _note_caller(self.client_address[0])
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n)
         out = self._serve(body)
