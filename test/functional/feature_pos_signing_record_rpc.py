@@ -156,7 +156,11 @@ class PosSigningRecordRpcTest(BitcoinTestFramework):
         # What it spends names T: the block's own transaction list is gone from
         # the index, so the record's spend count is checked against T's inputs.
         assert e["spends"] == len(m.decoderawtransaction(raw)["vin"])
+        # Catch up with the peer before the next case signs at the next
+        # height: a template made meanwhile would sit at a height whose
+        # certified block is still arriving, and is refused for good.
         self.connect_nodes(1, 2)
+        self.sync_blocks(self.nodes[1:])
 
     def case_fail(self):
         m = self.nodes[1]
