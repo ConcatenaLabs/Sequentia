@@ -212,7 +212,7 @@ class LostReplayTest(LostBlocksTest):
         self.bitcoin_reorg(1)
         self.wait_until(lambda: x["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=60)
         ev = a.getlostblock(x["hash"])
-        r = self.nodes[2].submitlostblock(ev["block"], ev["bitcoinheaders"])
+        r = self.nodes[2].submitlostblock(ev["block"])
         self.wait_until(lambda: x["hash"] in self.lost(2), timeout=60)
         self.record("r3", "two lost branches on node 2", "L (T, lost first) and X (R, lost second, shown by submitlostblock: %r)" % r)
         h = self.produce(2, ALL_KEYS, leaders=[SELLER])
@@ -595,9 +595,9 @@ class LostReplayTest(LostBlocksTest):
         self.start_node(LATE, extra_args=self.node_args(LATE))
         late = self.nodes[LATE]
         self.record("fab", "syncing node (at genesis, IBD %s)" % late.getblockchaininfo()["initialblockdownload"],
-                    self.sub(late, ev["block"], ev["bitcoinheaders"]))
+                    self.sub(late, ev["block"]))
         # At the tip.
-        r = self.sub(n2, ev["block"], ev["bitcoinheaders"])
+        r = self.sub(n2, ev["block"])
         time.sleep(3)
         self.record("fab", "node 2 at the tip", "%s; L' held lost there: %s" % (r, fab["hash"] in self.lost(2)))
         a.setnetworkactive(True)
@@ -633,12 +633,10 @@ class LostReplayTest(LostBlocksTest):
                     return int(line.split()[1])
         return -1
 
-    def case_deep(self):
-        depth = int(os.environ.get("LOST_DEPTH", "1"))
-        per = int(os.environ.get("LOST_DEEP_TXS", "480"))
-        per_btc = 10
-        case = "deep%d" % depth
-        self.log.info("(%s) %d stale Bitcoin block(s), %d full Sequentia blocks each" % (case, depth, per_btc))
+    def deep_build(self, case, depth, per, per_btc):
+        """Full lost blocks: `depth` Bitcoin blocks, `per_btc` Sequentia blocks of `per` transactions on each,
+        made by generateposblock. Returns them, their transactions, an ordinary transaction O (unsent)
+        and the fork point's height."""
         a = self.nodes[SELLER]
         n1 = self.nodes[1]
         nblocks = depth * per_btc
@@ -687,6 +685,17 @@ class LostReplayTest(LostBlocksTest):
             weights.append(blk["weight"])
         self.record(case, "lost branch", "%d blocks at heights %d..%d, %d transactions, weights %d..%d (limit 400,000)" %
                     (len(Ls), Ls[0]["height"], Ls[-1]["height"], len(lost_txids), min(weights), max(weights)))
+        return Ls, lost_txids, o_hex, o_id, f_height
+
+    def case_deep(self):
+        depth = int(os.environ.get("LOST_DEPTH", "1"))
+        per = int(os.environ.get("LOST_DEEP_TXS", "480"))
+        per_btc = 10
+        case = "deep%d" % depth
+        self.log.info("(%s) %d stale Bitcoin block(s), %d full Sequentia blocks each" % (case, depth, per_btc))
+        n1 = self.nodes[1]
+        Ls, lost_txids, o_hex, o_id, f_height = self.deep_build(case, depth, per, per_btc)
+        nblocks = depth * per_btc
         rss0 = self.rss_kb(1)
         since = [self.log_size(i) for i in range(N)]
         t0 = time.time()
@@ -713,12 +722,12 @@ class LostReplayTest(LostBlocksTest):
             if o_id in txs or len(hs) > nblocks + 5:
                 break
         self.sync_tips(HONEST + [LATE], timeout=300)
-        lines = self.log_has(1, "classified in", since[1])
+        lines = self.log_has(1, "plan computed on", since[1])
         micros = [int(l.split("classified in ")[1].split(" us")[0]) for l in lines]
         recs = self.log_has(1, "records", since[1])
         self.record(case, "replay", "%d blocks (height, carried, ordinary tx in it, seconds to produce): %s; left uncarried: %d; ordinary tx waited %d block(s), %.0f s" %
                     (len(hs), hs, len(left), len(hs) - 1, time.time() - t0))
-        self.record(case, "classifier", "%d classifications on node 1, %d..%d us (median %d); node 1 RSS %d kB; record lines: %d" %
+        self.record(case, "classifier", "%d plans computed on node 1, %d..%d us (median %d); node 1 RSS %d kB; record lines: %d" %
                     (len(micros), min(micros), max(micros), sorted(micros)[len(micros) // 2], self.rss_kb(1), len(recs)))
         assert not left
         self.realign()
@@ -788,6 +797,58 @@ class LostReplayTest(LostBlocksTest):
                     (self.btc().getblockcount(), a_l + W, time.time() - t0, self.block_of(st["r_id"], self.nodes[1]) is not None))
         self.mesh(range(N))
 
+    # ---------------------------------------------------------------- hc
+    def wallet_view(self, w, txid):
+        t = w.gettransaction(txid)
+        return {k: t.get(k) for k in ("confirmations", "trusted", "walletconflicts", "bip125-replaceable") if k in t}
+
+    def case_hc(self):
+        self.log.info("(hc) honest conflicts: a holder's own wallet bumps or respends its lost transaction")
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        w = n1.get_wallet_rpc("w")
+        got = a.sendtoaddress(address=w.getnewaddress(), amount=Decimal("2"), fee_asset_label="bitcoin")
+        self.produce(SELLER, ALL_KEYS, txs_must=[got])
+        self.sync_tips(range(N))
+        t_id = w.sendtoaddress(address=self.nodes[2].getnewaddress(), amount=Decimal("1"), replaceable=True, fee_asset_label="bitcoin")
+        self.btc_mine(1)
+        L = self.produce(1, ALL_KEYS, txs_must=[t_id])
+        self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        self.record("hc", "T", "node 1's wallet tx %s in certified L at height %d: %s" % (t_id[:16], L["height"], self.wallet_view(w, t_id)))
+        t0 = time.time()
+        self.lose("hc", [L["hash"]])
+        self.record("hc", "wallet after the loss", "%s; in node 1's mempool: %s" % (self.wallet_view(w, t_id), t_id in n1.getrawmempool()))
+        time.sleep(float(os.environ.get("LOST_HC_WAIT", "0")))
+        self.record("hc", "node 1's bound outpoints when the wallet bumps", n1.getlostblocks()["boundoutpoints"])
+        try:
+            r = w.bumpfee(t_id)
+            self.record("hc", "bumpfee", "returned %s; the bump in node 1's mempool: %s; T in it: %s; the wallet shows the bump: %s" %
+                        (r["txid"][:16], r["txid"] in n1.getrawmempool(), t_id in n1.getrawmempool(), self.wallet_view(w, r["txid"])))
+        except JSONRPCException as e:
+            self.record("hc", "bumpfee", "refused: %s" % e.error["message"])
+        tx = w.gettransaction(t_id, True, True)["decoded"]
+        vin = [{"txid": i["txid"], "vout": i["vout"]} for i in tx["vin"]]
+        total = sum(Decimal(str(w.gettxout(i["txid"], i["vout"], False)["value"])) if w.gettxout(i["txid"], i["vout"], False) else Decimal(0) for i in vin)
+        self.record("hc", "T's inputs unspent on the chain now", "%d of %d, %s" % (sum(1 for i in vin if w.gettxout(i["txid"], i["vout"], False)), len(vin), total))
+        raw = w.createrawtransaction(vin, [{w.getnewaddress(): total - Decimal("0.001")}, {"fee": Decimal("0.001")}])
+        rs = w.signrawtransactionwithwallet(raw)["hex"]
+        try:
+            w.sendrawtransaction(rs)
+            self.record("hc", "respend", "accepted")
+        except JSONRPCException as e:
+            self.record("hc", "respend", "refused: %s" % e.error["message"])
+        h = self.produce(1, ALL_KEYS)
+        self.sync_tips(HONEST)
+        self.record("hc", "first block after the loss", "height %d, tx[1] is T: %s; %.1f s after the reorg; wallet: %s" %
+                    (h["height"], h["block"]["tx"][1:2] == [t_id], time.time() - t0, self.wallet_view(w, t_id)))
+        try:
+            w.bumpfee(t_id)
+        except JSONRPCException as e:
+            self.record("hc", "bumpfee once T is back", "refused: %s" % e.error["message"])
+        assert h["block"]["tx"][1] == t_id
+        self.realign()
+
+    # ---------------------------------------------------------------- run
     def run_test(self):
         try:
             for c in CASES:

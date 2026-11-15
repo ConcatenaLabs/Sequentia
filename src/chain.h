@@ -170,6 +170,9 @@ enum BlockStatus : uint32_t {
     //! spends (pos_lost.h). Set with BLOCK_FAILED_VALID; the lost-block pass
     //! clears both when the evidence or Bitcoin's view no longer binds it.
     BLOCK_FAILED_LOST        =  4096,
+    //! SEQUENTIA: the block carries a lost-block record (pos_lost.h); the
+    //! bindings are rebuilt from the blocks marked so. Bookkeeping only.
+    BLOCK_HAS_LOST_RECORD    =  8192,
 };
 
 /** The block chain is a tree shaped structure starting with the
