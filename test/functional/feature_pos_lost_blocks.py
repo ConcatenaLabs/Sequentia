@@ -93,7 +93,7 @@ class LostBlocksTest(BitcoinTestFramework):
             "-con_connect_genesis_outputs=1", "-acceptnonstdtxn=1", "-par=1", "-fallbackfee=0.0001",
             "-blindedaddresses=0", "-con_default_blinded_addresses=0",
             "-con_bitcoin_anchor=1", "-validateanchor=1", "-anchorpollinterval=1", "-anchorminconf=1",
-            "-posescapestallmtpgap=0", "-con_any_asset_fees=1", "-con_maxblockweight=%d" % MAX_WEIGHT,
+            "-posescapestallmtpgap=0", "-con_any_asset_fees=%s" % os.environ.get("LOST_ANY_ASSET", "1"), "-con_maxblockweight=%d" % MAX_WEIGHT,
             "-mainchainrpchost=127.0.0.1", "-mainchainrpcport=%d" % self.btc_port,
             "-mainchainrpcuser=%s" % self.btc_user, "-mainchainrpcpassword=%s" % self.btc_pass,
             "-parentgenesisblockhash=%s" % self.btc_genesis, "-debug=mempool", "-debug=validation", "-txindex=1",
