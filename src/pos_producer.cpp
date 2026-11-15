@@ -1397,14 +1397,26 @@ std::optional<int64_t> PosProducer::ScheduleOriginMs() const
 {
     // m_gossip_mutex held.
     const std::shared_ptr<const CBlock> round0 = BackedForRound(0);
-    if (!round0) return std::nullopt;
+    if (!round0) {
+        // Every candidate is left aside (its anchor not verifiable on this
+        // node's view of Bitcoin, as after a Bitcoin reorganization that
+        // replaced the anchors of all of them) or excluded. No round can back
+        // anything, but the collection must still run out and restart, or this
+        // node would never propose again at this height: time it from the
+        // earliest candidate's stamp.
+        std::optional<int64_t> earliest;
+        for (const auto& [leader, cand] : m_candidates) {
+            if (!earliest || cand.origin_ms < *earliest) earliest = cand.origin_ms;
+        }
+        return earliest;
+    }
     for (const auto& [leader, cand] : m_candidates) {
         if (cand.block == round0) return cand.origin_ms;
     }
     return (int64_t)round0->nTime * 1000; // unreachable: round 0 is a candidate
 }
 
-std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
+std::vector<uint256> PosProducer::RestartCollection(int height, int64_t now)
 {
     // m_gossip_mutex held. Every node reaches this at the same instant (the
     // exhausted schedule is derived from shared data), so all of them re-propose
