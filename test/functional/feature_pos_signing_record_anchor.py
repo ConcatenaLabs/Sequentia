@@ -55,8 +55,9 @@ WAIT_S = 8
 
 class ParentGate:
     """An HTTP relay between a member and the parent chain's daemon. While shut,
-    it answers no question about a block (getblockheader, getblock): the
-    daemon's start-up checks pass, and no anchor can be judged."""
+    it answers no request that asks about a block (getblockheader, getblock),
+    alone or in a batch: the daemon's start-up checks pass, and no anchor can
+    be judged."""
 
     def __init__(self, port, upstream_port):
         gate = self
@@ -69,10 +70,12 @@ class ParentGate:
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 try:
-                    method = json.loads(body).get("method", "")
-                except Exception:
-                    method = ""
-                if gate.shut and method in ("getblockheader", "getblock"):
+                    req = json.loads(body)
+                except ValueError:
+                    req = None
+                calls = req if isinstance(req, list) else [req]
+                methods = {c.get("method", "") for c in calls if isinstance(c, dict)}
+                if gate.shut and methods & {"getblockheader", "getblock"}:
                     self.close_connection = True
                     return
                 c = http.client.HTTPConnection("127.0.0.1", upstream_port, timeout=30)

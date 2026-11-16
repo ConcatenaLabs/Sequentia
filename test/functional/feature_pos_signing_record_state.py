@@ -84,12 +84,20 @@ def made_at_once(log, case, what, call, round_s=ROUND_S):
 
 
 class ParentGate:
-    """A proxy before the parent chain's daemon that drops the calls named in
-    `blocked` (the connection closes with no reply)."""
+    """A proxy before the parent chain's daemon. A request (one call or a
+    batch) that calls any method in `blocked` is dropped: the connection
+    closes with no reply. One that calls any method in `hung` is held with no
+    reply for `hang_s` seconds, then dropped. Every request is logged as
+    (time, [(method, params), ...])."""
 
     def __init__(self, port, upstream_port):
         gate = self
         self.blocked = set()
+        self.hung = set()
+        self.hang_s = 60
+        self.log = []
+        self.lock = threading.Lock()
+        self.closing = threading.Event()
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
@@ -98,10 +106,18 @@ class ParentGate:
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 try:
-                    method = json.loads(body).get("method", "")
+                    req = json.loads(body)
                 except ValueError:
-                    method = ""
-                if method in gate.blocked:
+                    req = None
+                calls = req if isinstance(req, list) else [req] if isinstance(req, dict) else []
+                made = [(c.get("method", ""), c.get("params", [])) for c in calls if isinstance(c, dict)]
+                with gate.lock:
+                    gate.log.append((time.time(), made))
+                    names = {m for m, _ in made}
+                    hung, blocked = names & gate.hung, names & gate.blocked
+                if hung:
+                    gate.closing.wait(gate.hang_s)
+                if hung or blocked:
                     self.close_connection = True
                     return
                 c = http.client.HTTPConnection("127.0.0.1", upstream_port, timeout=30)
@@ -118,7 +134,12 @@ class ParentGate:
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
+    def calls_since(self, t):
+        with self.lock:
+            return [m for (at, made) in self.log if at >= t for m in made]
+
     def close(self):
+        self.closing.set()
         self.server.shutdown()
         self.server.server_close()
 

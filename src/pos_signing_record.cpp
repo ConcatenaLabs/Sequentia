@@ -8,6 +8,7 @@
 #include <fs.h>
 #include <hash.h>
 #include <logging.h>
+#include <mainchainrpc.h>
 #include <pos.h>
 #include <primitives/block.h>
 #include <shutdown.h>
@@ -283,6 +284,7 @@ struct Verdict {
     bool invalid{false};  //!< it or an ancestor is invalid here, for a reason other than Bitcoin
     bool anchor_judged{false}; //!< the parent chain gave a verdict on its own anchor
     uint64_t revivals{0};      //!< PosIndexState::revivals
+    PosIndexStanding index{PosIndexStanding::UNKNOWN}; //!< what the block index said, before the marks were judged
     //! UNDECIDED: the anchor the daemon has not judged (the block's own, or the
     //! one an anchor watcher's mark names), and which of the two.
     uint32_t undecided_height{0};
@@ -290,18 +292,22 @@ struct Verdict {
     bool undecided_mark{false};
 };
 
-//! Judge a held block; g_mutex NOT held (the judges take cs_main and may ask
-//! the parent daemon).
-Verdict JudgeHeld(const PosAnchorJudge& judge, const PosIndexJudge& index, const uint256& hash, const Held& h)
+//! The parent chain's answer on one anchor in this check: nothing on a node
+//! that does not watch Bitcoin.
+using AnchorAnswer = std::function<std::optional<PosAnchorStanding>(uint32_t height, const uint256& hash)>;
+
+//! Judge a held block from what the block index said of it and the parent
+//! chain's answers in this check (JudgeAll).
+Verdict JudgeHeld(const Held& h, const PosIndexState& state, const AnchorAnswer& answer)
 {
     Verdict v;
-    const PosIndexState state = index ? index(hash, h.parent) : PosIndexState{};
     PosIndexStanding idx = state.standing;
+    v.index = idx;
     v.revivals = state.revivals;
     const bool anchored = g_con_bitcoin_anchor && !h.anchor_hash.IsNull();
     // The parent chain's verdict on the block's own anchor (nothing on a node
     // that does not watch Bitcoin).
-    const std::optional<PosAnchorStanding> own = anchored && judge ? judge(h.anchor_height, h.anchor_hash) : std::nullopt;
+    const std::optional<PosAnchorStanding> own = anchored ? answer(h.anchor_height, h.anchor_hash) : std::nullopt;
     if (idx == PosIndexStanding::ORPHANED) {
         // The anchor watcher dropped it, or an ancestor, because Bitcoin
         // replaced an anchor. Its mark persists on disk and only the watcher
@@ -309,11 +315,20 @@ Verdict JudgeHeld(const PosAnchorJudge& judge, const PosIndexJudge& index, const
         // may be from an earlier run, and Bitcoin may have returned since.
         // Releasing at once, with no escape round, is right only on what the
         // parent chain says now (Bitcoin anchoring is supreme, and it is a
-        // current verdict); so each anchor a mark names is judged again.
+        // current verdict); so each anchor a mark names is judged again, by
+        // the daemon's answer in this check: a remembered "replaced" (the
+        // watcher's cache, kept until its next tick) is no current verdict
+        // either, since Bitcoin may have returned since.
+        // What remains is Bitcoin returning in the instant after the answer:
+        // the member then signs a rival of a block whose anchor stands again.
+        // That is the honest there-and-back case the design accepts (a
+        // committee that follows Bitcoin both ways signs two blocks at one
+        // height, which is why there is no slashing), and its window is one
+        // round trip to the daemon, not a poll of the anchor watcher.
         bool gone = own == PosAnchorStanding::GONE, undecided = false, no_verdict = state.orphan_anchors.empty();
         for (const auto& [height, anchor] : state.orphan_anchors) {
             const std::optional<PosAnchorStanding> a =
-                g_con_bitcoin_anchor && judge && !anchor.IsNull() ? judge(height, anchor) : std::nullopt;
+                g_con_bitcoin_anchor && !anchor.IsNull() ? answer(height, anchor) : std::nullopt;
             if (!a) {
                 no_verdict = true;
             } else if (*a == PosAnchorStanding::GONE) {
@@ -389,6 +404,51 @@ Verdict JudgeHeld(const PosAnchorJudge& judge, const PosIndexJudge& index, const
     }
     v.for_good = h.certified && !v.invalid && v.anchor == PosAnchorStanding::STANDS;
     return v;
+}
+
+//! Judge held blocks: what the block index says of each, then one question
+//! to the parent chain about every anchor they need (each block's own, and
+//! each anchor a watcher's mark names), each anchor named once, whatever the
+//! number of blocks and marks naming it. g_mutex NOT held: the index judge
+//! takes cs_main, and the anchor judge may wait for the daemon, at most
+//! PosSigningDaemonBudgetMs() for the whole check.
+std::vector<Verdict> JudgeAll(const PosAnchorJudge& judge, const PosIndexJudge& index,
+                              const std::vector<std::pair<uint256, Held>>& held)
+{
+    std::vector<PosIndexState> states;
+    states.reserve(held.size());
+    std::vector<std::pair<uint32_t, uint256>> anchors;
+    std::map<std::pair<uint32_t, uint256>, size_t> slot;
+    const auto need = [&](uint32_t height, const uint256& hash) {
+        if (hash.IsNull()) return;
+        if (slot.emplace(std::make_pair(height, hash), anchors.size()).second) anchors.emplace_back(height, hash);
+    };
+    for (const auto& [hash, h] : held) {
+        states.push_back(index ? index(hash, h.parent) : PosIndexState{});
+        if (!g_con_bitcoin_anchor) continue;
+        need(h.anchor_height, h.anchor_hash);
+        if (states.back().standing == PosIndexStanding::ORPHANED) {
+            for (const auto& [height, anchor] : states.back().orphan_anchors) need(height, anchor);
+        }
+    }
+    std::optional<std::vector<PosAnchorStanding>> answers;
+    if (judge && !anchors.empty()) {
+        answers = judge(anchors);
+        // One answer per anchor, or none: anything else is no verdict.
+        if (answers && answers->size() != anchors.size()) {
+            answers = std::vector<PosAnchorStanding>(anchors.size(), PosAnchorStanding::UNDECIDED);
+        }
+    }
+    const AnchorAnswer answer = [&](uint32_t height, const uint256& hash) -> std::optional<PosAnchorStanding> {
+        if (!answers) return std::nullopt;
+        const auto it = slot.find({height, hash});
+        if (it == slot.end()) return PosAnchorStanding::UNDECIDED;
+        return (*answers)[it->second];
+    };
+    std::vector<Verdict> out;
+    out.reserve(held.size());
+    for (size_t i = 0; i < held.size(); ++i) out.push_back(JudgeHeld(held[i].second, states[i], answer));
+    return out;
 }
 
 //! Whether `h`'s escape still holds. A certified block escapes only while it
@@ -506,8 +566,7 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
         }
     }
     // Judged from the node's state now, with no record lock held.
-    std::vector<Verdict> verdicts;
-    for (const auto& [hash, h] : held) verdicts.push_back(JudgeHeld(judge, index, hash, h));
+    const std::vector<Verdict> verdicts = JudgeAll(judge, index, held);
     const int64_t round_ms = PosSigningRoundMs();
     bool refused_for_good = false;
     LOCK(g_mutex);
@@ -707,6 +766,13 @@ int64_t PosSigningWindowMs()
 {
     const int64_t o = std::clamp<int64_t>(gArgs.GetIntArg("-poswindowms", 0), 0, 60000);
     return o > 0 ? o : 500 + 25 * (int64_t)g_pos_committee_size;
+}
+
+int64_t PosSigningDaemonBudgetMs()
+{
+    const int64_t timeout_ms = 1000 * std::clamp<int64_t>(gArgs.GetIntArg("-mainchainrpctimeout", DEFAULT_MAINCHAIN_RPC_TIMEOUT),
+                                                          1, MAX_MAINCHAIN_RPC_TIMEOUT);
+    return std::min(timeout_ms, std::max<int64_t>(500, PosSigningRoundMs() / 2));
 }
 
 bool PosSigningRecordLoad(const uint256& genesis, std::string& error)
@@ -1077,8 +1143,7 @@ std::optional<PosBoundBlock> PosSigningBoundAt(int height, const uint256& except
             if (hash != except && h.signed_here) held.emplace_back(hash, h);
         }
     }
-    std::vector<Verdict> verdicts;
-    for (const auto& [hash, h] : held) verdicts.push_back(JudgeHeld(judge, index, hash, h));
+    const std::vector<Verdict> verdicts = JudgeAll(judge, index, held);
     std::optional<PosBoundBlock> out;
     std::vector<uint256> queries;
     {
@@ -1139,8 +1204,7 @@ bool PosSigningSignedAt(int height)
             if (h.signed_here) held.emplace_back(hash, h);
         }
     }
-    for (const auto& [hash, h] : held) {
-        const Verdict v = JudgeHeld(judge, index, hash, h);
+    for (const Verdict& v : JudgeAll(judge, index, held)) {
         if (v.anchor != PosAnchorStanding::GONE && !v.ignored) return true;
     }
     return false;
@@ -1251,9 +1315,11 @@ std::vector<PosSigningHeld> PosSigningHeldBlocks()
     }
     // Judged now, as the check would (with no side effect).
     std::vector<PosSigningHeld> out;
-    for (const auto& [hash, h] : held) {
-        const PosIndexStanding idx = index ? index(hash, h.parent).standing : PosIndexStanding::UNKNOWN;
-        const Verdict v = JudgeHeld(judge, index, hash, h);
+    const std::vector<Verdict> verdicts = JudgeAll(judge, index, held);
+    for (size_t i = 0; i < held.size(); ++i) {
+        const auto& [hash, h] = held[i];
+        const Verdict& v = verdicts[i];
+        const PosIndexStanding idx = v.index;
         PosSigningHeld o;
         o.hash = hash;
         o.height = h.height;

@@ -840,6 +840,78 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
     }
 }
 
+//! Until when (GetTimeMillis) CheckMainchainAnchorsFresh answers nothing
+//! without asking: the daemon gave no whole reply by its last deadline.
+static std::atomic<int64_t> g_fresh_silent_until_ms{0};
+
+std::vector<AnchorCheckResult> CheckMainchainAnchorsFresh(const std::vector<std::pair<uint32_t, uint256>>& anchors,
+                                                          int64_t deadline_ms)
+{
+    std::vector<AnchorCheckResult> out(anchors.size(), AnchorCheckResult::NO_CONNECTION);
+    // Each anchor asked once: the slot of its first mention.
+    std::map<std::pair<uint32_t, uint256>, size_t> ask;
+    {
+        LOCK(g_anchor_mutex);
+        for (size_t i = 0; i < anchors.size(); ++i) {
+            if (g_anchor_ok_cache.count(anchors[i])) {
+                out[i] = AnchorCheckResult::OK;
+            } else {
+                ask.emplace(anchors[i], ask.size());
+            }
+        }
+    }
+    if (ask.empty()) return out;
+    const int64_t start = GetTimeMillis();
+    if (start < g_fresh_silent_until_ms.load()) return out;
+    std::vector<std::pair<std::string, UniValue>> calls;
+    calls.emplace_back("getblockchaininfo", UniValue(UniValue::VARR));
+    calls.resize(1 + ask.size());
+    for (const auto& [anchor, slot] : ask) {
+        UniValue params(UniValue::VARR);
+        params.push_back(anchor.second.GetHex());
+        calls[1 + slot] = {"getblockheader", params};
+    }
+    std::vector<UniValue> replies;
+    try {
+        replies = CallMainChainRPCCalls(calls, deadline_ms);
+    } catch (const std::exception& e) {
+        g_fresh_silent_until_ms = GetTimeMillis() + deadline_ms;
+        LogPrintf("WARNING: the parent chain daemon gave no verdict on %u anchor(s) within %d ms (%s); undecided\n",
+                  (unsigned)ask.size(), (int)deadline_ms, e.what());
+        return out;
+    }
+    // The daemon's sync, read in the same reply: whether "not found" says
+    // anything (MainchainSyncedTo, from this answer rather than a snapshot).
+    int synced_blocks = -1;
+    {
+        const UniValue result = find_value(replies[0], "result");
+        if (find_value(replies[0], "error").isNull() && result.isObject()) {
+            const UniValue ibd = find_value(result.get_obj(), "initialblockdownload");
+            const UniValue count = find_value(result.get_obj(), "blocks");
+            if (ibd.isBool() && !ibd.get_bool() && count.isNum()) synced_blocks = count.get_int();
+        }
+    }
+    std::map<std::pair<uint32_t, uint256>, AnchorCheckResult> answer;
+    for (const auto& [anchor, slot] : ask) {
+        AnchorCheckResult res = InterpretAnchorHeaderReply(replies[1 + slot], anchor.first);
+        if (res == AnchorCheckResult::NOT_FOUND && (synced_blocks < 0 || (int64_t)anchor.first > synced_blocks)) {
+            // Unknown to a daemon still syncing, or one whose best chain has
+            // not reached that height: it may be a Bitcoin block the daemon
+            // has not received yet, so no verdict.
+            res = AnchorCheckResult::NO_CONNECTION;
+        }
+        if (res == AnchorCheckResult::OK || res == AnchorCheckResult::STALE || res == AnchorCheckResult::HEIGHT_MISMATCH) {
+            CacheAnchorVerdict(anchor.first, anchor.second, res);
+        }
+        answer[anchor] = res;
+    }
+    for (size_t i = 0; i < anchors.size(); ++i) {
+        if (out[i] == AnchorCheckResult::OK) continue;
+        out[i] = answer[anchors[i]];
+    }
+    return out;
+}
+
 int AnchorUncontestedHeight(int active_tip_height, int window,
                             const std::vector<std::pair<int, int>>& competing_branches,
                             int committed_height)

@@ -61,6 +61,17 @@ UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params);
 std::vector<UniValue> CallMainChainRPCBatch(const std::string& strMethod,
                                             const std::vector<UniValue>& params_list);
 
+/** Several calls, of any methods, in a SINGLE HTTP round trip that ends by
+ *  `deadline_ms` (milliseconds of wall-clock time from the call, whatever the
+ *  daemon does meanwhile: a daemon that accepts the connection and never
+ *  answers, or answers a byte at a time, costs at most this long), and never
+ *  later than -mainchainrpctimeout. Replies come back in request order,
+ *  matched by id as CallMainChainRPCBatch's are. Throws CConnectionFailed when
+ *  no whole reply came in time. For a caller that must decide within a bound
+ *  (the signing check, pos_signing_record.h). */
+std::vector<UniValue> CallMainChainRPCCalls(const std::vector<std::pair<std::string, UniValue>>& calls,
+                                            int64_t deadline_ms);
+
 /** Put a batch reply back in request order, by id.
  *
  *  Separated from the call so it can be tested against the orderings a daemon

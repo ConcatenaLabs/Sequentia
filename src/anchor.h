@@ -130,6 +130,23 @@ enum class AnchorCheckResult {
  *  and MainchainUnchangedHeight in anchor.cpp. */
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash);
 
+/** Verdicts for a decision that releases on a replaced anchor (the signing
+ *  check, pos_signing_record.h): every answer that says an anchor is replaced
+ *  comes from the daemon in this call, never from a cache, because a cached
+ *  "off the best chain" stays until the anchor watcher's next tick and Bitcoin
+ *  may have returned since. An anchor in the canonical cache is answered OK
+ *  from it: that answer only ever holds more, never releases. Every other
+ *  anchor, each asked once however often it is named, goes to the daemon in
+ *  one round trip together with getblockchaininfo, ended by `deadline_ms`; an
+ *  anchor unknown to the daemon is NOT_FOUND only if that same reply shows it
+ *  out of its initial download with its best chain at or past the anchor's
+ *  height, and NO_CONNECTION otherwise. With no whole reply by the deadline,
+ *  every anchor not answered from the cache is NO_CONNECTION, and so is every
+ *  call for the next `deadline_ms`, so that checks queued behind one that
+ *  waited do not each wait again. Replies in the order of `anchors`. */
+std::vector<AnchorCheckResult> CheckMainchainAnchorsFresh(const std::vector<std::pair<uint32_t, uint256>>& anchors,
+                                                          int64_t deadline_ms);
+
 /** What the parent chain daemon last said about its sync, as CheckMainchainAnchor
  *  last read it: whether it answered, whether it was still in its initial
  *  download, and its block count (-1 when it did not answer or was syncing).

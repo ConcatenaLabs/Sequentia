@@ -226,11 +226,18 @@ void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route) E
 /** SEQUENTIA PoS: what the block index says now of a block the signing check
  *  holds (pos_signing_record.h, PosIndexStanding): on the active chain, off it,
  *  failed here, or dropped by the anchor watcher (it or an ancestor), with
- *  the anchors the watcher's marks name (PosIndexState). A block not in the
- *  index yet stands as its parent `parent` does. Takes cs_main. */
+ *  the anchors the watcher's marks name (PosIndexState), and the last call in
+ *  this run that cleared the failure marks of it or of one of its ancestors.
+ *  A block not in the index yet stands, and is revived, as its parent
+ *  `parent` is. Takes cs_main. */
 enum class PosIndexStanding;
 struct PosIndexState;
 PosIndexState PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent);
+
+/** Unit tests: forget which blocks ResetBlockFailureFlags revived (the
+ *  record keeps pointers into the block index; a test that frees its own
+ *  index entries calls this). */
+void PosSigningForgetRevivalsForTesting() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 /** SEQUENTIA PoS: at the start, once the chain is loaded and before any
  *  signing path runs: every block in the signing record's window that

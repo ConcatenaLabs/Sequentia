@@ -255,6 +255,7 @@ BASE_SCRIPTS = [
     'feature_pos_signing_record_state.py',
     'feature_pos_signing_record_state_bls.py',
     'feature_pos_signing_record_nowatcher.py',
+    'feature_pos_signing_record_fresh.py',
     'feature_pos_bls_registration.py',
     'feature_pos_stake_vesting.py',
     'feature_pos_delegation.py',

@@ -73,6 +73,7 @@
 #include <dynafed.h>
 
 #include <algorithm>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <atomic>
@@ -554,23 +555,87 @@ void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route)
     NoteCertified(pindex, route);
 }
 
-//! Failure marks cleared in this run (ResetBlockFailureFlags), for the
-//! signing check (PosIndexState::revivals).
-static uint64_t g_pos_failure_resets GUARDED_BY(::cs_main){0};
+//! For the signing check (PosIndexState::revivals): every block whose failure
+//! marks a ResetBlockFailureFlags call actually cleared in this run, oldest
+//! first, with the number of that call. A call that clears nothing (a
+//! reconsiderblock of a valid block) records nothing. A held block was revived
+//! by a record when the record's block is that block or one of its ancestors:
+//! clearing a block's own mark, or one of the failed ancestry that made it
+//! fail, is what can make it valid again; a record on another branch cannot.
+struct PosRevived {
+    uint64_t call;
+    const CBlockIndex* block;
+};
+static std::deque<PosRevived> g_pos_revived GUARDED_BY(::cs_main);
+//! The number of the last ResetBlockFailureFlags call that cleared a mark.
+static uint64_t g_pos_revival_calls GUARDED_BY(::cs_main){0};
+//! The number of the newest record dropped to bound the list: a block whose
+//! revival may be among the dropped records is judged revived by it.
+static uint64_t g_pos_revived_dropped GUARDED_BY(::cs_main){0};
+static constexpr size_t POS_REVIVED_MAX = 4096;
+
+//! The number of the last call that cleared the failure marks of `p` or of
+//! one of its ancestors (0: none in this run).
+static uint64_t PosRevivalOf(const CBlockIndex* p) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (!p) return 0;
+    for (auto it = g_pos_revived.rbegin(); it != g_pos_revived.rend(); ++it) {
+        if (it->block->nHeight <= p->nHeight && p->GetAncestor(it->block->nHeight) == it->block) return it->call;
+    }
+    return g_pos_revived_dropped;
+}
+
+//! A ResetBlockFailureFlags call cleared `p`'s marks.
+static void PosNoteRevived(const CBlockIndex* p, bool& first) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (first) {
+        ++g_pos_revival_calls;
+        first = false;
+    }
+    g_pos_revived.push_back({g_pos_revival_calls, p});
+    while (g_pos_revived.size() > POS_REVIVED_MAX) {
+        g_pos_revived_dropped = g_pos_revived.front().call;
+        g_pos_revived.pop_front();
+    }
+}
+
+//! A ResetBlockFailureFlags call that came after call number `before` and
+//! cleared marks: its records for blocks failed again before cs_main was let
+//! go (ReconsiderAnchoredBlock marks again the blocks whose anchor is still
+//! orphaned) go, since no one saw those blocks valid. Records of earlier calls
+//! stay, whatever has failed since: those revivals happened.
+static void PosForgetStillFailed(uint64_t before) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (g_pos_revival_calls == before) return; // that call cleared nothing
+    const uint64_t call = g_pos_revival_calls;
+    g_pos_revived.erase(std::remove_if(g_pos_revived.begin(), g_pos_revived.end(),
+                                       [call](const PosRevived& r) {
+                                           return r.call == call && (r.block->nStatus & BLOCK_FAILED_MASK);
+                                       }),
+                        g_pos_revived.end());
+}
+
+void PosSigningForgetRevivalsForTesting()
+{
+    AssertLockHeld(::cs_main);
+    g_pos_revived.clear();
+    g_pos_revival_calls = 0;
+    g_pos_revived_dropped = 0;
+}
 
 PosIndexState PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent)
 {
     LOCK(::cs_main);
-    const auto with_revivals = [](PosIndexState st) {
-        st.revivals = g_pos_failure_resets;
-        return st;
-    };
     const CChain& active = chainman.ActiveChain();
     const CBlockIndex* p = chainman.m_blockman.LookupBlockIndex(hash);
-    if (p && active.Contains(p)) return with_revivals(PosIndexStanding::ACTIVE);
     // A block the index does not hold yet (a certificate only) stands as
-    // its parent does.
+    // its parent does, and is revived as its parent is.
     if (!p && !parent.IsNull()) p = chainman.m_blockman.LookupBlockIndex(parent);
+    const auto with_revivals = [p](PosIndexState st) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        st.revivals = PosRevivalOf(p);
+        return st;
+    };
+    if (p && p->GetBlockHash() == hash && active.Contains(p)) return with_revivals(PosIndexStanding::ACTIVE);
     if (!p) return with_revivals(PosIndexStanding::UNKNOWN);
     // Down to the active chain: InvalidateBlock marks only the blocks it
     // disconnects, so a side block above a failed one may carry no mark of its
@@ -6074,7 +6139,7 @@ bool CChainState::InvalidateBlock(BlockValidationState& state, CBlockIndex* pind
 
 void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     AssertLockHeld(cs_main);
-    ++g_pos_failure_resets;
+    bool first_revival = true;
 
     int nHeight = pindex->nHeight;
 
@@ -6082,6 +6147,7 @@ void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     BlockMap::iterator it = m_blockman.m_block_index.begin();
     while (it != m_blockman.m_block_index.end()) {
         if (!it->second->IsValid() && it->second->GetAncestor(nHeight) == pindex) {
+            PosNoteRevived(it->second, first_revival);
             it->second->nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR);
             m_blockman.m_dirty_blockindex.insert(it->second);
             if (it->second->IsValid(BLOCK_VALID_TRANSACTIONS) && it->second->HaveTxsDownloaded() && setBlockIndexCandidates.value_comp()(m_chain.Tip(), it->second)) {
@@ -6099,6 +6165,7 @@ void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     // Remove the invalidity flag from all ancestors too.
     while (pindex != nullptr) {
         if (pindex->nStatus & (BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR)) {
+            if (pindex->nStatus & BLOCK_FAILED_MASK) PosNoteRevived(pindex, first_revival);
             pindex->nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR);
             m_blockman.m_dirty_blockindex.insert(pindex);
             m_chainman.m_failed_blocks.erase(pindex);
@@ -6124,6 +6191,7 @@ std::vector<CBlockIndex*> CChainState::ReconsiderAnchoredBlock(CBlockIndex* pind
     std::sort(branch.begin(), branch.end(),
               [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
 
+    const uint64_t revivals_before = g_pos_revival_calls;
     ResetBlockFailureFlags(pindex);
 
     // Mark again, before any activation can see them, the blocks whose anchor
@@ -6145,6 +6213,7 @@ std::vector<CBlockIndex*> CChainState::ReconsiderAnchoredBlock(CBlockIndex* pind
         m_blockman.m_dirty_blockindex.insert(entry);
         setBlockIndexCandidates.erase(entry);
     }
+    PosForgetStillFailed(revivals_before);
     return roots;
 }
 

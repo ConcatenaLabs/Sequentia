@@ -1791,22 +1791,25 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
         // The signing check judges each signed block's Bitcoin anchor, on a
         // node that watches Bitcoin (g_validate_anchor can be turned off later
-        // in the start, so it is read at each judgement).
-        PosSigningSetAnchorJudge([](uint32_t anchor_height, const uint256& anchor_hash) -> std::optional<PosAnchorStanding> {
+        // in the start, so it is read at each judgement). A replaced anchor
+        // releases at once, so it is believed only from the daemon's answer in
+        // this check (CheckMainchainAnchorsFresh), within the check's bound.
+        PosSigningSetAnchorJudge([](const std::vector<std::pair<uint32_t, uint256>>& anchors)
+                                     -> std::optional<std::vector<PosAnchorStanding>> {
             if (!g_validate_anchor) return std::nullopt;
-            switch (CheckMainchainAnchor(anchor_height, anchor_hash)) {
-            case AnchorCheckResult::OK: return PosAnchorStanding::STANDS;
-            case AnchorCheckResult::STALE:
-            case AnchorCheckResult::HEIGHT_MISMATCH: return PosAnchorStanding::GONE;
-            case AnchorCheckResult::NOT_FOUND: {
-                // Unknown to a synced daemon: replaced. Unknown to one still
-                // syncing: no verdict yet.
-                const MainchainSyncSnapshot sync = GetMainchainSyncSnapshot();
-                return sync.reachable && !sync.initial_download ? PosAnchorStanding::GONE : PosAnchorStanding::UNDECIDED;
+            std::vector<PosAnchorStanding> out;
+            for (const AnchorCheckResult r : CheckMainchainAnchorsFresh(anchors, PosSigningDaemonBudgetMs())) {
+                switch (r) {
+                case AnchorCheckResult::OK: out.push_back(PosAnchorStanding::STANDS); break;
+                // Off the daemon's best chain, or unknown to a daemon whose
+                // best chain is past that height: replaced.
+                case AnchorCheckResult::STALE:
+                case AnchorCheckResult::HEIGHT_MISMATCH:
+                case AnchorCheckResult::NOT_FOUND: out.push_back(PosAnchorStanding::GONE); break;
+                case AnchorCheckResult::NO_CONNECTION: out.push_back(PosAnchorStanding::UNDECIDED); break;
+                }
             }
-            case AnchorCheckResult::NO_CONNECTION: return PosAnchorStanding::UNDECIDED;
-            }
-            return PosAnchorStanding::UNDECIDED;
+            return out;
         });
         SetMainchainMoveListener(PosSigningParentMoved);
         // The certificate query lives with the check, so that every signing

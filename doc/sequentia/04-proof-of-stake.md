@@ -1237,10 +1237,21 @@ Bitcoin anchor stands. Otherwise:
 
 - Bitcoin replaced its anchor, or the anchor of a block below it (the anchor
   watcher then drops that block and everything above it): it binds nothing, at
-  once. "Replaced" is the parent chain's verdict now, asked of its daemon at
-  the check, not the watcher's mark in the block index: the mark persists on
-  disk until the watcher revives the block, so after a restart it can name an
-  anchor Bitcoin has returned to while the node was stopped. While the daemon
+  once. "Replaced" is the parent chain's verdict now, its daemon's answer in
+  the check itself. It is not the watcher's mark in the block index, which
+  persists on disk until the watcher revives the block, so after a restart it
+  can name an anchor Bitcoin has returned to while the node was stopped; nor
+  is it the watcher's memory of an anchor it found replaced, which lasts until
+  its next tick, while Bitcoin may already have returned. What remains is
+  Bitcoin returning in the instant after the daemon answers: the member then
+  signs a rival of a block whose anchor stands again. That is a committee
+  following Bitcoin there and back, which the design accepts (there is no
+  slashing), and its window is one round trip to the daemon. An anchor the
+  daemon does not know counts as replaced only once the daemon has synced past
+  that anchor's height; below it, the anchor may be a Bitcoin block the daemon
+  has not received yet, so there is no verdict. (After Bitcoin reorganizes to
+  a shorter branch, a daemon that never saw the longer one therefore leaves
+  such a block undecided until Bitcoin grows past its height.) While the daemon
   gives no verdict on the anchor a mark names, the block binds as one whose
   anchor is not yet judged (see "The signing record"); once the daemon says it
   stands, the mark is stale and the block binds as a valid one until the
@@ -1256,7 +1267,10 @@ Bitcoin anchor stands. Otherwise:
   for, because that block is invalid on this node");
 - it is valid again (`reconsiderblock`, or the watcher once Bitcoin returns):
   it binds again, and a later invalidation counts its round afresh, even when
-  nothing was signed at that height while it was valid.
+  nothing was signed at that height while it was valid. Only a revival of that
+  block counts: its own failure cleared, or that of a block below it whose
+  failure made it fail. A `reconsiderblock` that clears nothing, or clears
+  another branch, leaves its escape as it was.
 
 Invalidating a certified block is the operator's responsibility: if its signers
 then certify a rival, two certified blocks exist at that height.
@@ -1306,8 +1320,10 @@ the orders a certificate can arrive in (after an invalidation, without its
 block, above a parent whose anchor Bitcoin replaced, over a bare hash, and a
 watcher's mark read from the disk after Bitcoin returned) in
 `feature_pos_signing_record_state.py` and `feature_pos_signing_record_state_bls.py`,
-and invalidation on a node that does not watch Bitcoin in
-`feature_pos_signing_record_nowatcher.py`.
+invalidation on a node that does not watch Bitcoin in
+`feature_pos_signing_record_nowatcher.py`, and Bitcoin returning before the
+anchor watcher's next tick, a revival on another branch, and the bound on the
+daemon's answer in `feature_pos_signing_record_fresh.py`.
 
 ### The signing record
 
@@ -1371,7 +1387,12 @@ ends in every case:
 
 - the daemon answers: the check asks it again at every attempt and never keeps
   a missing answer, so the first verdict ends the wait (replaced: free at once;
-  standing: the query and the round);
+  standing: the query and the round). Each check asks once, in one request,
+  about every anchor it needs, and waits at most half a round (at least
+  500 ms, and never longer than `-mainchainrpctimeout`); an anchor not
+  answered by then is undecided. For the same span after a request that ran
+  out, checks answer undecided without asking, so that signing paths waiting
+  behind one check do not each wait again;
 - the others decide the height: a certificate for it reaches the member. The
   chain moving past the height is not enough while the daemon is silent: the
   producer then also holds the next height above a rival of the block it signed

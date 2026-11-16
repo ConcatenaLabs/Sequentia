@@ -27,9 +27,11 @@
 // Before this node signs block B at height H, every other block it signed at H
 // (a share, a certified or led block, or a MuSig2 partial signature whose
 // block it knows) is judged against Bitcoin:
-//  - its anchor is gone from Bitcoin's best chain: it binds nothing (Bitcoin
-//    anchoring is supreme), and any escape it had is void;
-//  - the parent chain's daemon gives no verdict: B is refused until it does;
+//  - its anchor is gone from Bitcoin's best chain, as the parent chain's
+//    daemon answers in this check (never a remembered answer): it binds
+//    nothing (Bitcoin anchoring is supreme), and any escape it had is void;
+//  - the parent chain's daemon gives no verdict (no answer within the check's
+//    bound, PosSigningDaemonBudgetMs): B is refused until it does;
 //  - its anchor stands: it binds until its escape, which is the protocol's
 //    own: the node asks its peers for that block's certificate and waits one
 //    round; a certificate seen holds the height, silence frees it. The escape
@@ -152,13 +154,21 @@ enum class PosAnchorStanding {
 };
 
 /** How the signing check judges anchors, and how it reaches the network.
- *  Set at the start (init) and cleared at shutdown. The judge answers nothing
- *  (nullopt) while the node does not watch Bitcoin (-validateanchor=0); with
- *  no answer on an anchored chain, valid entries made in this run stand, and
- *  valid entries loaded from the disk bind nothing: such a node cannot tell a
+ *  Set at the start (init) and cleared at shutdown. The judge is asked once
+ *  per check about every anchor the check needs (each named once), and
+ *  answers one standing per anchor, in order; or nothing at all (nullopt)
+ *  while the node does not watch Bitcoin (-validateanchor=0). With no answer
+ *  on an anchored chain, valid entries made in this run stand, and valid
+ *  entries loaded from the disk bind nothing: such a node cannot tell a
  *  replaced anchor from a standing one. An entry invalid on the node escapes
- *  after one round either way. */
-using PosAnchorJudge = std::function<std::optional<PosAnchorStanding>(uint32_t anchor_height, const uint256& anchor_hash)>;
+ *  after one round either way.
+ *  GONE releases a block at once, so it must be the daemon's answer in this
+ *  check, never a remembered one (init: CheckMainchainAnchorsFresh); STANDS
+ *  may come from what the node remembers, since it only ever holds more. The
+ *  judge waits for the daemon at most PosSigningDaemonBudgetMs(), and an
+ *  anchor not answered by then is UNDECIDED. */
+using PosAnchorJudge = std::function<std::optional<std::vector<PosAnchorStanding>>(
+    const std::vector<std::pair<uint32_t, uint256>>& anchors)>;
 void PosSigningSetAnchorJudge(PosAnchorJudge judge);
 void PosSigningSetNetwork(std::function<void(const uint256& block_hash)> query_certificate, std::function<int()> peer_count);
 
@@ -222,11 +232,14 @@ struct PosIndexState {
     //! ORPHANED: a failed run below the block that the watcher did not make
     //! (invalidateblock, a consensus failure).
     bool failed_otherwise{false};
-    //! How many times this node has cleared failure marks in this run
-    //! (reconsiderblock, the anchor watcher's revival). An escape from a
-    //! certified block counts only while this has not moved: once the block
-    //! may have been valid again, a later failure owes its own round, even if
-    //! no check ran while it was valid.
+    //! The last time in this run that failure marks were cleared on this
+    //! block or on one of its ancestors (reconsiderblock, the anchor
+    //! watcher's revival), as a number that only grows; 0 if never. An escape
+    //! from a certified block counts only while this has not moved: once the
+    //! block may have been valid again, a later failure owes its own round,
+    //! even if no check ran while it was valid. A call that clears nothing
+    //! (a valid block reconsidered), or clears another branch, leaves it as
+    //! it was.
     uint64_t revivals{0};
     PosIndexState(PosIndexStanding s = PosIndexStanding::UNKNOWN) : standing(s) {}
 };
@@ -301,6 +314,13 @@ void PosSigningSendQueries(const std::vector<uint256>& hashes);
  *  (-posroundms, -poswindowms, or the per-member formula). */
 int64_t PosSigningRoundMs();
 int64_t PosSigningWindowMs();
+
+/** The longest one signing check waits for the parent chain's daemon: half a
+ *  round, at least 500 ms, and never more than -mainchainrpctimeout. The check
+ *  runs inside the gate every signing path takes, and a member that waits a
+ *  whole round has missed it; half leaves the other half to sign and deliver.
+ *  At the testnet's 9,450 ms round it is 4,725 ms. */
+int64_t PosSigningDaemonBudgetMs();
 
 /** A last entry found whole but unreadable at the start: it may name a block
  *  whose signature left before the node stopped, and no query can name it. The
