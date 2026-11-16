@@ -899,8 +899,8 @@ accepted assets the claim can draw on, like any other.
 ### 8.2 The timeline
 
 1. The two sides agree the asset, the amount, the price, `D` and `R`, and the
-   seller's key. The seller's wallet sets `D = (Bitcoin tip) + k + 6` and
-   `R = D`, where `k` is the buyer's wait below.
+   seller's key. The seller's wallet sets `D = (Bitcoin tip) + 6` and
+   `R = D`.
 2. The seller sends the lock. It is mined in a block anchored at `L`.
 3. **The buyer's wallet checks before it pays:**
    - the lock's script, leaf for leaf, against the agreed terms, and that the
@@ -910,25 +910,16 @@ accepted assets the claim can draw on, like any other.
    - that the lock's block is final: at or below the node's finalized height
      (`getposfinality`'s `finalized_height`), so it is certified by a full quorum
      and no sibling block can replace it except through Bitcoin;
-   - that Bitcoin has added `k` blocks on top of `L`, by the default-mode policy:
+   - that Bitcoin's tip is uncontested in the buyer's view, and that the lock's
+     unburied ancestry holds no transaction a Bitcoin reorganization can make
+     fail for good (a payment-proof claim, a peg-in, a stake record).
 
-     | Price | `k` | Wait, typically |
-     |---|---|---|
-     | below 0.01 BTC | 0 | none: the buyer pays as soon as the lock's block is final |
-     | below 0.1 BTC | 1 | 10 minutes |
-     | below 1 BTC | 2 | 20 minutes |
-     | 1 BTC or more | 5 | 50 minutes |
-
-     The page meanwhile says "Getting your purchase ready. This usually takes a
-     few minutes." The wait is the buyer's policy, not what the rule's safety
-     rests on (section 9.4). **What `k = 0` risks, for the owner to weigh against
-     the ten minutes it saves:** a one-block Bitcoin reorganization that replaces
-     `L`, which takes the payment's block with it. With the absolute floor, honest
-     producers mine the lock again and the swap completes; the buyer loses only if
-     the seller also controls the producer of the block that would mine the lock
-     again and has it take a respend of the lock's inputs instead. A natural
-     one-block reorganization is rare on Bitcoin's main network and common on its
-     test networks, and a seller who controls a producer is the rarer half.
+     There is no wait on either chain, for any amount: the buyer pays as soon as
+     these checks pass. A lock certified just before a Bitcoin reorganization
+     that replaces `L` comes back first in the chain that replaces it, under the
+     rule for the transactions of a lost block (`03-bitcoin-anchoring.md`,
+     "Transactions of a lost block"), so a seller who leads the next heights
+     cannot respend it. A wallet may offer a wait as a setting a person turns on.
 4. **The buyer signs the claim, and a cancel, before it pays.** The claim pays
    the asset to the buyer, its fee in an accepted asset (section 8.1). It signs
    two tiers of the same claim (section 8.5): the going rate with headroom, and
@@ -1143,16 +1134,17 @@ and the swap completes at any depth. What can still cost the buyer its payment:
 - the reorganization reaches below `F` and the payment is mined again at or
   below `F`, which needs a Bitcoin reorganization deeper than every block since
   the lock was built;
-- a dishonest seller **respends the lock's inputs** while the lock is back in the
-  mempool. The lock does not signal replacement, so honest mempools refuse the
-  respend, and the seller needs a block producer that takes it, plus a Bitcoin
-  reorganization reaching the lock's anchor block: `k` blocks deep or more by
-  step 3.
+- a dishonest seller **respends the lock's inputs** after a Bitcoin
+  reorganization reaching the lock's anchor block. The lock does not signal
+  replacement, so honest mempools refuse the respend; under the rule for the
+  transactions of a lost block (`03-bitcoin-anchoring.md`, "Transactions of a
+  lost block") the nodes that hold the lock's lost block carry it first into the
+  chain that replaces it and refuse a block that respends it, so the seller needs
+  a dishonest quorum of committee seats as well as the producer.
 
-So the buyer's risk after paying is a deep Bitcoin reorganization, which the
-buyer prices by its `k` exactly as it would price accepting any bitcoin payment
-of that value, combined with a seller who controls a block producer. Without the
-producer, no reorganization of any depth costs the buyer anything.
+So the buyer's risk after paying is a Bitcoin reorganization combined with a
+dishonest quorum. Without one, no reorganization of any depth costs the buyer
+anything.
 
 **9.5 A seller who fills the blocks.** The seller pays higher fees than the
 claim's on every block from the payment's first anchor until the refund is valid,
@@ -1197,7 +1189,7 @@ happens with a chance of about `s^60`.
 
 **9.8 A reorganization at each step.** Before the lock is mined, nothing is at
 stake. Between the lock and the payment, the buyer has not paid; if the lock's
-block leaves the chain, the buyer waits for it to be mined again and for depth `k`
+block leaves the chain, the buyer waits for it to be mined again and final
 again. With the payment unconfirmed, nothing on either chain refers to it. After
 the payment, as in 9.3 and 9.4. After the refund, a reorganization that
 disconnects it lets it in again only 60 blocks after the new branch's first block
