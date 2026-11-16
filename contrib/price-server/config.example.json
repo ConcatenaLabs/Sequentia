@@ -16,13 +16,11 @@
     "_comment": "Fixed prices, IN REFERENCE UNITS, for assets the market source does not cover: {\"TICKER\": 0.5} means 1 unit is worth 0.5 reference units. They are published exactly as entered and are never re-denominated (api_units_per_reference_unit translates API-sourced prices only). Used only when an asset has no market price; such an asset is admitted at that rate (always_reject still wins)."
   },
   "feed_aliases": {
-    "_comment": "Map a registry ticker to the key the price feed uses for that asset, when they differ. The Sequence token's registry/display ticker is tSEQ (TSEQ) but the feed prices it under the chain-independent key SEQ (as the node GUI and explorer also do), so they refer to the same asset and merge into one row. SBTC (bridge-pegged Bitcoin) is priced exactly as BTC, which the feed keys as tBTC. Bridged stablecoins carry a .e suffix in the registry and are valued at the currency they track: USDC.e at the feed's USD rate and EURC.e at its EUR rate, entries the feed marks \"fiat\": true and which carry no market cap or volume (an asset valued at one is exempt from those two floors). An asset whose registry ticker finds no feed key is simply never priced, and so never admitted -- silently, since there is nothing wrong with it: keep this map in step with the registry or assets go missing from the whitelist for no visible reason. Keys are matched case-insensitively.",
+    "_comment": "Map a registry ticker to the key the price feed uses for that asset, when they differ. The Sequence token's registry/display ticker is tSEQ (TSEQ) but the feed prices it under the chain-independent key SEQ (as the node GUI and explorer also do), so they refer to the same asset and merge into one row. SBTC (bridge-pegged Bitcoin) is priced exactly as BTC, which the feed keys as tBTC. Bridged stablecoins carry a .e suffix in the registry and none in the feed. An asset whose registry ticker finds no feed key is simply never priced, and so never admitted -- silently, since there is nothing wrong with it: keep this map in step with the registry or assets go missing from the whitelist for no visible reason. Keys are matched case-insensitively.",
     "TSEQ": "SEQ",
     "SBTC": "tBTC",
-    "USDC.e": "USD",
-    "USDC": "USD",
-    "EURC.e": "EUR",
-    "EURC": "EUR"
+    "USDC.e": "USDC",
+    "EURC.e": "EURC"
   },
   "default_thresholds": {
     "_comment": "Admission rules. Empty (only 'require') = admit every discovered asset that has a valid price. Add keys to tighten: min_market_cap, min_volume_24h, max_change_factor, max_volatility, min_price, max_price, issuer_domains. 'require' is 'all' or 'any'.",
