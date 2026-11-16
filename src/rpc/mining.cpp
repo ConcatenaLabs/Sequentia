@@ -1889,7 +1889,7 @@ static RPCHelpMan getsigningrecord()
                         {RPCResult::Type::BOOL, "certified", "this node holds a verified full certificate for it"},
                         {RPCResult::Type::BOOL, "active", "on this node's active chain now"},
                         {RPCResult::Type::BOOL, "invalidated", "invalid on this node now, for any reason: invalidateblock, the anchor watcher, or an invalid block below it"},
-                        {RPCResult::Type::STR, "state", "judged now: certified (binds its height for good), anchor gone (Bitcoin replaced its anchor or one below it), not judged (this node cannot judge it); otherwise as the last check left it: binds, escaped (a round passed with no certificate while its anchor stood), undecided (no verdict from the parent chain), or not judged"},
+                        {RPCResult::Type::STR, "state", "judged now: certified (binds its height for good), anchor gone (Bitcoin replaced its anchor or one below it), not judged (this node cannot judge it); otherwise as the last check left it: binds, escaped (a round passed with no certificate while its anchor stood), undecided (no verdict from the parent chain on its anchor, or on the anchor the anchor watcher dropped it for), or not judged"},
                     }}}},
                     {RPCResult::Type::OBJ, "unreadable", /*optional=*/true, "present while an unreadable last entry found at a start holds a height", {
                         {RPCResult::Type::NUM, "floor", "the lowest height the hold can bind"},

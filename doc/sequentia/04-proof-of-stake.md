@@ -1237,16 +1237,26 @@ Bitcoin anchor stands. Otherwise:
 
 - Bitcoin replaced its anchor, or the anchor of a block below it (the anchor
   watcher then drops that block and everything above it): it binds nothing, at
-  once;
+  once. "Replaced" is the parent chain's verdict now, asked of its daemon at
+  the check, not the watcher's mark in the block index: the mark persists on
+  disk until the watcher revives the block, so after a restart it can name an
+  anchor Bitcoin has returned to while the node was stopped. While the daemon
+  gives no verdict on the anchor a mark names, the block binds as one whose
+  anchor is not yet judged (see "The signing record"); once the daemon says it
+  stands, the mark is stale and the block binds as a valid one until the
+  watcher revives it;
 - it is invalid here for another reason (`invalidateblock` on it or an
   ancestor, or an invalid ancestor): the member is released after one new query
-  and round, as for any block, on every signing path, a bare hash included.
+  and round, as for any block, on every signing path, a bare hash included,
+  with or without the anchor watcher, whether the node learned the block in
+  this run or from its disk at the start.
   Invalidating is a recovery step, and members that refused for good would turn
   a repair made on many of them into a height nobody can sign. The log says so
   in words ("about to sign a rival of ..., a block it holds a full certificate
   for, because that block is invalid on this node");
 - it is valid again (`reconsiderblock`, or the watcher once Bitcoin returns):
-  it binds again, and a later invalidation counts its round afresh.
+  it binds again, and a later invalidation counts its round afresh, even when
+  nothing was signed at that height while it was valid.
 
 Invalidating a certified block is the operator's responsibility: if its signers
 then certify a rival, two certified blocks exist at that height.
@@ -1293,8 +1303,11 @@ record (`src/pos_signing_record.{h,cpp}`), where every signing path reaches it;
 the certificate query is exercised in `feature_pos_cert_gossip.py`, and the
 anchor's replacement and return in `feature_pos_signing_record_return.py`, and
 the orders a certificate can arrive in (after an invalidation, without its
-block, above a parent whose anchor Bitcoin replaced, over a bare hash) in
-`feature_pos_signing_record_state.py` and `feature_pos_signing_record_state_bls.py`.
+block, above a parent whose anchor Bitcoin replaced, over a bare hash, and a
+watcher's mark read from the disk after Bitcoin returned) in
+`feature_pos_signing_record_state.py` and `feature_pos_signing_record_state_bls.py`,
+and invalidation on a node that does not watch Bitcoin in
+`feature_pos_signing_record_nowatcher.py`.
 
 ### The signing record
 
@@ -1376,12 +1389,14 @@ all restart in that state resumes as soon as their daemons answer.
 
 A node that does not watch Bitcoin (`-validateanchor=0` on an anchored chain)
 cannot judge an anchor, but it follows a Bitcoin reorganization through its own
-active chain. There a certified block binds while it is on the node's active
-chain, and binds nothing otherwise: not before its block connects (a
+active chain. There a valid certified block binds while it is on the node's
+active chain, and binds nothing otherwise: not before its block connects (a
 certificate alone), and not once the node has left it; a block signed in the
-running process binds as the share-lock always has; anything else known only
-from the disk binds nothing. On a chain without anchors no anchor can be
-replaced, and every entry binds.
+running process binds as the share-lock always has; anything else valid and
+known only from the disk binds nothing. A block invalid on the node, including
+one the anchor watcher of an earlier run dropped, is released after one query
+and round, as on a node that watches Bitcoin. On a chain without anchors no
+anchor can be replaced, and every entry binds.
 
 An entry is dropped once the block index on disk carries its block with a
 checked full certificate (the index then answers for it, at once and after a

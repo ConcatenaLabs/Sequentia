@@ -44,8 +44,10 @@
 // anchor stands (on a node that does not watch Bitcoin: while it is on the
 // active chain). A certified block invalid here for a reason other than
 // Bitcoin (an operator's invalidateblock, an invalid ancestor) escapes as
-// above; one the anchor watcher dropped, through its own anchor or an
-// ancestor's, binds nothing. What binds a height is decided in RunCheck, from
+// above, with or without the anchor watcher; one the anchor watcher dropped,
+// through its own anchor or an ancestor's, binds nothing once the parent
+// chain says now that the anchor is replaced (the watcher's mark alone,
+// which can be from before a restart, is no verdict). What binds a height is decided in RunCheck, from
 // one map of what this node learned (the record's entries: this member's
 // signatures; and every verified certificate, which comes from the block index
 // read at the start for the record's window, PosSigningNoteIndexAtStart, then
@@ -152,9 +154,10 @@ enum class PosAnchorStanding {
 /** How the signing check judges anchors, and how it reaches the network.
  *  Set at the start (init) and cleared at shutdown. The judge answers nothing
  *  (nullopt) while the node does not watch Bitcoin (-validateanchor=0); with
- *  no answer on an anchored chain, entries made in this run stand, and entries
- *  loaded from the disk bind nothing: such a node cannot tell a replaced
- *  anchor from a standing one. */
+ *  no answer on an anchored chain, valid entries made in this run stand, and
+ *  valid entries loaded from the disk bind nothing: such a node cannot tell a
+ *  replaced anchor from a standing one. An entry invalid on the node escapes
+ *  after one round either way. */
 using PosAnchorJudge = std::function<std::optional<PosAnchorStanding>(uint32_t anchor_height, const uint256& anchor_hash)>;
 void PosSigningSetAnchorJudge(PosAnchorJudge judge);
 void PosSigningSetNetwork(std::function<void(const uint256& block_hash)> query_certificate, std::function<int()> peer_count);
@@ -203,11 +206,33 @@ enum class PosIndexStanding {
     ACTIVE,     //!< on the active chain
     OFF_ACTIVE, //!< off the active chain, and neither it nor an ancestor is failed (a side block, a header, a certificate only)
     FAILED,     //!< it or an ancestor is invalid here: invalidateblock, or a consensus failure
-    ORPHANED,   //!< the anchor watcher invalidated it or an ancestor: Bitcoin replaced an anchor at or below it
+    ORPHANED,   //!< the anchor watcher invalidated it or an ancestor, because Bitcoin had replaced an anchor at or below it
+};
+/** A held block's standing, and for ORPHANED the anchors the watcher's marks
+ *  name. The watcher's mark (BLOCK_FAILED_ANCHOR) persists on disk and is
+ *  cleared only when the watcher revives the block, so it says that Bitcoin
+ *  replaced an anchor at some time, possibly in an earlier run of the node.
+ *  The check therefore asks the parent chain about those anchors now, and
+ *  releases at once only on its current verdict. */
+struct PosIndexState {
+    PosIndexStanding standing{PosIndexStanding::UNKNOWN};
+    //! ORPHANED: the anchor of the bottom block of each failed run the watcher
+    //! made on the way down to the active chain (the block it invalidated).
+    std::vector<std::pair<uint32_t, uint256>> orphan_anchors;
+    //! ORPHANED: a failed run below the block that the watcher did not make
+    //! (invalidateblock, a consensus failure).
+    bool failed_otherwise{false};
+    //! How many times this node has cleared failure marks in this run
+    //! (reconsiderblock, the anchor watcher's revival). An escape from a
+    //! certified block counts only while this has not moved: once the block
+    //! may have been valid again, a later failure owes its own round, even if
+    //! no check ran while it was valid.
+    uint64_t revivals{0};
+    PosIndexState(PosIndexStanding s = PosIndexStanding::UNKNOWN) : standing(s) {}
 };
 //! The block `hash` (whose parent is `parent`, for a block the index does not
 //! hold yet). Takes cs_main; called with no record lock held.
-using PosIndexJudge = std::function<PosIndexStanding(const uint256& hash, const uint256& parent)>;
+using PosIndexJudge = std::function<PosIndexState(const uint256& hash, const uint256& parent)>;
 void PosSigningSetIndexJudge(PosIndexJudge judge);
 
 /** The answer of the signing check. */

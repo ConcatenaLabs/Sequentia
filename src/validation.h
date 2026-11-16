@@ -225,10 +225,12 @@ void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route) E
 
 /** SEQUENTIA PoS: what the block index says now of a block the signing check
  *  holds (pos_signing_record.h, PosIndexStanding): on the active chain, off it,
- *  failed here, or dropped by the anchor watcher (it or an ancestor). A block
- *  not in the index yet stands as its parent `parent` does. Takes cs_main. */
+ *  failed here, or dropped by the anchor watcher (it or an ancestor), with
+ *  the anchors the watcher's marks name (PosIndexState). A block not in the
+ *  index yet stands as its parent `parent` does. Takes cs_main. */
 enum class PosIndexStanding;
-PosIndexStanding PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent);
+struct PosIndexState;
+PosIndexState PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent);
 
 /** SEQUENTIA PoS: at the start, once the chain is loaded and before any
  *  signing path runs: every block in the signing record's window that

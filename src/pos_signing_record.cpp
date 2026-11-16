@@ -74,6 +74,7 @@ struct Held {
     int64_t grace_start_ms{0};   //!< when its escape's round began (0: not begun)
     bool queried{false};         //!< its certificate was asked for in this grace
     bool escaped{false};         //!< the round passed with no certificate while its anchor stood
+    uint64_t escaped_revivals{0}; //!< PosIndexState::revivals when it escaped
     bool certified{false};       //!< this node holds a verified full certificate for it
     std::string state{"not judged"};
 };
@@ -280,6 +281,13 @@ struct Verdict {
     bool ignored{false};  //!< this node cannot judge it, and it binds nothing
     bool for_good{false}; //!< certified, and this node could still accept it: binds the height for good
     bool invalid{false};  //!< it or an ancestor is invalid here, for a reason other than Bitcoin
+    bool anchor_judged{false}; //!< the parent chain gave a verdict on its own anchor
+    uint64_t revivals{0};      //!< PosIndexState::revivals
+    //! UNDECIDED: the anchor the daemon has not judged (the block's own, or the
+    //! one an anchor watcher's mark names), and which of the two.
+    uint32_t undecided_height{0};
+    uint256 undecided_hash;
+    bool undecided_mark{false};
 };
 
 //! Judge a held block; g_mutex NOT held (the judges take cs_main and may ask
@@ -287,37 +295,110 @@ struct Verdict {
 Verdict JudgeHeld(const PosAnchorJudge& judge, const PosIndexJudge& index, const uint256& hash, const Held& h)
 {
     Verdict v;
-    const PosIndexStanding idx = index ? index(hash, h.parent) : PosIndexStanding::UNKNOWN;
+    const PosIndexState state = index ? index(hash, h.parent) : PosIndexState{};
+    PosIndexStanding idx = state.standing;
+    v.revivals = state.revivals;
+    const bool anchored = g_con_bitcoin_anchor && !h.anchor_hash.IsNull();
+    // The parent chain's verdict on the block's own anchor (nothing on a node
+    // that does not watch Bitcoin).
+    const std::optional<PosAnchorStanding> own = anchored && judge ? judge(h.anchor_height, h.anchor_hash) : std::nullopt;
     if (idx == PosIndexStanding::ORPHANED) {
         // The anchor watcher dropped it, or an ancestor, because Bitcoin
-        // replaced an anchor: as for its own anchor gone, it binds nothing.
-        // Bitcoin anchoring is supreme; no escape round is owed to it.
-        v.anchor = PosAnchorStanding::GONE;
-        return v;
+        // replaced an anchor. Its mark persists on disk and only the watcher
+        // clears it, once it can judge that anchor again, so the mark alone
+        // may be from an earlier run, and Bitcoin may have returned since.
+        // Releasing at once, with no escape round, is right only on what the
+        // parent chain says now (Bitcoin anchoring is supreme, and it is a
+        // current verdict); so each anchor a mark names is judged again.
+        bool gone = own == PosAnchorStanding::GONE, undecided = false, no_verdict = state.orphan_anchors.empty();
+        for (const auto& [height, anchor] : state.orphan_anchors) {
+            const std::optional<PosAnchorStanding> a =
+                g_con_bitcoin_anchor && judge && !anchor.IsNull() ? judge(height, anchor) : std::nullopt;
+            if (!a) {
+                no_verdict = true;
+            } else if (*a == PosAnchorStanding::GONE) {
+                gone = true;
+            } else if (*a == PosAnchorStanding::UNDECIDED && !undecided) {
+                undecided = true;
+                v.undecided_height = height;
+                v.undecided_hash = anchor;
+            }
+        }
+        if (gone) {
+            // Bitcoin replaced that anchor, now: it binds nothing, at once.
+            v.anchor = PosAnchorStanding::GONE;
+            return v;
+        }
+        if (no_verdict) {
+            // A node that does not watch Bitcoin (the mark is from a run that
+            // did): no verdict will come, so the mark is an invalid block like
+            // any other, released after one round.
+            idx = PosIndexStanding::FAILED;
+        } else if (undecided) {
+            // The daemon does not answer, or has not synced that far: no
+            // current verdict, so the block binds as a block whose anchor is
+            // not yet judged does. (The judge asks the daemon itself, so at a
+            // start a daemon that answers gives the verdict before the
+            // watcher's first tick.) Released as gone on the mark alone, a
+            // restarted member would sign a rival of a certified block that
+            // Bitcoin had returned to while it was stopped.
+            v.anchor = PosAnchorStanding::UNDECIDED;
+            v.undecided_mark = true;
+            return v;
+        } else {
+            // Bitcoin stands on every anchor the marks name: they are stale,
+            // and the watcher revives the branch at its next tick. Judged as
+            // the block is otherwise: valid, or failed for another reason.
+            idx = state.failed_otherwise ? PosIndexStanding::FAILED : PosIndexStanding::OFF_ACTIVE;
+        }
     }
     v.invalid = idx == PosIndexStanding::FAILED;
-    if (!g_con_bitcoin_anchor || h.anchor_hash.IsNull()) {
+    if (!anchored) {
         v.for_good = h.certified && !v.invalid;
         return v;
     }
-    const std::optional<PosAnchorStanding> a = judge ? judge(h.anchor_height, h.anchor_hash) : std::nullopt;
-    if (!a) {
+    if (!own) {
         // No watcher: this node cannot judge an anchor, but it follows a
-        // Bitcoin reorganization through its own active chain. So a certified
-        // block binds while it is on the active chain, and not otherwise: a
-        // certificate whose body never connected here, or one that left the
-        // active chain, binds nothing, since nothing this node does would ever
-        // tell it that Bitcoin replaced that block's anchor. A block signed in
-        // this run stands, as the share-lock always held it. Anything else
-        // known only from the disk binds nothing: this node cannot tell
-        // whether Bitcoin has since replaced its anchor.
+        // Bitcoin reorganization through its own active chain.
+        if (v.invalid) {
+            // Invalid here: the ordinary escape, one query and one round, for
+            // every kind of entry (certified only, signed in this run, known
+            // from the disk) and on every path. An invalidation is the
+            // operator's recovery step and the release it owes is one round,
+            // whatever this node can say about Bitcoin; letting it go at once
+            // would let a restarted member that signed and certified X sign
+            // and certify a rival at the moment it invalidates X.
+            return v;
+        }
+        // Valid: a certified block binds while it is on the active chain, and
+        // not otherwise: a certificate whose body never connected here, or
+        // one that left the active chain, binds nothing, since nothing this
+        // node does would ever tell it that Bitcoin replaced that block's
+        // anchor. A block signed in this run stands, as the share-lock always
+        // held it. Anything else known only from the disk binds nothing: this
+        // node cannot tell whether Bitcoin has since replaced its anchor.
         v.for_good = h.certified && idx == PosIndexStanding::ACTIVE;
         v.ignored = !v.for_good && !(h.signed_here && !h.from_disk);
         return v;
     }
-    v.anchor = *a;
+    v.anchor = *own;
+    v.anchor_judged = true;
+    if (v.anchor == PosAnchorStanding::UNDECIDED) {
+        v.undecided_height = h.anchor_height;
+        v.undecided_hash = h.anchor_hash;
+    }
     v.for_good = h.certified && !v.invalid && v.anchor == PosAnchorStanding::STANDS;
     return v;
+}
+
+//! Whether `h`'s escape still holds. A certified block escapes only while it
+//! is not accepted here (invalid, or off the active chain of a node that does
+//! not watch Bitcoin); if failure marks were cleared since, it may have been
+//! valid again in between, with no check to see it, and its next failure
+//! owes a round of its own, as one that a check saw revived does.
+bool EscapeHolds(const Held& h, const Verdict& v)
+{
+    return h.escaped && !(h.certified && v.revivals != h.escaped_revivals);
 }
 
 //! End the damaged-entry hold: drop its stand-in entries and rewrite the file
@@ -484,33 +565,48 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
                                    held[i].first.GetHex(), h.height));
             continue;
         }
-        if (bare && !h.certified) {
+        if (bare && !h.certified && !v.invalid) {
             // A block this member signed: the hash is refused until the block
-            // is given, unless that block has escaped already.
-            if (v.anchor == PosAnchorStanding::STANDS && h.escaped) continue;
+            // is given, unless that block has escaped already. One invalid
+            // here takes the escape below on this path too, as a certified
+            // one does: an invalidation releases after one round on every
+            // path.
+            if (v.anchor == PosAnchorStanding::STANDS && EscapeHolds(h, v)) continue;
             refuse(bare_refusal(""));
             continue;
         }
         if (v.anchor == PosAnchorStanding::UNDECIDED) {
+            const bool own_anchor = !v.undecided_mark;
             if (h.state != "undecided") {
-                LogPrintf("Signing record: holding height %d: signed %s there; waiting for the parent chain to judge its anchor %s at %u\n",
-                          h.height, held[i].first.GetHex(), h.anchor_hash.GetHex(), h.anchor_height);
+                LogPrintf("Signing record: holding height %d: %s %s there; waiting for the parent chain to judge %s %s at %u\n",
+                          h.height, h.signed_here ? "signed" : "certified", held[i].first.GetHex(),
+                          own_anchor ? "its anchor" : "the anchor the anchor watcher dropped it for,",
+                          v.undecided_hash.GetHex(), v.undecided_height);
             }
             h.state = "undecided";
             refuse(bare ? bare_refusal(" until the parent chain's daemon judges its Bitcoin anchor")
-                        : strprintf("%s %s at height %d, and the parent chain's daemon has not judged its "
-                                    "Bitcoin anchor %s at %u: it signs nothing else at that height until it does",
+                        : strprintf("%s %s at height %d, and the parent chain's daemon has not judged %s %s at %u: "
+                                    "it signs nothing else at that height until it does",
                                     h.signed_here ? "this member signed" : "this node holds a full certificate for",
-                                    held[i].first.GetHex(), h.height, h.anchor_hash.GetHex(), h.anchor_height));
+                                    held[i].first.GetHex(), h.height,
+                                    own_anchor ? "its Bitcoin anchor"
+                                               : "the Bitcoin anchor that the anchor watcher dropped it for",
+                                    v.undecided_hash.GetHex(), v.undecided_height));
             continue;
         }
-        // The escape: an uncertified block this member signed, or a certified
-        // block this node no longer accepts (invalid here, or, on a node that
-        // does not watch Bitcoin, a block this member signed in this run that
-        // is off the active chain). By hash or with the block alike.
-        if (h.escaped) {
+        // The escape: an uncertified block this member signed, any block
+        // invalid here (certified or not, signed in this run or known from
+        // the disk, with or without the anchor watcher), or, on a node that
+        // does not watch Bitcoin, a certified block this member signed in
+        // this run that is off the active chain. By hash or with the block
+        // alike.
+        if (EscapeHolds(h, v)) {
             h.state = "escaped";
             continue;
+        }
+        if (h.escaped) {
+            h.escaped = false;
+            h.grace_start_ms = 0;
         }
         h.state = "binds";
         if (h.grace_start_ms == 0) {
@@ -531,6 +627,7 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
                           held[i].first.GetHex(), h.height);
             }
             h.escaped = true;
+            h.escaped_revivals = v.revivals;
             h.state = "escaped";
             continue;
         }
@@ -540,11 +637,14 @@ PosSignCheck RunCheck(const PosSigningEntry& entry, int64_t now_ms, int tip_heig
                                           "that block's certificate)", (int)left_ms)));
             continue;
         }
-        refuse(strprintf("%s %s at height %d, and its Bitcoin anchor stands: it asked its peers for "
+        refuse(strprintf("%s %s at height %d%s: it asked its peers for "
                          "that block's certificate and signs no other block there for %d ms more",
-                         h.certified && v.invalid ? "this node holds a full certificate for a block invalid on this node,"
-                                                  : "this member signed",
-                         held[i].first.GetHex(), h.height, (int)left_ms));
+                         h.certified && v.invalid ? "this node holds a full certificate for" : "this member signed",
+                         held[i].first.GetHex(), h.height,
+                         v.invalid          ? ", a block invalid on this node"
+                         : v.anchor_judged  ? ", and its Bitcoin anchor stands"
+                                            : "",
+                         (int)left_ms));
     }
     if (out.ok) {
         out.bound.SetNull();
@@ -998,7 +1098,11 @@ std::optional<PosBoundBlock> PosSigningBoundAt(int height, const uint256& except
                 h.queried = false;
                 continue;
             }
-            if (h.escaped && v.anchor == PosAnchorStanding::STANDS) continue;
+            if (EscapeHolds(h, v) && v.anchor == PosAnchorStanding::STANDS) continue;
+            if (h.escaped && !EscapeHolds(h, v)) {
+                h.escaped = false;
+                h.grace_start_ms = 0;
+            }
             PosBoundBlock b;
             b.hash = held[i].first;
             b.undecided = v.anchor == PosAnchorStanding::UNDECIDED;
@@ -1148,7 +1252,7 @@ std::vector<PosSigningHeld> PosSigningHeldBlocks()
     // Judged now, as the check would (with no side effect).
     std::vector<PosSigningHeld> out;
     for (const auto& [hash, h] : held) {
-        const PosIndexStanding idx = index ? index(hash, h.parent) : PosIndexStanding::UNKNOWN;
+        const PosIndexStanding idx = index ? index(hash, h.parent).standing : PosIndexStanding::UNKNOWN;
         const Verdict v = JudgeHeld(judge, index, hash, h);
         PosSigningHeld o;
         o.hash = hash;

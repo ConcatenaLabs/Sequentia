@@ -102,6 +102,16 @@ std::map<uint256, PosAnchorStanding> g_verdicts;
 //! The block index as the test sets it: a block not named stands as its
 //! parent does, and a block whose parent is not named either is unknown.
 std::map<uint256, PosIndexStanding> g_index;
+//! The anchor the anchor watcher's mark names, for an ORPHANED block in g_index.
+std::map<uint256, std::pair<uint32_t, uint256>> g_marks;
+//! ORPHANED blocks with a failed run below them that the watcher did not make.
+std::set<uint256> g_also_failed;
+//! Failure marks cleared on the node (PosIndexState::revivals).
+uint64_t g_revivals{0};
+
+//! The anchor watcher dropped `tag` (from the disk or in this run alike) for
+//! Bitcoin block `anchor_tag` at `anchor_height`, whose verdict now is `now`.
+void Orphan(unsigned char tag, unsigned char anchor_tag, uint32_t anchor_height, PosAnchorStanding now);
 
 struct AnchoredChain {
     const bool saved{g_con_bitcoin_anchor};
@@ -110,15 +120,29 @@ struct AnchoredChain {
         g_con_bitcoin_anchor = true;
         g_verdicts.clear();
         g_index.clear();
+        g_marks.clear();
+        g_also_failed.clear();
+        g_revivals = 0;
         PosSigningSetAnchorJudge([](uint32_t, const uint256& anchor) -> std::optional<PosAnchorStanding> {
             auto it = g_verdicts.find(anchor);
             return it == g_verdicts.end() ? PosAnchorStanding::STANDS : it->second;
         });
         PosSigningSetIndexJudge([](const uint256& hash, const uint256& parent) {
-            if (auto it = g_index.find(hash); it != g_index.end()) return it->second;
-            auto it = g_index.find(parent);
-            if (it == g_index.end()) return PosIndexStanding::UNKNOWN;
-            return it->second == PosIndexStanding::ACTIVE ? PosIndexStanding::OFF_ACTIVE : it->second;
+            const auto with_mark = [](const uint256& key, PosIndexStanding standing) {
+                PosIndexState st(standing);
+                auto m = g_marks.find(key);
+                if (standing == PosIndexStanding::ORPHANED && m != g_marks.end()) st.orphan_anchors.push_back(m->second);
+                st.failed_otherwise = standing == PosIndexStanding::ORPHANED && g_also_failed.count(key);
+                return st;
+            };
+            PosIndexState st;
+            if (auto it = g_index.find(hash); it != g_index.end()) {
+                st = with_mark(hash, it->second);
+            } else if (auto it = g_index.find(parent); it != g_index.end()) {
+                st = with_mark(parent, it->second == PosIndexStanding::ACTIVE ? PosIndexStanding::OFF_ACTIVE : it->second);
+            }
+            st.revivals = g_revivals;
+            return st;
         });
     }
     ~AnchoredChain()
@@ -128,6 +152,13 @@ struct AnchoredChain {
         g_con_bitcoin_anchor = saved;
     }
 };
+
+void Orphan(unsigned char tag, unsigned char anchor_tag, uint32_t anchor_height, PosAnchorStanding now)
+{
+    g_index[Hash32(tag)] = PosIndexStanding::ORPHANED;
+    g_marks[Hash32(tag)] = {anchor_height, Hash32(anchor_tag)};
+    g_verdicts[Hash32(anchor_tag)] = now;
+}
 
 PosSigningEntry Anchored(PosSignKind kind, int height, unsigned char tag, unsigned char anchor_tag, uint32_t anchor_height)
 {
@@ -535,6 +566,116 @@ BOOST_AUTO_TEST_CASE(a_node_that_does_not_watch_bitcoin_follows_its_active_chain
     PosSigningRecordResetForTesting();
 }
 
+BOOST_AUTO_TEST_CASE(a_node_that_does_not_watch_bitcoin_releases_an_invalid_block_after_one_round)
+{
+    AnchoredChain anchored;
+    PosSigningSetAnchorJudge([](uint32_t, const uint256&) -> std::optional<PosAnchorStanding> { return std::nullopt; });
+    Fresh();
+    const int64_t round = PosSigningRoundMs();
+    // Invalid here, on a node that does not watch Bitcoin: one query and one
+    // round, whatever kind of entry holds the height, with the block and as
+    // a bare hash. For each kind, X (with the block) and W (bare hash) are
+    // held on the active chain, then the operator invalidates them.
+    struct Kind {
+        const char* what;
+        int height;
+        bool signed_here;
+        bool certified;
+        bool from_disk;
+    };
+    const Kind kinds[] = {
+        {"certified only, this run", 160, false, true, false},
+        {"certified only, from the index at the start", 162, false, true, true},
+        {"signed here and certified, this run", 164, true, true, false},
+        {"signed here and certified, from the disk", 166, true, true, true},
+        {"signed here, not certified, this run", 168, true, false, false},
+        {"signed here, not certified, from the disk", 170, true, false, true},
+    };
+    int64_t now = 1000;
+    unsigned char tag = 0x10;
+    for (const Kind& k : kinds) {
+        BOOST_TEST_MESSAGE(k.what);
+        const unsigned char x = tag, w = tag + 1;
+        tag += 4;
+        const int hx = k.height, hw = k.height + 1;
+        if (k.signed_here) {
+            BOOST_CHECK(PosSigningRecordAppend(Anchored(PosSignKind::SHARE, hx, x, 0xe5, 1500)));
+            BOOST_CHECK(PosSigningRecordAppend(Anchored(PosSignKind::SHARE, hw, w, 0xe5, 1500)));
+        }
+        std::string error;
+        if (k.from_disk) BOOST_REQUIRE(Reload(error));
+        if (k.certified) {
+            const PosCertRoute route = k.from_disk ? PosCertRoute::INDEX_AT_START : PosCertRoute::CONNECTED;
+            Certify(x, hx, 0xe5, 1500, route);
+            Certify(w, hw, 0xe5, 1500, route);
+        }
+        g_index[Hash32(x)] = PosIndexStanding::ACTIVE;
+        g_index[Hash32(w)] = PosIndexStanding::ACTIVE;
+        const PosSigningEntry rival = Anchored(PosSignKind::SHARE, hx, 0xf0, 0xe6, 1500);
+        // On the active chain a certified block binds for good.
+        if (k.certified) BOOST_CHECK(!PosSigningCheckNow(rival, now + 50 * round).ok);
+        now += 100 * round;
+        g_index[Hash32(x)] = PosIndexStanding::FAILED;
+        g_index[Hash32(w)] = PosIndexStanding::FAILED;
+        PosSignCheck c = PosSigningCheckNow(rival, now);
+        BOOST_CHECK(!c.ok);
+        BOOST_CHECK(c.bound == Hash32(x));
+        BOOST_CHECK(c.why.find("invalid on this node") != std::string::npos);
+        BOOST_CHECK(c.why.find("anchor stands") == std::string::npos);
+        BOOST_CHECK_EQUAL(StateOf(Hash32(x)), "binds");
+        BOOST_CHECK(!PosSigningCheckNow(rival, now + round - 1).ok);
+        BOOST_CHECK(PosSigningCheckNow(rival, now + round).ok);
+        // A bare hash, with W at the tip's height.
+        const PosSigningEntry bare = Entry(PosSignKind::PARTIAL, -1, 0xf1, 0);
+        c = PosSigningCheckNow(bare, now, hw, Hash32(0xf2));
+        BOOST_CHECK(!c.ok);
+        BOOST_CHECK(c.bound == Hash32(w));
+        BOOST_CHECK(!PosSigningCheckNow(bare, now + round - 1, hw, Hash32(0xf2)).ok);
+        BOOST_CHECK(PosSigningCheckNow(bare, now + round, hw, Hash32(0xf2)).ok);
+        now += 100 * round;
+        if (k.certified) {
+            // Revived, it binds for good again; invalid again, a new round.
+            g_index[Hash32(x)] = PosIndexStanding::ACTIVE;
+            ++g_revivals;
+            BOOST_CHECK(!PosSigningCheckNow(rival, now).ok);
+            now += 100 * round;
+            g_index[Hash32(x)] = PosIndexStanding::FAILED;
+            BOOST_CHECK(!PosSigningCheckNow(rival, now).ok);
+            BOOST_CHECK(PosSigningCheckNow(rival, now + round).ok);
+            now += 100 * round;
+            // Revived and invalidated again with no check between: a new
+            // round all the same, with the block and as a bare hash.
+            ++g_revivals;
+            c = PosSigningCheckNow(rival, now);
+            BOOST_CHECK(!c.ok);
+            BOOST_CHECK(c.bound == Hash32(x));
+            BOOST_CHECK(PosSigningCheckNow(rival, now + round).ok);
+            ++g_revivals;
+            BOOST_CHECK(!PosSigningCheckNow(bare, now, hw, Hash32(0xf2)).ok);
+            BOOST_CHECK(PosSigningCheckNow(bare, now + round, hw, Hash32(0xf2)).ok);
+            now += 100 * round;
+        } else {
+            // A block this member signed and never saw certified escapes for
+            // as long as its anchor stands, as the share-lock always has.
+            ++g_revivals;
+            BOOST_CHECK(PosSigningCheckNow(rival, now).ok);
+        }
+    }
+    // A watcher's mark from a run that watched Bitcoin: no verdict can come
+    // here, so it is an invalid block like any other.
+    Certify(0xda, 180, 0xe5, 1500, PosCertRoute::INDEX_AT_START);
+    g_index[Hash32(0xda)] = PosIndexStanding::ORPHANED;
+    const PosSigningEntry rival = Anchored(PosSignKind::SHARE, 180, 0xdb, 0xe6, 1500);
+    BOOST_CHECK(!PosSigningCheckNow(rival, now).ok);
+    BOOST_CHECK(PosSigningCheckNow(rival, now + round).ok);
+    // A valid block off the active chain binds nothing here (unchanged).
+    Certify(0xdc, 181, 0xe5, 1500, PosCertRoute::INDEX_AT_START);
+    g_index[Hash32(0xdc)] = PosIndexStanding::OFF_ACTIVE;
+    BOOST_CHECK(PosSigningCheckNow(Anchored(PosSignKind::SHARE, 181, 0xdd, 0xe6, 1500), now).ok);
+    fs::remove(RecordFile());
+    PosSigningRecordResetForTesting();
+}
+
 BOOST_AUTO_TEST_CASE(an_invalidated_certified_block_releases_after_one_round_across_a_restart)
 {
     AnchoredChain anchored;
@@ -561,7 +702,7 @@ BOOST_AUTO_TEST_CASE(a_certified_block_the_anchor_watcher_dropped_binds_nothing)
     g_index[Hash32(0x70)] = PosIndexStanding::ACTIVE;
     const PosSigningEntry y = Anchored(PosSignKind::SHARE, 140, 0x71, 0x91, 1201);
     BOOST_CHECK(!PosSigningCheckNow(y, 1000).ok);
-    g_index[Hash32(0x70)] = PosIndexStanding::ORPHANED;
+    Orphan(0x70, 0x8f, 1199, PosAnchorStanding::GONE);
     // Signed at once: no escape round is owed to a block Bitcoin dropped.
     BOOST_CHECK(PosSigningCheckNow(y, 1000).ok);
     BOOST_CHECK(PosSigningCheckNow(Anchored(PosSignKind::PROPOSAL, 140, 0x72, 0x91, 1201), 1000).ok);
@@ -572,6 +713,66 @@ BOOST_AUTO_TEST_CASE(a_certified_block_the_anchor_watcher_dropped_binds_nothing)
     const PosSignCheck c = PosSigningCheckNow(y, 1000 + 50 * PosSigningRoundMs());
     BOOST_CHECK(!c.ok);
     BOOST_CHECK(c.bound == Hash32(0x70));
+    fs::remove(RecordFile());
+    PosSigningRecordResetForTesting();
+}
+
+BOOST_AUTO_TEST_CASE(an_anchor_watchers_mark_releases_at_once_only_on_a_current_verdict)
+{
+    // X certified at 145, dropped by the anchor watcher for its parent's
+    // anchor B (a mark that persists on disk). Released at once only while
+    // the parent chain says now that B is gone.
+    AnchoredChain anchored;
+    Fresh();
+    const int64_t round = PosSigningRoundMs();
+    const PosSigningEntry y = Anchored(PosSignKind::SHARE, 145, 0xa1, 0xb1, 1251);
+    const auto check_x = [&](int64_t now) { return PosSigningCheckNow(y, now); };
+    for (const bool restarted : {false, true}) {
+        BOOST_TEST_MESSAGE((restarted ? "the mark and the certificate read from the disk" : "in this run"));
+        std::string error;
+        if (restarted) {
+            BOOST_REQUIRE(Reload(error));
+            Certify(0xa0, 145, 0xb0, 1250, PosCertRoute::INDEX_AT_START, Hash32(0x9f));
+        } else {
+            BOOST_CHECK(PosSigningRecordAppend(Anchored(PosSignKind::CERTIFIED, 145, 0xa0, 0xb0, 1250)));
+            Certify(0xa0, 145, 0xb0, 1250, PosCertRoute::CONNECTED, Hash32(0x9f));
+        }
+        const int64_t t = restarted ? 100000 : 1000;
+        // The daemon does not answer: no current verdict, so X binds as a
+        // block whose anchor is not judged yet does, round after round.
+        Orphan(0xa0, 0xbf, 1249, PosAnchorStanding::UNDECIDED);
+        PosSignCheck c = check_x(t);
+        BOOST_CHECK(!c.ok);
+        BOOST_CHECK(c.bound == Hash32(0xa0));
+        BOOST_CHECK(c.why.find("has not judged the Bitcoin anchor that the anchor watcher dropped it for") != std::string::npos);
+        BOOST_CHECK(c.why.find(Hash32(0xbf).GetHex()) != std::string::npos);
+        BOOST_CHECK_EQUAL(StateOf(Hash32(0xa0)), "undecided");
+        BOOST_CHECK(!check_x(t + 50 * round).ok);
+        BOOST_CHECK(!PosSigningCheckNow(Entry(PosSignKind::PARTIAL, -1, 0xa2, 0), t + 50 * round, 144, Hash32(0x9f)).ok);
+        BOOST_CHECK(!PosSigningCheckNow(Anchored(PosSignKind::PROPOSAL, 145, 0xa3, 0xb1, 1251), t + 50 * round).ok);
+        // Bitcoin stands on B: the mark is stale, and X binds for good.
+        g_verdicts[Hash32(0xbf)] = PosAnchorStanding::STANDS;
+        c = check_x(t + 60 * round);
+        BOOST_CHECK(!c.ok);
+        BOOST_CHECK(c.why.find("holds a full certificate") != std::string::npos);
+        BOOST_CHECK_EQUAL(StateOf(Hash32(0xa0)), "certified");
+        BOOST_CHECK(!check_x(t + 120 * round).ok);
+        // ... unless a block below it failed for another reason: then one round.
+        g_also_failed.insert(Hash32(0xa0));
+        BOOST_CHECK(!check_x(t + 200 * round).ok);
+        BOOST_CHECK(check_x(t + 201 * round).ok);
+        g_also_failed.clear();
+        // Bitcoin replaced B, as the daemon says now: free at once.
+        Orphan(0xa0, 0xbf, 1249, PosAnchorStanding::GONE);
+        BOOST_CHECK(check_x(t + 300 * round).ok);
+        BOOST_CHECK_EQUAL(StateOf(Hash32(0xa0)), "anchor gone");
+        // A current verdict that X's own anchor is gone frees it too, while B
+        // is undecided.
+        g_verdicts[Hash32(0xbf)] = PosAnchorStanding::UNDECIDED;
+        g_verdicts[Hash32(0xb0)] = PosAnchorStanding::GONE;
+        BOOST_CHECK(check_x(t + 400 * round).ok);
+        g_verdicts.erase(Hash32(0xb0));
+    }
     fs::remove(RecordFile());
     PosSigningRecordResetForTesting();
 }
@@ -598,7 +799,7 @@ BOOST_AUTO_TEST_CASE(a_certificate_after_an_invalidation_releases_after_one_roun
     BOOST_CHECK(!PosSigningCheckNow(z, 2000).ok);
     BOOST_CHECK(PosSigningCheckNow(z, 2000 + round).ok);
     // ... and above a parent the anchor watcher dropped: free at once.
-    g_index[Hash32(0x86)] = PosIndexStanding::ORPHANED;
+    Orphan(0x86, 0x9f, 1301, PosAnchorStanding::GONE);
     Certify(0x87, 152, 0x97, 1302, PosCertRoute::CERTIFICATE, Hash32(0x86));
     BOOST_CHECK(PosSigningCheckNow(Anchored(PosSignKind::SHARE, 152, 0x88, 0x97, 1302), 3000).ok);
     // Above a valid parent it binds for good.
@@ -698,16 +899,34 @@ BOOST_FIXTURE_TEST_CASE(the_start_scan_reads_only_the_window_of_a_testnet_sized_
     BOOST_CHECK_EQUAL(held, (size_t)(POS_SIGNING_RECORD_WINDOW * 10 + (N - 1) % 10 + 1 + 4));
     BOOST_CHECK_EQUAL(side, 4U);
     // What the block index says of each, as the check reads it.
-    const auto standing = [&](const CBlockIndex* p) { return PosSigningIndexStanding(chainman, p->GetBlockHash(), uint256()); };
+    const auto standing = [&](const CBlockIndex* p) { return PosSigningIndexStanding(chainman, p->GetBlockHash(), uint256()).standing; };
     BOOST_CHECK(standing(prev) == PosIndexStanding::ACTIVE);
     BOOST_CHECK(standing(side_in) == PosIndexStanding::OFF_ACTIVE);
     BOOST_CHECK(standing(side_failed) == PosIndexStanding::FAILED);
     BOOST_CHECK(standing(side_child) == PosIndexStanding::FAILED); // through its parent, with no mark of its own
     BOOST_CHECK(standing(side_orphaned) == PosIndexStanding::ORPHANED);
+    // The watcher's mark names the anchor it dropped the block for, read at
+    // the bottom of the failed run, for a child with no mark of its own too;
+    // a run below it that failed for another reason is not hidden by it.
+    CBlockIndex* orphan_child = add(side_orphaned, N - 39, tip_anchor - 3);
+    orphan_child->nStatus |= BLOCK_FAILED_CHILD;
+    for (const CBlockIndex* p : {(const CBlockIndex*)side_orphaned, (const CBlockIndex*)orphan_child}) {
+        const PosIndexState st = PosSigningIndexStanding(chainman, p->GetBlockHash(), uint256());
+        BOOST_REQUIRE_EQUAL(st.orphan_anchors.size(), 1U);
+        BOOST_CHECK_EQUAL(st.orphan_anchors[0].first, side_orphaned->m_anchor_height);
+        BOOST_CHECK(st.orphan_anchors[0].second == side_orphaned->m_anchor_hash);
+        BOOST_CHECK(!st.failed_otherwise);
+    }
+    CBlockIndex* over_failed = add(side_child, N - 48, tip_anchor - 4);
+    over_failed->nStatus |= BLOCK_FAILED_VALID | BLOCK_FAILED_ANCHOR;
+    const PosIndexState mixed = PosSigningIndexStanding(chainman, over_failed->GetBlockHash(), uint256());
+    BOOST_CHECK(mixed.standing == PosIndexStanding::ORPHANED);
+    BOOST_CHECK_EQUAL(mixed.orphan_anchors.size(), 1U);
+    BOOST_CHECK(mixed.failed_otherwise);
     // A block the index does not hold stands as its parent.
-    BOOST_CHECK(PosSigningIndexStanding(chainman, GetRandHash(), prev->GetBlockHash()) == PosIndexStanding::OFF_ACTIVE);
-    BOOST_CHECK(PosSigningIndexStanding(chainman, GetRandHash(), side_child->GetBlockHash()) == PosIndexStanding::FAILED);
-    BOOST_CHECK(PosSigningIndexStanding(chainman, GetRandHash(), GetRandHash()) == PosIndexStanding::UNKNOWN);
+    BOOST_CHECK(PosSigningIndexStanding(chainman, GetRandHash(), prev->GetBlockHash()).standing == PosIndexStanding::OFF_ACTIVE);
+    BOOST_CHECK(PosSigningIndexStanding(chainman, GetRandHash(), side_child->GetBlockHash()).standing == PosIndexStanding::FAILED);
+    BOOST_CHECK(PosSigningIndexStanding(chainman, GetRandHash(), GetRandHash()).standing == PosIndexStanding::UNKNOWN);
     BOOST_CHECK(ms < 1000.0);
     // What a node that never signs pays: one note per connected block, and at
     // each block index write a pass over the blocks the window keeps.

@@ -554,25 +554,51 @@ void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route)
     NoteCertified(pindex, route);
 }
 
-PosIndexStanding PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent)
+//! Failure marks cleared in this run (ResetBlockFailureFlags), for the
+//! signing check (PosIndexState::revivals).
+static uint64_t g_pos_failure_resets GUARDED_BY(::cs_main){0};
+
+PosIndexState PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent)
 {
     LOCK(::cs_main);
+    const auto with_revivals = [](PosIndexState st) {
+        st.revivals = g_pos_failure_resets;
+        return st;
+    };
     const CChain& active = chainman.ActiveChain();
     const CBlockIndex* p = chainman.m_blockman.LookupBlockIndex(hash);
-    if (p && active.Contains(p)) return PosIndexStanding::ACTIVE;
+    if (p && active.Contains(p)) return with_revivals(PosIndexStanding::ACTIVE);
     // A block the index does not hold yet (a certificate only) stands as
     // its parent does.
     if (!p && !parent.IsNull()) p = chainman.m_blockman.LookupBlockIndex(parent);
-    if (!p) return PosIndexStanding::UNKNOWN;
+    if (!p) return with_revivals(PosIndexStanding::UNKNOWN);
     // Down to the active chain: InvalidateBlock marks only the blocks it
     // disconnects, so a side block above a failed one may carry no mark of its
-    // own. The walk is as long as the block's branch, inside the window.
+    // own. The walk is as long as the block's branch, inside the window. It
+    // goes all the way down and names what each failed run failed for, read
+    // at the run's bottom block (the one invalidated): the anchor watcher's
+    // mark is evidence only once the parent chain confirms it now, and a run
+    // below that failed for another reason must not be hidden by it.
+    PosIndexState out{PosIndexStanding::OFF_ACTIVE};
+    const CBlockIndex* const invalidating = chainman.m_anchor_invalidating;
     for (const CBlockIndex* q = p; q && !active.Contains(q); q = q->pprev) {
-        if (q->nStatus & BLOCK_FAILED_MASK) {
-            return chainman.IsAnchorOrphaned(q) ? PosIndexStanding::ORPHANED : PosIndexStanding::FAILED;
+        if (!(q->nStatus & BLOCK_FAILED_MASK)) continue;
+        if (q->pprev && (q->pprev->nStatus & BLOCK_FAILED_MASK)) continue; // not the run's bottom
+        if (q->nStatus & BLOCK_FAILED_ANCHOR) {
+            out.orphan_anchors.emplace_back(q->m_anchor_height, q->m_anchor_hash);
+        } else if (invalidating && q->GetAncestor(invalidating->nHeight) == invalidating) {
+            // The watcher is invalidating this branch now (IsAnchorOrphaned).
+            out.orphan_anchors.emplace_back(invalidating->m_anchor_height, invalidating->m_anchor_hash);
+        } else {
+            out.failed_otherwise = true;
         }
     }
-    return PosIndexStanding::OFF_ACTIVE;
+    if (!out.orphan_anchors.empty()) {
+        out.standing = PosIndexStanding::ORPHANED;
+    } else if (out.failed_otherwise) {
+        out.standing = PosIndexStanding::FAILED;
+    }
+    return with_revivals(std::move(out));
 }
 
 void PosSigningNoteIndexAtStart(ChainstateManager& chainman)
@@ -6048,6 +6074,7 @@ bool CChainState::InvalidateBlock(BlockValidationState& state, CBlockIndex* pind
 
 void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     AssertLockHeld(cs_main);
+    ++g_pos_failure_resets;
 
     int nHeight = pindex->nHeight;
 
