@@ -186,8 +186,12 @@ proposals left aside (see "Rounds and collections" in
 Bitcoin differ for a while keep one schedule, and when no proposal at a height
 can be backed, as after a Bitcoin reorganization that replaced the anchor of
 every proposal there, the collection still runs out on time and restarts. The
-members then propose again on Bitcoin's new branch within a few seconds, rather
-than at Bitcoin's next block.
+members then propose again on Bitcoin's new branch, once the collection has run
+out. A collection lasts one round per seat of the committee cap, so on the
+testnet, with its cap of 250 seats and 9.45 s rounds, that is about 39.5
+minutes after the collection began, whatever the number of members. The run-out,
+not Bitcoin's next block, ends the silence; making the run-out short is
+tracked in #418.
 
 ### The reorg-following watcher
 

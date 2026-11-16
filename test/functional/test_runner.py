@@ -269,7 +269,7 @@ BASE_SCRIPTS = [
     'feature_pos_gossip_restart.py',
     'feature_pos_gossip_anchor_reorg.py',
     'feature_pos_gossip_anchor_split.py',
-    'feature_pos_gossip_anchor_split.py --testnet-timing',
+    'feature_pos_gossip_anchor_split.py --testnet-round-length',
     'feature_pos_gossip_backdated_stamp.py',
     'feature_pos_stop_under_gossip.py',
     'feature_pos_gossip_invalid.py',

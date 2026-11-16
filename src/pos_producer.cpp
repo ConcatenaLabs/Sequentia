@@ -656,6 +656,8 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
     m_byzantine_fake_anchor = std::clamp<int>(gArgs.GetIntArg("-posbyzantinefakeanchor", 0), 0, 1000000);
     m_byzantine_backdate_s = std::clamp<int64_t>(gArgs.GetIntArg("-posbyzantinebackdate", 0), 0, 1000000000);
+    m_byzantine_stamp_floor_set = gArgs.IsArgSet("-posbyzantinestampfloor");
+    m_byzantine_stamp_floor = std::clamp<int64_t>(gArgs.GetIntArg("-posbyzantinestampfloor", 0), -100000, 100000);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
     m_debug_share_delay_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posdebugsharedelayms", 0), 0, 10000);
     m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
@@ -1394,6 +1396,20 @@ std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
     return std::nullopt;
 }
 
+//! The earliest stamp consensus allows a proposal of a leader whose election
+//! slot is `slot`: its slot gate after the parent, the median time past + 1,
+//! and the minimum spacing where it is active.
+static int64_t GossipStampFloor(const Consensus::Params& cparams, const CBlockIndex* tip,
+                                int64_t median_time_past, int height, uint64_t slot)
+{
+    int64_t floor = std::max<int64_t>((int64_t)tip->nTime + PosSlotGateSeconds(cparams, height, slot),
+                                      median_time_past + 1);
+    if (cparams.PosBlockSpacingActiveAt(height)) {
+        floor = std::max<int64_t>(floor, (int64_t)tip->nTime + cparams.pos_block_spacing);
+    }
+    return floor;
+}
+
 void PosProducer::ProposeGossip(const CKey& leader_key)
 {
     int height = 0;
@@ -1401,6 +1417,37 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     if (!block) {
         LogPrint(BCLog::VALIDATION, "PoS gossip: failed to build a proposal\n");
         return;
+    }
+    // The leader's own election slot at this height, for the log (a test reads
+    // it to tell which member ranked first) and for -posbyzantinestampfloor.
+    CBlockIndex* parent_idx;
+    {
+        LOCK(cs_main);
+        parent_idx = m_chainman.m_blockman.LookupBlockIndex(block->hashPrevBlock);
+    }
+    uint64_t own_slot = 0;
+    if (parent_idx) {
+        const StakeRegistry& reg = StakeRegistry::GetInstance();
+        const uint256 seed = PosSeedForChild(parent_idx);
+        auto proof = ExtractPosVrfProof(*block);
+        uint256 lbeta;
+        const uint64_t weight = reg.GetWeight(leader_key.GetPubKey());
+        if (proof && weight > 0 && VrfVerify(leader_key.GetPubKey(), Span<const unsigned char>(seed.begin(), 32), *proof, lbeta)) {
+            const Consensus::Params& cparams = m_chainparams.GetConsensus();
+            const uint64_t total_weight = PosTotalWeight(reg);
+            own_slot = PosExpRaceActive(cparams, height) ? PosVrfSlotExp(lbeta, weight, total_weight)
+                                                          : PosVrfSlot(lbeta, weight, total_weight);
+        }
+    }
+    if (m_byzantine_stamp_floor_set && parent_idx) {
+        // Fault injection: a stamp exactly `m_byzantine_stamp_floor` seconds from
+        // the earliest time consensus allows this proposal (-1 is one second
+        // below it, 0 is at it).
+        const int64_t mtp = WITH_LOCK(cs_main, return parent_idx->GetMedianTimePast());
+        const int64_t floor = GossipStampFloor(m_chainparams.GetConsensus(), parent_idx, mtp, height, own_slot);
+        block->nTime = (uint32_t)(floor + m_byzantine_stamp_floor);
+        LogPrintf("PoS gossip: BYZANTINE stamping proposal at height %d with time %d, %d s from the consensus floor %d (election slot %d)\n",
+                  height, (int64_t)block->nTime, m_byzantine_stamp_floor, floor, own_slot);
     }
     if (m_byzantine_backdate_s > 0) {
         // Fault injection: a stamp earlier than consensus allows. Cheap checks
@@ -1415,8 +1462,8 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
             // A second earlier on every proposal, so a re-proposal is never a
             // copy that peers drop as already seen.
             block->nTime = (uint32_t)std::max<int64_t>(1, (int64_t)parent->nTime - m_byzantine_backdate_s - (m_byzantine_backdates++ % 3600));
-            LogPrintf("PoS gossip: BYZANTINE stamping proposal at height %d with time %d, %d s before its parent\n",
-                      height, (int64_t)block->nTime, m_byzantine_backdate_s);
+            LogPrintf("PoS gossip: BYZANTINE stamping proposal at height %d with time %d, %d s before its parent (election slot %d)\n",
+                      height, (int64_t)block->nTime, m_byzantine_backdate_s, own_slot);
         }
     }
     // The leader authorises its block by signing the (member-independent) hash,
@@ -1503,7 +1550,7 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         }
     }
 
-    LogPrintf("PoS gossip: proposing block %s at height %d\n", hash.GetHex(), height);
+    LogPrintf("PoS gossip: proposing block %s at height %d (election slot %d)\n", hash.GetHex(), height, own_slot);
     FloodCompactProposal(*block);
 }
 
@@ -2126,11 +2173,7 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
         // at once, at every collection it ranks first in. Below the floor,
         // the proposal is invalid wherever it is judged: not backed, not
         // relayed. This is exactly the consensus floor, never stricter.
-        int64_t stamp_floor = std::max<int64_t>((int64_t)tip->nTime + PosSlotGateSeconds(cparams, height, slot),
-                                                median_time_past + 1);
-        if (cparams.PosBlockSpacingActiveAt(height)) {
-            stamp_floor = std::max<int64_t>(stamp_floor, (int64_t)tip->nTime + cparams.pos_block_spacing);
-        }
+        const int64_t stamp_floor = GossipStampFloor(cparams, tip, median_time_past, height, slot);
         if (block->GetBlockTime() < stamp_floor) {
             LogPrintf("PoS gossip: not backing proposal %s at height %d: stamped %d s before the earliest time consensus allows\n",
                       hash.GetHex(), height, stamp_floor - block->GetBlockTime());

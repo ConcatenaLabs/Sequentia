@@ -24,8 +24,9 @@ leader, and excludes an honest member. No member may exclude anyone here.
 Then the parents join on node6's branch, node4 returns, and H must certify,
 with every member's tip anchored on the parent chain as it then is.
 
---testnet-timing runs the committee at the testnet's round length and window
-(-posroundms=9450 -poswindowms=6750) and spreads the proposals by six seconds,
+--testnet-round-length runs the committee at the testnet's round length and window
+(-posroundms=9450 -poswindowms=6750), though not at its collection length (five
+rounds, not the 250 of the testnet's seat cap), and spreads the proposals by six seconds,
 more than half a round, as the split must be to convict at that round length.
 """
 
@@ -45,8 +46,8 @@ REORG_VIEW = (2, 3)
 
 class PosGossipAnchorSplitTest(BitcoinTestFramework):
     def add_options(self, parser):
-        parser.add_argument("--testnet-timing", dest="testnet_timing", default=False, action="store_true",
-                            help="run at the testnet's round length and window")
+        parser.add_argument("--testnet-round-length", dest="testnet_round_length", default=False, action="store_true",
+                            help="run at the testnet's round length and window (not its collection length: the committee still runs five rounds per collection, not the testnet's 250)")
 
     def set_test_params(self):
         self.num_nodes = 7
@@ -59,7 +60,7 @@ class PosGossipAnchorSplitTest(BitcoinTestFramework):
                 "-signblockscript=51"]
 
     def setup_network(self):
-        if self.options.testnet_timing:
+        if self.options.testnet_round_length:
             self.round_ms, window_ms, self.spread_s = 9450, 6750, 6.0
         else:
             self.round_ms, window_ms, self.spread_s = 700 + 35 * COMMITTEE, 500 + 25 * COMMITTEE, 1.2

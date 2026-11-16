@@ -338,6 +338,8 @@ private:
     //! proposal this many seconds before its parent's stamp, earlier than
     //! consensus allows. 0 = off.
     int64_t m_byzantine_backdate_s{0};
+    bool m_byzantine_stamp_floor_set{false};
+    int64_t m_byzantine_stamp_floor{0};
     int64_t m_byzantine_backdates{0};
     //! Regtest only (-posdebugroundskewms): offset added to this node's round
     //! scheduler clock, to study how inter-node clock skew affects round
