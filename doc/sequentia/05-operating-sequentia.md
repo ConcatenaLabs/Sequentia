@@ -608,8 +608,9 @@ cannot read holds one height for a few seconds after the start and leaves a copy
 of the file, `possigned.dat.unreadable-<time>`, for you to remove.
 
 Invalidating a certified block on a member (`invalidateblock`) is the same kind
-of step: however the member came to hold the block's certificate, after one
-round it signs a rival at that height, and the log says it is signing a rival of
+of step: however and whenever the member came to hold the block's certificate,
+before the invalidation or after it, after one round it signs a rival at that
+height, and the log says it is signing a rival of
 a block it holds a full certificate for. Invalidate a certified block only to
 recover from a fault you have understood; `reconsiderblock` binds the member to
 it again.

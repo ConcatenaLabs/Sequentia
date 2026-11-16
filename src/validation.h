@@ -223,10 +223,17 @@ bool PosIndexCertifies(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_
 enum class PosCertRoute;
 void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+/** SEQUENTIA PoS: what the block index says now of a block the signing check
+ *  holds (pos_signing_record.h, PosIndexStanding): on the active chain, off it,
+ *  failed here, or dropped by the anchor watcher (it or an ancestor). A block
+ *  not in the index yet stands as its parent `parent` does. Takes cs_main. */
+enum class PosIndexStanding;
+PosIndexStanding PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent);
+
 /** SEQUENTIA PoS: at the start, once the chain is loaded and before any
- *  signing path runs: every block in the signing record's window that the
- *  block index holds a verified full certificate for, given to the signing
- *  check. With the record, this is everything the node knows of the heights
+ *  signing path runs: every block in the signing record's window that
+ *  connected here with a verified full certificate (failed since or not: the
+ *  check reads its standing), given to the signing check. With the record, this is everything the node knows of the heights
  *  that bind; the index answers for every entry the record has dropped. */
 void PosSigningNoteIndexAtStart(ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

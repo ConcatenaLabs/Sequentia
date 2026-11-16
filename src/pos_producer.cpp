@@ -2453,7 +2453,7 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
     // its block has been received and judged (validation.h).
     PosNoteCompetingCertificate(hash, height);
     // The signing check: a verified certificate decides its height.
-    PosSigningNoteCertificate(PosCertifiedBlock{hash, height, header.m_anchor_height, header.m_anchor_hash},
+    PosSigningNoteCertificate(PosCertifiedBlock{hash, height, header.hashPrevBlock, header.m_anchor_height, header.m_anchor_hash},
                               PosCertRoute::CERTIFICATE);
     const int signer_count = PopulatedSignerCount(header);
     // A verified quorum certificate: pin this height. No rival will be

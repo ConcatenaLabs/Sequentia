@@ -529,15 +529,50 @@ bool PosIndexCertifies(const CBlockIndex* pindex)
     return pindex->IsValid(BLOCK_VALID_SCRIPTS) && pindex->PosCarriesQuorum();
 }
 
-void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route)
+//! Connected here at least once with its parent's quorum, whether or not it
+//! has failed since (an operator's invalidateblock, the anchor watcher): the
+//! signing check reads its standing at each check (PosSigningIndexStanding).
+static bool PosIndexCertifiedOnce(const CBlockIndex* pindex)
 {
-    if (!g_con_pos || !PosIndexCertifies(pindex)) return;
+    return (pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_SCRIPTS && pindex->PosCarriesQuorum();
+}
+
+static void NoteCertified(const CBlockIndex* pindex, PosCertRoute route)
+{
     PosCertifiedBlock b;
     b.hash = pindex->GetBlockHash();
     b.height = pindex->nHeight;
+    b.parent = pindex->pprev ? pindex->pprev->GetBlockHash() : uint256();
     b.anchor_height = pindex->m_anchor_height;
     b.anchor_hash = pindex->m_anchor_hash;
     PosSigningNoteCertificate(b, route);
+}
+
+void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route)
+{
+    if (!g_con_pos || !PosIndexCertifies(pindex)) return;
+    NoteCertified(pindex, route);
+}
+
+PosIndexStanding PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent)
+{
+    LOCK(::cs_main);
+    const CChain& active = chainman.ActiveChain();
+    const CBlockIndex* p = chainman.m_blockman.LookupBlockIndex(hash);
+    if (p && active.Contains(p)) return PosIndexStanding::ACTIVE;
+    // A block the index does not hold yet (a certificate only) stands as
+    // its parent does.
+    if (!p && !parent.IsNull()) p = chainman.m_blockman.LookupBlockIndex(parent);
+    if (!p) return PosIndexStanding::UNKNOWN;
+    // Down to the active chain: InvalidateBlock marks only the blocks it
+    // disconnects, so a side block above a failed one may carry no mark of its
+    // own. The walk is as long as the block's branch, inside the window.
+    for (const CBlockIndex* q = p; q && !active.Contains(q); q = q->pprev) {
+        if (q->nStatus & BLOCK_FAILED_MASK) {
+            return chainman.IsAnchorOrphaned(q) ? PosIndexStanding::ORPHANED : PosIndexStanding::FAILED;
+        }
+    }
+    return PosIndexStanding::OFF_ACTIVE;
 }
 
 void PosSigningNoteIndexAtStart(ChainstateManager& chainman)
@@ -561,16 +596,17 @@ void PosSigningNoteIndexAtStart(ChainstateManager& chainman)
     for (const CBlockIndex* p = tip; p && in_window(p); p = p->pprev) {
         lowest = p->nHeight;
         if (!PosIndexCertifies(p)) continue;
-        PosNoteVerifiedCertificate(p, PosCertRoute::INDEX_AT_START_ACTIVE);
+        NoteCertified(p, PosCertRoute::INDEX_AT_START);
         ++noted;
     }
     // Blocks off the active chain: only at heights the window reaches. The
     // index has no height order, so this is one pass over its entries that
-    // reads two integers for each block below the window.
+    // reads two integers for each block below the window. A block that failed
+    // after it connected is loaded too: the check reads its standing, and
+    // releases a member from it after one round, as in the run before.
     for (const auto& [hash, pindex] : chainman.m_blockman.m_block_index) {
-        if (pindex->nHeight < lowest || active.Contains(pindex) || !in_window(pindex) || !PosIndexCertifies(pindex)) continue;
-        PosNoteVerifiedCertificate(pindex, (pindex->nStatus & BLOCK_FAILED_MASK) ? PosCertRoute::INDEX_AT_START_INVALID
-                                                                                 : PosCertRoute::INDEX_AT_START);
+        if (pindex->nHeight < lowest || active.Contains(pindex) || !in_window(pindex) || !PosIndexCertifiedOnce(pindex)) continue;
+        NoteCertified(pindex, PosCertRoute::INDEX_AT_START);
         ++noted;
     }
     LogPrintf("Signing record: %u block(s) with a verified full certificate in the window, read from the block index " /* Continued */
@@ -5072,11 +5108,6 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
     }
 
     m_chain.SetTip(pindexDelete->pprev);
-    // SEQUENTIA: the signing check follows the active chain on a node that
-    // cannot judge anchors (pos_signing_record.h).
-    if (g_con_pos && this == &m_chainman.ActiveChainstate()) {
-        PosSigningNoteDisconnected(pindexDelete->GetBlockHash(), pindexDelete->nHeight);
-    }
 
     UpdateTip(pindexDelete->pprev);
 

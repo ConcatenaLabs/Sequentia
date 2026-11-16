@@ -1162,7 +1162,9 @@ Bitcoin anchoring decides first. Before X binds anything, the node judges X's
 Bitcoin anchor, and judges it again whenever its view of Bitcoin moves:
 
 - the anchor stands: X binds as above;
-- Bitcoin replaced it: X binds nothing, at once, and any escape X had is void;
+- Bitcoin replaced it, or the anchor of a block below X (the anchor watcher
+  then drops X with that block): X binds nothing, at once, and any escape X had
+  is void;
 - Bitcoin returns to it later: X binds again, so the next rival waits for a new
   query and a new round. An escape counts only while the anchor stood unbroken
   (a Bitcoin block that only extends Bitcoin's chain breaks nothing);
@@ -1174,8 +1176,8 @@ branches: that is following Bitcoin, never a fault. The same block again is
 always free.
 
 A block the node holds a full certificate for binds its height for good while
-its anchor stands, whether or not this member signed it, and however the
-certificate arrived: the block connected here (from a peer, `submitblock`,
+this node could still accept it, whether or not this member signed it, and
+however the certificate arrived: the block connected here (from a peer, `submitblock`,
 `submitposblock`, `generateposblock`, or the gossip round that certified it;
 `ConnectBlock` checks the certificate), a peer's certificate message
 (`poscert`, checked on arrival), or a fuller certificate for a block that
@@ -1183,17 +1185,30 @@ connected here. Only a checked certificate counts: a block body whose
 certificate has not been checked yet binds nothing, since the block hash leaves
 the certificate out and a leader could otherwise freeze a height with a fake
 one. Nothing is then signed at that height but the certified block itself: no
-share, no proposal, no leader's signature, no partial signature. Such a block
-leaves the node's chain at its height only when Bitcoin replaces its anchor or
-when the operator invalidates it (`invalidateblock`, on the block or an
-ancestor). After an invalidation on this node, the member is released after one
-new query and round, as for any block: invalidating is a recovery step, and
-members that refused for good would turn a repair made on many of them into a
-height nobody can sign. The log says so in words ("about to sign a rival of ...,
-a block it holds a full certificate for, because that block was invalidated on
-this node"); `reconsiderblock` makes the certificate bind again. Invalidating a
-certified block is the operator's responsibility: if its signers then certify a
-rival, two certified blocks exist at that height.
+share, no proposal, no leader's signature, no partial signature.
+
+"Could still accept it" is read from the node's state each time the check runs,
+never from a flag an earlier event set, so the answer does not depend on the
+order in which the certificate, the block, an invalidation, a reorganization
+and a restart reached the node. The block binds while its block index entry is
+not failed for any reason (on the block or on any block below it) and its
+Bitcoin anchor stands. Otherwise:
+
+- Bitcoin replaced its anchor, or the anchor of a block below it (the anchor
+  watcher then drops that block and everything above it): it binds nothing, at
+  once;
+- it is invalid here for another reason (`invalidateblock` on it or an
+  ancestor, or an invalid ancestor): the member is released after one new query
+  and round, as for any block, on every signing path, a bare hash included.
+  Invalidating is a recovery step, and members that refused for good would turn
+  a repair made on many of them into a height nobody can sign. The log says so
+  in words ("about to sign a rival of ..., a block it holds a full certificate
+  for, because that block is invalid on this node");
+- it is valid again (`reconsiderblock`, or the watcher once Bitcoin returns):
+  it binds again, and a later invalidation counts its round afresh.
+
+Invalidating a certified block is the operator's responsibility: if its signers
+then certify a rival, two certified blocks exist at that height.
 
 The quorum arithmetic is what gives the rule its force. For X to be certifiable
 at all, at least a quorum must have signed it. Those members are all locked,
@@ -1235,7 +1250,10 @@ two members (§4), so certifying two blocks at one height takes at least two suc
 members. The lock is kept per height and per signed block with the signing
 record (`src/pos_signing_record.{h,cpp}`), where every signing path reaches it;
 the certificate query is exercised in `feature_pos_cert_gossip.py`, and the
-anchor's replacement and return in `feature_pos_signing_record_return.py`.
+anchor's replacement and return in `feature_pos_signing_record_return.py`, and
+the orders a certificate can arrive in (after an invalidation, without its
+block, above a parent whose anchor Bitcoin replaced, over a bare hash) in
+`feature_pos_signing_record_state.py` and `feature_pos_signing_record_state_bls.py`.
 
 ### The signing record
 
@@ -1280,7 +1298,9 @@ alone there.
 What binds a height is decided in one place, from two sources kept apart
 because they bind differently: the record's entries (this member's signatures,
 binding by the escape) and the blocks the node holds a full certificate for
-(binding for good). The second comes from the block index: at the start the
+(binding for good). These record only what the node learned; whether each one
+binds is decided at each check from the node's state then (the block index and
+the parent chain). The second comes from the block index: at the start the
 node reads every certified block in the record's window from it, before any
 signing path can run, and while it runs every certificate is noted as it
 arrives, by every route above. Neither source can be lost to the other: an
@@ -1298,22 +1318,26 @@ ends in every case:
 - the daemon answers: the check asks it again at every attempt and never keeps
   a missing answer, so the first verdict ends the wait (replaced: free at once;
   standing: the query and the round);
-- the others decide the height: a certificate for it reaches the member, or the
-  chain moves past it, and the member then signs at the next height, where the
-  entry does not apply;
+- the others decide the height: a certificate for it reaches the member. The
+  chain moving past the height is not enough while the daemon is silent: the
+  producer then also holds the next height above a rival of the block it signed
+  (the share-lock's second arm, which releases only on evidence the daemon has
+  to give);
 - the operator: restores the daemon, or moves the record aside once the heights
   it holds are certified and buried.
 
-The wait never outlasts the daemon's silence, and costs nothing while it lasts:
-a member whose daemon gives no verdict cannot verify any proposal's anchor
-either, so it could not sign at that height anyway. A committee whose members
+The wait never outlasts the daemon's silence, and costs little while it lasts:
+a member whose daemon gives no verdict on an anchor usually cannot verify a
+proposal's anchor either, so it could not sign at that height anyway. The
+exception is a daemon that has reached a proposal's anchor but not the signed
+block's (a higher one); the member then waits for its daemon to catch up. A committee whose members
 all restart in that state resumes as soon as their daemons answer.
 
 A node that does not watch Bitcoin (`-validateanchor=0` on an anchored chain)
 cannot judge an anchor, but it follows a Bitcoin reorganization through its own
 active chain. There a certified block binds while it is on the node's active
-chain (and, if its certificate arrived in the running process, before it
-connects), and binds nothing once the node leaves it; a block signed in the
+chain, and binds nothing otherwise: not before its block connects (a
+certificate alone), and not once the node has left it; a block signed in the
 running process binds as the share-lock always has; anything else known only
 from the disk binds nothing. On a chain without anchors no anchor can be
 replaced, and every entry binds.

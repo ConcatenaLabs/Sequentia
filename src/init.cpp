@@ -256,6 +256,7 @@ void Shutdown(NodeContext& node)
     // the connection manager does.
     PosSigningSetNetwork(nullptr, nullptr);
     PosSigningSetAnchorJudge(nullptr);
+    PosSigningSetIndexJudge(nullptr);
     SetMainchainMoveListener(nullptr);
 
     // Because these depend on each-other, we make sure that neither can be
@@ -1991,6 +1992,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         LOCK(cs_main);
         PosSigningNoteIndexAtStart(chainman);
     }
+    // What a held block binds is read from the block index at each check
+    // (PosIndexStanding): whether it is on the active chain, or failed here
+    // for any reason, including through an ancestor.
+    PosSigningSetIndexJudge([cm = &chainman](const uint256& hash, const uint256& parent) {
+        return PosSigningIndexStanding(*cm, hash, parent);
+    });
 
     // ********************************************************* Step 8: start indexers
     if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {

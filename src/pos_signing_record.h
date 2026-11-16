@@ -39,14 +39,20 @@
 // The same block again is always free, and blocks signed on two Bitcoin
 // branches never refuse each other: that is following Bitcoin, not a fault.
 // A block this node holds a verified full certificate for binds its height for
-// good while its anchor stands, whether or not this member signed it, unless
-// it is invalidated here (then it escapes as above). What binds a height is
-// decided in RunCheck from one map fed by two sources: the record's entries
-// (this member's signatures) and every verified certificate, which comes from
-// the block index (read at the start for the record's window,
-// PosSigningNoteIndexAtStart, then noted at each connect) and from the
-// certificate message, all through PosSigningNoteCertificate. The record drops
-// an entry only once the index on disk carries its block with a verified
+// good, whether or not this member signed it, for as long as this node could
+// still accept it: its block index entry is not failed for any reason, and its
+// anchor stands (on a node that does not watch Bitcoin: while it is on the
+// active chain). A certified block invalid here for a reason other than
+// Bitcoin (an operator's invalidateblock, an invalid ancestor) escapes as
+// above; one the anchor watcher dropped, through its own anchor or an
+// ancestor's, binds nothing. What binds a height is decided in RunCheck, from
+// one map of what this node learned (the record's entries: this member's
+// signatures; and every verified certificate, which comes from the block index
+// read at the start for the record's window, PosSigningNoteIndexAtStart, then
+// from each connect and from the certificate message, all through
+// PosSigningNoteCertificate) and from the node's state read at that moment
+// (the block index, PosSigningSetIndexJudge, and the parent chain). The record
+// drops an entry only once the index on disk carries its block with a verified
 // certificate, so no compaction weakens the check.
 // All of this is local signing policy, never a validity rule.
 //
@@ -162,41 +168,47 @@ void PosSigningParentMoved(int unchanged_height);
 struct PosCertifiedBlock {
     uint256 hash;
     int height{-1};
+    uint256 parent;
     uint32_t anchor_height{0};
     uint256 anchor_hash;
 };
 
-/** How a verified full certificate reached this node. */
+/** How a verified full certificate reached this node (for the log only: what
+ *  the certificate binds is read from the node's state at each check). */
 enum class PosCertRoute {
-    CONNECTED,              //!< its block connected here (ConnectBlock checked the certificate): any block route, RPC or peer
-    CERTIFICATE,            //!< a certificate message, verified (PosVerifyCertificate); the block may not be here yet
-    UPGRADE,                //!< a fuller certificate adopted for a block that connected here
-    INDEX_AT_START,         //!< the block index at the start: connected here once, now off the active chain
-    INDEX_AT_START_ACTIVE,  //!< the block index at the start: on the active chain
-    INDEX_AT_START_INVALID, //!< the block index at the start: invalid here (invalidateblock, or below such a block)
+    CONNECTED,      //!< its block connected here (ConnectBlock checked the certificate): any block route, RPC or peer
+    CERTIFICATE,    //!< a certificate message, verified (PosVerifyCertificate); the block may not be here yet
+    UPGRADE,        //!< a fuller certificate adopted for a block that connected here
+    INDEX_AT_START, //!< the block index at the start: connected here once (valid or failed since)
 };
 const char* PosCertRouteName(PosCertRoute route);
 
 /** The one function by which every verified full certificate reaches the
- *  signing check, whatever its route: the check then holds the block as
- *  certified, which binds its height for as long as its anchor stands (on a
- *  node that does not watch Bitcoin: while it is on the active chain), unless
- *  it is invalidated here. A certificate that has not been verified (a header,
- *  a body not yet connected) is not passed here: binding on one would let any
- *  leader freeze a height with a fake aggregate. Takes the record's lock;
- *  cs_main may be held. */
+ *  signing check, whatever its route. It records only that this node learned
+ *  a verified certificate for this block; whether it binds is decided at each
+ *  check from the node's state (see PosIndexStanding). A certificate that has
+ *  not been verified (a header, a body not yet connected) is not passed here:
+ *  binding on one would let any leader freeze a height with a fake aggregate.
+ *  Takes the record's lock; cs_main may be held. */
 void PosSigningNoteCertificate(const PosCertifiedBlock& block, PosCertRoute route);
 
-/** A certified block left this node's active chain (DisconnectTip). */
-void PosSigningNoteDisconnected(const uint256& block_hash, int height);
-
-/** The operator invalidated these held blocks on this node (invalidateblock,
- *  the block or an ancestor), or revived them (reconsiderblock). A certified
- *  block binds its height for good, wherever its certificate came from, unless
- *  it was invalidated here: invalidating is a recovery step that must still
- *  work, so the member is then released after one round as for any block, and
- *  the escape says in words that it signs a rival of a certified block. */
-void PosSigningNoteInvalidated(const std::vector<uint256>& hashes, bool invalidated);
+/** What this node's block index says of a held block, read at each check.
+ *  Read, never stored: a flag set by an event (a connect, a disconnect, an
+ *  invalidation) is wrong as soon as an event is missed or comes in another
+ *  order, which is how a certificate that arrived after an invalidation, or
+ *  for a body that never connected, kept binding a height the node itself no
+ *  longer supported. */
+enum class PosIndexStanding {
+    UNKNOWN,    //!< neither the block nor its parent is in the index
+    ACTIVE,     //!< on the active chain
+    OFF_ACTIVE, //!< off the active chain, and neither it nor an ancestor is failed (a side block, a header, a certificate only)
+    FAILED,     //!< it or an ancestor is invalid here: invalidateblock, or a consensus failure
+    ORPHANED,   //!< the anchor watcher invalidated it or an ancestor: Bitcoin replaced an anchor at or below it
+};
+//! The block `hash` (whose parent is `parent`, for a block the index does not
+//! hold yet). Takes cs_main; called with no record lock held.
+using PosIndexJudge = std::function<PosIndexStanding(const uint256& hash, const uint256& parent)>;
+void PosSigningSetIndexJudge(PosIndexJudge judge);
 
 /** The answer of the signing check. */
 struct PosSignCheck {
@@ -304,9 +316,10 @@ std::vector<PosSigningEntry> PosSigningRecordEntries();
 /** For getsigningrecord: the genesis hash the record names. */
 uint256 PosSigningRecordChain();
 
-/** For getsigningrecord: each block the check holds, with its state at the
- *  last judgement ("binds", "escaped", "anchor gone", "undecided", "certified",
- *  or "not judged" before the first check). */
+/** For getsigningrecord: each block the check holds, judged now ("certified"
+ *  while it binds for good, "anchor gone", "not judged" on a node that cannot
+ *  judge it) or, while it binds by the escape, as the last check left it
+ *  ("binds", "escaped", "undecided", or "not judged" before the first check). */
 struct PosSigningHeld {
     uint256 hash;
     int height{0};
@@ -315,8 +328,8 @@ struct PosSigningHeld {
     bool from_disk{false};
     bool signed_here{false};  //!< a record entry of this member's signature holds it
     bool certified{false};    //!< this node holds a verified full certificate for it
-    bool on_active{false};
-    bool invalidated{false};
+    bool on_active{false};    //!< on the active chain, read from the block index now
+    bool invalidated{false};  //!< it or an ancestor is invalid here, for any reason, read now
     std::string state;
 };
 std::vector<PosSigningHeld> PosSigningHeldBlocks();

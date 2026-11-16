@@ -4428,7 +4428,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 break;
             case PosGossipAction::Relay:
                 // The signing check: a certificate decides its height.
-                PosSigningNoteCertificate(PosCertifiedBlock{hash, height, header.m_anchor_height, header.m_anchor_hash},
+                PosSigningNoteCertificate(PosCertifiedBlock{hash, height, header.hashPrevBlock, header.m_anchor_height, header.m_anchor_hash},
                                           PosCertRoute::CERTIFICATE);
                 // A fuller certificate for a block we hold: adopt it, which
                 // relays it on (PosCertificateToRelay), and choose again.
