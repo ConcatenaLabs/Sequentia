@@ -177,6 +177,22 @@ the next block's announcement. One whose anchor is still not verifiable (the
 daemon reached the height on another branch) is left aside again until the next
 move.
 
+A proposal in the gossip committee whose anchor is not verifiable is left aside
+in the same way: no member signs it until this node's view of Bitcoin moves.
+Leaving a proposal aside decides only what a member signs, never when its
+rounds run: the collection stays timed from round 0's stamp, counting the
+proposals left aside (see "Rounds and collections" in
+[`04-proof-of-stake.md`](04-proof-of-stake.md)). So members whose views of
+Bitcoin differ for a while keep one schedule, and when no proposal at a height
+can be backed, as after a Bitcoin reorganization that replaced the anchor of
+every proposal there, the collection still runs out on time and restarts. The
+members then propose again on Bitcoin's new branch, once the collection has run
+out. A collection lasts one round per seat of the committee cap, so on the
+testnet, with its cap of 250 seats and 9.45 s rounds, that is about 39.5
+minutes after the collection began, whatever the number of members. The run-out,
+not Bitcoin's next block, ends the silence; making the run-out short is
+tracked in #418.
+
 ### The reorg-following watcher
 
 A background watcher polls the Bitcoin daemon every `anchorpollinterval` seconds

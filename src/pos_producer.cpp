@@ -687,6 +687,9 @@ PosProducer::PosProducer(ChainstateManager& chainman, CTxMemPool& mempool,
     m_byzantine_equivocate = gArgs.GetBoolArg("-posbyzantineequivocate", false);
     m_byzantine_invalid = gArgs.GetBoolArg("-posbyzantineinvalid", false);
     m_byzantine_fake_anchor = std::clamp<int>(gArgs.GetIntArg("-posbyzantinefakeanchor", 0), 0, 1000000);
+    m_byzantine_backdate_s = std::clamp<int64_t>(gArgs.GetIntArg("-posbyzantinebackdate", 0), 0, 1000000000);
+    m_byzantine_stamp_floor_set = gArgs.IsArgSet("-posbyzantinestampfloor");
+    m_byzantine_stamp_floor = std::clamp<int64_t>(gArgs.GetIntArg("-posbyzantinestampfloor", 0), -100000, 100000);
     m_debug_round_skew_ms = gArgs.GetIntArg("-posdebugroundskewms", 0);
     m_debug_share_delay_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posdebugsharedelayms", 0), 0, 10000);
     m_recovery_wait_ms = std::clamp<int64_t>(gArgs.GetIntArg("-posanchorrecoverywait", 30), 0, 3600) * 1000;
@@ -1303,7 +1306,17 @@ std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
     // judged when the block is validated. A proposal whose anchor could not
     // be validated yet (m_anchor_deferred) is left out until this node's view
     // of the parent chain moves.
-    if (r < 0 || m_candidates.empty()) return nullptr;
+    if (r < 0) return nullptr;
+    const std::vector<const RoundCandidate*> ordered = RankedCandidates(/*include_deferred=*/false);
+    if (ordered.empty()) return nullptr;
+    return ordered[r % (int)ordered.size()]->block;
+}
+
+std::vector<const PosProducer::RoundCandidate*> PosProducer::RankedCandidates(bool include_deferred) const
+{
+    // m_gossip_mutex held. The election order BackedForRound describes.
+    std::vector<const RoundCandidate*> out;
+    if (m_candidates.empty()) return out;
 
     const bool exprace = PosExpRaceActive(m_chainparams.GetConsensus(), m_round_height);
     const StakeRegistry& registry = StakeRegistry::GetInstance();
@@ -1318,13 +1331,11 @@ std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
     std::vector<Entry> ordered;
     ordered.reserve(m_candidates.size());
     for (const auto& [leader, cand] : m_candidates) {
-        if (m_anchor_deferred.count(leader)) continue;
+        if (!include_deferred && m_anchor_deferred.count(leader)) continue;
         arith_uint256 score;
         if (exprace) score = PosVrfScoreExp(cand.beta, registry.GetWeight(leader), total_weight);
         ordered.push_back({&cand, score});
     }
-    if (ordered.empty()) return nullptr;
-    r %= (int)ordered.size();
     std::sort(ordered.begin(), ordered.end(),
               [exprace, &ranked_anchor](const Entry& a, const Entry& b) {
                   const int64_t anchor_a = ranked_anchor(a.cand), anchor_b = ranked_anchor(b.cand);
@@ -1332,7 +1343,9 @@ std::shared_ptr<const CBlock> PosProducer::BackedForRound(int r) const
                   if (exprace) return a.score < b.score;   // exp-race: lowest weighted score
                   return a.cand->beta < b.cand->beta;       // legacy: lowest raw VRF
               });
-    return ordered[r].cand->block;
+    out.reserve(ordered.size());
+    for (const Entry& e : ordered) out.push_back(e.cand);
+    return out;
 }
 
 int64_t PosProducer::WindowMs() const
@@ -1361,31 +1374,42 @@ int PosProducer::RoundsPerCollection() const
 std::optional<int64_t> PosProducer::RoundsExhaustedAtMs(int height) const
 {
     // m_gossip_mutex held.
-    if (m_round_height != height || m_candidates.empty()) return std::nullopt;
-    return *ScheduleOriginMs() + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
+    if (m_round_height != height) return std::nullopt;
+    const std::optional<int64_t> origin = ScheduleOriginMs();
+    if (!origin) return std::nullopt; // no candidate at all: nothing is scheduled yet
+    return *origin + WindowMs() + (int64_t)RoundsPerCollection() * RoundMs();
 }
 
 std::optional<int64_t> PosProducer::ScheduleOriginMs() const
 {
-    // m_gossip_mutex held.
-    const std::shared_ptr<const CBlock> round0 = BackedForRound(0);
-    if (!round0) {
-        // Every candidate is left aside (its anchor not verifiable on this
-        // node's view of Bitcoin, as after a Bitcoin reorganization that
-        // replaced the anchors of all of them) or excluded. No round can back
-        // anything, but the collection must still run out and restart, or this
-        // node would never propose again at this height: time it from the
-        // earliest candidate's stamp.
-        std::optional<int64_t> earliest;
-        for (const auto& [leader, cand] : m_candidates) {
-            if (!earliest || cand.origin_ms < *earliest) earliest = cand.origin_ms;
-        }
-        return earliest;
-    }
-    for (const auto& [leader, cand] : m_candidates) {
-        if (cand.block == round0) return cand.origin_ms;
-    }
-    return (int64_t)round0->nTime * 1000; // unreachable: round 0 is a candidate
+    // m_gossip_mutex held. The schedule starts at the stamp of the first
+    // candidate in the election order, counting the candidates this node has
+    // left aside because it cannot verify their anchor on its view of Bitcoin.
+    //
+    // Leaving a proposal aside is a judgement of this node's view of the
+    // parent chain, and members' views differ for a while around a Bitcoin
+    // reorganization: one member still backs round 0's candidate while
+    // another has left it aside. If the schedule followed only what this node
+    // can back, the two would time the collection from different stamps; the
+    // later one would then take the earlier one's timely re-proposal, which
+    // arrives before its own collection has run out, for a second block from
+    // the same leader and exclude an honest member. So leaving a proposal
+    // aside decides only what this node signs, never when its rounds run: a
+    // member keeps timing the collection from round 0's candidate after it
+    // leaves that candidate aside, and a collection whose every candidate is
+    // left aside still runs out on time and restarts, so the members propose
+    // again on Bitcoin's chain as it then is.
+    //
+    // An excluded leader's proposal (it equivocated, or its block is invalid)
+    // is dropped from the candidates and the schedule moves to the next one.
+    // Every member makes that move alike: the evidence of an equivocation is
+    // relayed to all of them, and an invalid block is invalid everywhere.
+    // Keeping the excluded proposal's stamp instead would let an equivocating
+    // round-0 leader split the schedule by the gap between its two blocks'
+    // stamps, as each member would keep whichever block reached it first.
+    const std::vector<const RoundCandidate*> ordered = RankedCandidates(/*include_deferred=*/true);
+    if (ordered.empty()) return std::nullopt; // no candidate at all: nothing is scheduled yet
+    return ordered.front()->origin_ms;
 }
 
 std::vector<uint256> PosProducer::RestartCollection(int height, int64_t now)
@@ -1425,6 +1449,20 @@ std::vector<uint256> PosProducer::RestartCollection(int height, int64_t now)
     return PosSigningRestartGrace(height, now);
 }
 
+//! The earliest stamp consensus allows a proposal of a leader whose election
+//! slot is `slot`: its slot gate after the parent, the median time past + 1,
+//! and the minimum spacing where it is active.
+static int64_t GossipStampFloor(const Consensus::Params& cparams, const CBlockIndex* tip,
+                                int64_t median_time_past, int height, uint64_t slot)
+{
+    int64_t floor = std::max<int64_t>((int64_t)tip->nTime + PosSlotGateSeconds(cparams, height, slot),
+                                      median_time_past + 1);
+    if (cparams.PosBlockSpacingActiveAt(height)) {
+        floor = std::max<int64_t>(floor, (int64_t)tip->nTime + cparams.pos_block_spacing);
+    }
+    return floor;
+}
+
 bool PosProducer::ProposeGossip(const CKey& leader_key)
 {
     int height = 0;
@@ -1432,6 +1470,54 @@ bool PosProducer::ProposeGossip(const CKey& leader_key)
     if (!block) {
         LogPrint(BCLog::VALIDATION, "PoS gossip: failed to build a proposal\n");
         return true;
+    }
+    // The leader's own election slot at this height, for the log (a test reads
+    // it to tell which member ranked first) and for -posbyzantinestampfloor.
+    CBlockIndex* parent_idx;
+    {
+        LOCK(cs_main);
+        parent_idx = m_chainman.m_blockman.LookupBlockIndex(block->hashPrevBlock);
+    }
+    uint64_t own_slot = 0;
+    if (parent_idx) {
+        const StakeRegistry& reg = StakeRegistry::GetInstance();
+        const uint256 seed = PosSeedForChild(parent_idx);
+        auto proof = ExtractPosVrfProof(*block);
+        uint256 lbeta;
+        const uint64_t weight = reg.GetWeight(leader_key.GetPubKey());
+        if (proof && weight > 0 && VrfVerify(leader_key.GetPubKey(), Span<const unsigned char>(seed.begin(), 32), *proof, lbeta)) {
+            const Consensus::Params& cparams = m_chainparams.GetConsensus();
+            const uint64_t total_weight = PosTotalWeight(reg);
+            own_slot = PosExpRaceActive(cparams, height) ? PosVrfSlotExp(lbeta, weight, total_weight)
+                                                          : PosVrfSlot(lbeta, weight, total_weight);
+        }
+    }
+    if (m_byzantine_stamp_floor_set && parent_idx) {
+        // Fault injection: a stamp exactly `m_byzantine_stamp_floor` seconds from
+        // the earliest time consensus allows this proposal (-1 is one second
+        // below it, 0 is at it).
+        const int64_t mtp = WITH_LOCK(cs_main, return parent_idx->GetMedianTimePast());
+        const int64_t floor = GossipStampFloor(m_chainparams.GetConsensus(), parent_idx, mtp, height, own_slot);
+        block->nTime = (uint32_t)(floor + m_byzantine_stamp_floor);
+        LogPrintf("PoS gossip: BYZANTINE stamping proposal at height %d with time %d, %d s from the consensus floor %d (election slot %d)\n",
+                  height, (int64_t)block->nTime, m_byzantine_stamp_floor, floor, own_slot);
+    }
+    if (m_byzantine_backdate_s > 0) {
+        // Fault injection: a stamp earlier than consensus allows. Cheap checks
+        // pass (the VRF proof does not cover the stamp), so only the stamp
+        // floor in OnProposal keeps it out of the round schedule.
+        CBlockIndex* parent;
+        {
+            LOCK(cs_main);
+            parent = m_chainman.m_blockman.LookupBlockIndex(block->hashPrevBlock);
+        }
+        if (parent) {
+            // A second earlier on every proposal, so a re-proposal is never a
+            // copy that peers drop as already seen.
+            block->nTime = (uint32_t)std::max<int64_t>(1, (int64_t)parent->nTime - m_byzantine_backdate_s - (m_byzantine_backdates++ % 3600));
+            LogPrintf("PoS gossip: BYZANTINE stamping proposal at height %d with time %d, %d s before its parent (election slot %d)\n",
+                      height, (int64_t)block->nTime, m_byzantine_backdate_s, own_slot);
+        }
     }
     // The leader authorises its block by signing the (member-independent) hash,
     // and ships that signature inside the proposal — staged in the otherwise-empty
@@ -1535,7 +1621,7 @@ bool PosProducer::ProposeGossip(const CKey& leader_key)
         }
     }
 
-    LogPrintf("PoS gossip: proposing block %s at height %d\n", hash.GetHex(), height);
+    LogPrintf("PoS gossip: proposing block %s at height %d (election slot %d)\n", hash.GetHex(), height, own_slot);
     FloodCompactProposal(*block);
     return true;
 }
@@ -2136,9 +2222,26 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
                                   : PosVrfSlot(lbeta, weight, total_weight);
         int64_t consensus_min = (int64_t)tip->nTime + PosSlotGateSeconds(cparams, height, slot);
         consensus_min = std::max<int64_t>(consensus_min, node::PosEarliestBlockTime(cparams, tip));
+        int64_t median_time_past;
         {
             LOCK(cs_main);
-            consensus_min = std::max<int64_t>(consensus_min, tip->GetMedianTimePast() + 1);
+            median_time_past = tip->GetMedianTimePast();
+        }
+        consensus_min = std::max<int64_t>(consensus_min, median_time_past + 1);
+        // The other way, consensus alone bounds the stamp: no valid block is
+        // stamped before its slot opens, the median time past, or the minimum
+        // spacing after its parent. The round schedule starts at round 0's
+        // stamp, counting a proposal this member has left aside for its anchor
+        // and so never validates, so an earlier stamp would let such a
+        // proposal start the schedule in the past and run the collection out
+        // at once, at every collection it ranks first in. Below the floor,
+        // the proposal is invalid wherever it is judged: not backed, not
+        // relayed. This is exactly the consensus floor, never stricter.
+        const int64_t stamp_floor = GossipStampFloor(cparams, tip, median_time_past, height, slot);
+        if (block->GetBlockTime() < stamp_floor) {
+            LogPrintf("PoS gossip: not backing proposal %s at height %d: stamped %d s before the earliest time consensus allows\n",
+                      hash.GetHex(), height, stamp_floor - block->GetBlockTime());
+            return PosGossipAction::Ignore;
         }
         const int64_t now = GetTime<std::chrono::seconds>().count();
         if (PosProposalTooFarAhead(block->GetBlockTime(), consensus_min, now,

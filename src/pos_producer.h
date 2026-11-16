@@ -263,8 +263,10 @@ private:
     //! starting over from the first once every candidate has had a round;
     //! nullptr if no candidate is known. m_gossip_mutex held.
     std::shared_ptr<const CBlock> BackedForRound(int r) const;
-    //! Where the round schedule starts (ms): round 0's origin_ms; nullopt
-    //! with no candidates. m_gossip_mutex held.
+    //! Where the round schedule starts (ms): the origin_ms of the first
+    //! candidate in the election order, counting candidates left aside for
+    //! their anchor, so members whose views of Bitcoin differ keep one
+    //! schedule; nullopt with no candidates. m_gossip_mutex held.
     std::optional<int64_t> ScheduleOriginMs() const;
     //! Proposal collection window and round length (ms): local liveness timings
     //! scaled with the committee size, or the -poswindowms/-posroundms overrides.
@@ -331,6 +333,13 @@ private:
     //! proposal whose anchor claims this many parent-chain blocks above the
     //! real one, at a hash the parent chain does not have. 0 = off.
     int m_byzantine_fake_anchor{0};
+    //! SEQUENTIA TEST ONLY (-posbyzantinebackdate): when elected, stamp the
+    //! proposal this many seconds before its parent's stamp, earlier than
+    //! consensus allows. 0 = off.
+    int64_t m_byzantine_backdate_s{0};
+    bool m_byzantine_stamp_floor_set{false};
+    int64_t m_byzantine_stamp_floor{0};
+    int64_t m_byzantine_backdates{0};
     //! Regtest only (-posdebugroundskewms): offset added to this node's round
     //! scheduler clock, to study how inter-node clock skew affects round
     //! agreement. Always 0 on a real node.
@@ -349,6 +358,10 @@ private:
         //! further ahead (PosRoundOriginMs).
         int64_t origin_ms{0};
     };
+    //! The candidates in election order (freshest anchor, then the leader's
+    //! election key), leaving out those left aside for their anchor unless
+    //! `include_deferred`. m_gossip_mutex held.
+    std::vector<const RoundCandidate*> RankedCandidates(bool include_deferred) const;
 
     // Gossip round state (one round per height). Every eligible member proposes,
     // so all nodes share the candidate set; the round-robin leader for round r is
