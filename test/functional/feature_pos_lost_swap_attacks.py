@@ -19,7 +19,12 @@ Cases (LOST_CASES, one per process):
         payable and names the claim; a lock funded from an ordinary coin is
         payable;
   big   two claims lost for good in one block, the first too large to record
-        even alone: it is skipped and logged, and the second is recorded.
+        even alone: it is skipped and logged, and the second is recorded;
+  cap   a sale lock funded through 1,000 ordinary transactions from the
+        seller's own payment-proof claim: the ancestry walk runs out of budget
+        before the claim, and the lock is not payable, for that reason, in
+        checklockancestry and in checklock; the one-call check calls an
+        ordinary, final lock payable.
 """
 
 import json
@@ -484,6 +489,89 @@ class LostSwapAttacksTest(LostSwapTest):
         assert any(r[4] for r in recorded), "the small claim was not recorded"
         assert not any(r[3] for r in recorded), "the big claim was recorded"
         assert never, "no 'can never be recorded' line for the big claim"
+
+    # ----------------------------------------------------------------- cap
+    def case_cap(self):
+        self.log.info("(cap) a failing ancestor hidden behind 1,000 ordinary transactions")
+        self.wallets()
+        b = self.btc()
+        n1, a = self.nodes[1], self.nodes[SELLER]
+        b.createwallet("sself")
+        sself = self.btc("sself")
+        self.bbuyer.sendtoaddress(sself.getnewaddress(), Decimal("1"))
+        b.generatetoaddress(1, self.bbuyer.getnewaddress())
+        h0 = b.getblockcount()
+        lock0 = self.make_lock(10_000, h0, h0 + 50, h0)
+        self.send_lock(lock0)
+        self.produce(1, ALL_KEYS, txs_must=[lock0["txid"]])
+        for _ in range(bp.FLOOR_DEPTH + 1):
+            self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        # The seller pays itself on Bitcoin and claims its own lock: a claim it
+        # can make fail for good by double-spending that payment.
+        sp = sself.sendtoaddress(lock0["addr"], Decimal("0.0001"))
+        p_hash = b.generatetoaddress(1, self.bbuyer.getnewaddress())[0]
+        self.anchored_block(b.getblockcount())
+        seller_spk = a.getaddressinfo(a.getnewaddress())["scriptPubKey"]
+        lock0["buyer_spk"] = bytes.fromhex(seller_spk)
+        pr = self.proof_for(sp, self.coin_anchor(lock0["txid"]), blockhash=p_hash)
+        claim = self.claim(lock0, pr["record"], self.vout_paying(sp, lock0["addr"], p_hash), out_spk=lock0["buyer_spk"])
+        claim_id = claim.rehash()
+        n1.sendrawtransaction(claim.serialize().hex())
+        self.produce(1, ALL_KEYS, txs_must=[claim_id])
+        p_out = [o for o in n1.decoderawtransaction(claim.serialize().hex())["vout"] if o["scriptPubKey"]["hex"] == seller_spk][0]
+        # 1,000 ordinary hops, 20 per certified block.
+        fee = Decimal("0.00001")
+        prev_id, prev_n = claim_id, p_out["n"]
+        value = Decimal(str(p_out["value"]))
+        prev = {"txid": prev_id, "vout": prev_n, "scriptPubKey": seller_spk, "amount": value}
+        hops, batch = 1000, []
+        for k in range(hops):
+            addr = a.getnewaddress()
+            spk = a.getaddressinfo(addr)["scriptPubKey"]
+            raw = a.createrawtransaction([{"txid": prev_id, "vout": prev_n}], [{addr: value - fee}, {"fee": fee}])
+            signed = a.signrawtransactionwithwallet(raw, [prev])
+            assert signed["complete"]
+            prev_id = a.sendrawtransaction(signed["hex"])
+            batch.append(prev_id)
+            prev_n = 0
+            value -= fee
+            prev = {"txid": prev_id, "vout": prev_n, "scriptPubKey": spk, "amount": value}
+            if (k + 1) % 20 == 0:
+                self.produce(1, ALL_KEYS, txs_must=batch)
+                batch = []
+        lock = self.make_lock(50_000, h0, h0 + 50, h0 + 1000)
+        lock_addr = program_to_witness(1, lock["tap"].scriptPubKey[2:])
+        raw = a.createrawtransaction([{"txid": prev_id, "vout": prev_n}], [{lock_addr: value - fee}, {"fee": fee}])
+        signed = a.signrawtransactionwithwallet(raw, [prev])
+        assert signed["complete"]
+        lock_id = n1.sendrawtransaction(signed["hex"])
+        final = self.produce(1, ALL_KEYS, txs_must=[lock_id])
+        self.sync_tips(range(N))
+        self.record("cap", "lock", "%s at height %d, funded through %d ordinary transactions from the seller's own claim %s" %
+                    (lock_id[:12], final["height"], hops, claim_id[:12]))
+        chk = n1.checklockancestry(lock_id)
+        self.record("cap", "checklockancestry(lock)", chk)
+        assert chk["payable"] is False, "the ancestry walk stopped at its budget and called the lock payable: %s" % chk
+        assert_equal(chk["complete"], False)
+        assert "larger than this check examines" in chk["reason"], chk
+        one = n1.checklock(lock_id)
+        self.record("cap", "checklock(lock)", one)
+        assert_equal(one["payable"], False)
+        assert_equal(one["ancestry_complete"], False)
+        assert any("larger than this check examines" in r for r in one["reasons"]), one
+        # The one-call check on an ordinary, final lock: payable.
+        ordinary = a.sendtoaddress(address=a.getnewaddress(), amount=Decimal("0.5"), fee_asset_label="bitcoin")
+        o = self.produce(1, ALL_KEYS, txs_must=[ordinary])
+        for _ in range(2):
+            self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        self.wait_until(lambda: n1.checklock(ordinary)["payable"], timeout=120)
+        ctl = n1.checklock(ordinary)
+        self.record("cap", "checklock(ordinary lock) (control)", ctl)
+        assert_equal(ctl["reasons"], [])
+        assert ctl["final"] and ctl["bitcoin_uncontested"] and ctl["ancestry_payable"] and ctl["ancestry_complete"]
+        self.record("cap", "outcome", "the padded lock is not payable (budget spent before the claim); the ordinary lock at height %d is" % o["height"])
 
     def run_test(self):
         try:
