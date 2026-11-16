@@ -83,6 +83,8 @@ int64_t GetLastPosFinalForkRejectionTime()
 namespace {
 
 Mutex g_anchor_mutex;
+//! The listener for parent tip moves (SetMainchainMoveListener).
+std::function<void(int)> g_mainchain_move_listener GUARDED_BY(g_anchor_mutex);
 //! Checkpoints observed on the parent chain, one entry per COMMITMENT: keyed by
 //! the Sequentia block and height it names and the parent block carrying it.
 //! Keeping only the earliest commitment per Sequentia block let anyone posting
@@ -133,6 +135,12 @@ std::set<std::pair<uint32_t, uint256>> g_anchor_stale_cache GUARDED_BY(g_anchor_
 //! unknown anchor costs one RPC per minute rather than one per header, while
 //! a block the daemon merely had not seen yet is re-asked about soon.
 std::map<std::pair<uint32_t, uint256>, int64_t> g_anchor_unknown GUARDED_BY(g_anchor_mutex);
+//! How many times DropAnchorCachesAbove has run. A caller reads it before it
+//! asks the daemon and writes the answer into the caches only if it has not
+//! moved: an answer given before a parent reorganization and received after
+//! the watcher dropped the caches for it would otherwise be stored as current
+//! and outlive that reorganization until the next one at or below it.
+uint64_t g_anchor_cache_generation GUARDED_BY(g_anchor_mutex){0};
 constexpr int64_t ANCHOR_UNKNOWN_TTL_SECONDS = 60;
 constexpr size_t ANCHOR_UNKNOWN_MAX = 10000;
 //! Ceiling on the OK cache. It is no longer emptied every parent tip change, so
@@ -385,9 +393,11 @@ bool GetMainchainHeaderInfo(const uint256& hash, MainchainHeaderInfo& out)
 //! tip, for the cost of ONE header RPC no matter how many blocks were appended.
 //! Otherwise the parent reorganized, and Y is the fork point: walk back from the
 //! old tip until a block that is on the best chain again, one RPC per block of
-//! reorg depth.
-int MainchainUnchangedHeight(const uint256& old_tip)
+//! reorg depth. `extension`, when given, is set to whether the move was a plain
+//! extension.
+int MainchainUnchangedHeight(const uint256& old_tip, bool* extension)
 {
+    if (extension) *extension = false;
     // First tick after startup (or after a failed classification): there is no
     // old tip to reason from. The caches are re-derived from the parent daemon,
     // which is exactly right — nothing about Bitcoin should be believed across
@@ -408,6 +418,7 @@ int MainchainUnchangedHeight(const uint256& old_tip)
             return -1;
         }
         if (info.on_best_chain) {
+            if (extension) *extension = depth == 0;
             if (depth > 0) {
                 LogPrintf("Anchor: parent chain reorganized %d block(s) deep, forking at height %d; anchor verdicts at or below that height are unaffected and are kept, everything above is re-checked\n",
                           depth, info.height);
@@ -428,6 +439,7 @@ int MainchainUnchangedHeight(const uint256& old_tip)
 //! fallback for the moves that could not be classified.
 void DropAnchorCachesAbove(int unchanged_height) EXCLUSIVE_LOCKS_REQUIRED(g_anchor_mutex)
 {
+    ++g_anchor_cache_generation;
     // The daemon may have learned any block at all: forget every "unknown".
     g_anchor_unknown.clear();
     if (unchanged_height < 0) {
@@ -669,11 +681,21 @@ PosReconcileStatus GetPosReconcileStatus()
     return g_reconcile_status;
 }
 
-//! Record a verdict, honouring the cache ceiling.
-static void CacheAnchorVerdict(uint32_t height, const uint256& hash, AnchorCheckResult res)
+//! The cache generation to pass to CacheAnchorVerdict, read before asking.
+static uint64_t AnchorCacheGeneration() EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
+{
+    LOCK(g_anchor_mutex);
+    return g_anchor_cache_generation;
+}
+
+//! Record a verdict the daemon gave to a question asked at cache generation
+//! `generation`, honouring the cache ceiling. Dropped if the caches were
+//! dropped since (g_anchor_cache_generation).
+static void CacheAnchorVerdict(uint32_t height, const uint256& hash, AnchorCheckResult res, uint64_t generation)
     EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
 {
     LOCK(g_anchor_mutex);
+    if (generation != g_anchor_cache_generation) return;
     if (res == AnchorCheckResult::OK) {
         if (g_anchor_ok_cache.size() < ANCHOR_OK_CACHE_MAX) {
             g_anchor_ok_cache.emplace(height, hash);
@@ -748,6 +770,7 @@ void PrefetchAnchorVerdicts(const std::vector<std::pair<uint32_t, uint256>>& ref
         }
     }
     if (want.size() < 2) return;   // one question does not need a batch
+    const uint64_t generation = AnchorCacheGeneration();
 
     size_t done = 0;
     for (size_t i = 0; i < want.size(); i += BATCH) {
@@ -764,7 +787,7 @@ void PrefetchAnchorVerdicts(const std::vector<std::pair<uint32_t, uint256>>& ref
             const std::vector<UniValue> replies = CallMainChainRPCBatch("getblockheader", params_list);
             for (size_t k = 0; k < n; ++k) {
                 CacheAnchorVerdict(want[i + k].first, want[i + k].second,
-                                   InterpretAnchorHeaderReply(replies[k], want[i + k].first));
+                                   InterpretAnchorHeaderReply(replies[k], want[i + k].first), generation);
             }
             done += n;
         } catch (const std::exception& e) {
@@ -777,10 +800,18 @@ void PrefetchAnchorVerdicts(const std::vector<std::pair<uint32_t, uint256>>& ref
               (unsigned)done, (unsigned)((done + BATCH - 1) / BATCH));
 }
 
+void SetMainchainMoveListener(std::function<void(int)> listener)
+{
+    LOCK(g_anchor_mutex);
+    g_mainchain_move_listener = std::move(listener);
+}
+
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
 {
+    uint64_t generation;
     {
         LOCK(g_anchor_mutex);
+        generation = g_anchor_cache_generation;
         if (g_anchor_ok_cache.count({height, hash})) return AnchorCheckResult::OK;
         // Negative cache: a definitively-off-best-chain anchor stays off until a
         // parent reorganization forking below it puts it back on the best chain,
@@ -805,6 +836,7 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
             // against a lagging or freshly started daemon).
             if (!MainchainSyncedTo(height)) return AnchorCheckResult::NO_CONNECTION;
             LOCK(g_anchor_mutex);
+            if (generation != g_anchor_cache_generation) return res; // asked before a drop
             if (g_anchor_unknown.size() >= ANCHOR_UNKNOWN_MAX) g_anchor_unknown.clear();
             g_anchor_unknown[{height, hash}] = GetTime();
             return res;
@@ -813,10 +845,10 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
             // Memoize a DEFINITIVE off-best-chain verdict so the every-tick
             // recovery loop does not re-ask about the same orphaned anchor for
             // as long as the parent chain leaves it orphaned.
-            CacheAnchorVerdict(height, hash, res);
+            CacheAnchorVerdict(height, hash, res, generation);
             return res;
         }
-        CacheAnchorVerdict(height, hash, AnchorCheckResult::OK);
+        CacheAnchorVerdict(height, hash, AnchorCheckResult::OK, generation);
         return AnchorCheckResult::OK;
     } catch (const CConnectionFailed&) {
         LogPrintf("WARNING: lost connection to mainchain daemon while checking anchor %s\n", hash.ToString());
@@ -827,6 +859,80 @@ AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash)
         NoteMainchainUnreachable();
         return AnchorCheckResult::NO_CONNECTION;
     }
+}
+
+//! Until when (GetTimeMillis) CheckMainchainAnchorsFresh answers nothing
+//! without asking: the daemon gave no whole reply by its last deadline.
+static std::atomic<int64_t> g_fresh_silent_until_ms{0};
+
+std::vector<AnchorCheckResult> CheckMainchainAnchorsFresh(const std::vector<std::pair<uint32_t, uint256>>& anchors,
+                                                          int64_t deadline_ms)
+{
+    std::vector<AnchorCheckResult> out(anchors.size(), AnchorCheckResult::NO_CONNECTION);
+    // Each anchor asked once: the slot of its first mention.
+    std::map<std::pair<uint32_t, uint256>, size_t> ask;
+    uint64_t generation;
+    {
+        LOCK(g_anchor_mutex);
+        generation = g_anchor_cache_generation;
+        for (size_t i = 0; i < anchors.size(); ++i) {
+            if (g_anchor_ok_cache.count(anchors[i])) {
+                out[i] = AnchorCheckResult::OK;
+            } else {
+                ask.emplace(anchors[i], ask.size());
+            }
+        }
+    }
+    if (ask.empty()) return out;
+    const int64_t start = GetTimeMillis();
+    if (start < g_fresh_silent_until_ms.load()) return out;
+    std::vector<std::pair<std::string, UniValue>> calls;
+    calls.emplace_back("getblockchaininfo", UniValue(UniValue::VARR));
+    calls.resize(1 + ask.size());
+    for (const auto& [anchor, slot] : ask) {
+        UniValue params(UniValue::VARR);
+        params.push_back(anchor.second.GetHex());
+        calls[1 + slot] = {"getblockheader", params};
+    }
+    std::vector<UniValue> replies;
+    try {
+        replies = CallMainChainRPCCalls(calls, deadline_ms);
+    } catch (const std::exception& e) {
+        g_fresh_silent_until_ms = GetTimeMillis() + deadline_ms;
+        LogPrintf("WARNING: the parent chain daemon gave no verdict on %u anchor(s) within %d ms (%s); undecided\n",
+                  (unsigned)ask.size(), (int)deadline_ms, e.what());
+        return out;
+    }
+    // The daemon's sync, read in the same reply: whether "not found" says
+    // anything (MainchainSyncedTo, from this answer rather than a snapshot).
+    int synced_blocks = -1;
+    {
+        const UniValue result = find_value(replies[0], "result");
+        if (find_value(replies[0], "error").isNull() && result.isObject()) {
+            const UniValue ibd = find_value(result.get_obj(), "initialblockdownload");
+            const UniValue count = find_value(result.get_obj(), "blocks");
+            if (ibd.isBool() && !ibd.get_bool() && count.isNum()) synced_blocks = count.get_int();
+        }
+    }
+    std::map<std::pair<uint32_t, uint256>, AnchorCheckResult> answer;
+    for (const auto& [anchor, slot] : ask) {
+        AnchorCheckResult res = InterpretAnchorHeaderReply(replies[1 + slot], anchor.first);
+        if (res == AnchorCheckResult::NOT_FOUND && (synced_blocks < 0 || (int64_t)anchor.first > synced_blocks)) {
+            // Unknown to a daemon still syncing, or one whose best chain has
+            // not reached that height: it may be a Bitcoin block the daemon
+            // has not received yet, so no verdict.
+            res = AnchorCheckResult::NO_CONNECTION;
+        }
+        if (res == AnchorCheckResult::OK || res == AnchorCheckResult::STALE || res == AnchorCheckResult::HEIGHT_MISMATCH) {
+            CacheAnchorVerdict(anchor.first, anchor.second, res, generation);
+        }
+        answer[anchor] = res;
+    }
+    for (size_t i = 0; i < anchors.size(); ++i) {
+        if (out[i] == AnchorCheckResult::OK) continue;
+        out[i] = answer[anchors[i]];
+    }
+    return out;
 }
 
 int AnchorUncontestedHeight(int active_tip_height, int window,
@@ -963,6 +1069,21 @@ void SetAnchorRecoveryStateForTesting(const std::set<uint256>& invalidated,
     LOCK(g_anchor_mutex);
     g_anchor_invalidated = invalidated;
     g_anchor_stale_cache = stale;
+}
+
+bool CacheAnchorOkForTesting(uint32_t height, const uint256& hash, const std::function<void()>& meanwhile)
+{
+    const uint64_t generation = AnchorCacheGeneration();
+    meanwhile();
+    CacheAnchorVerdict(height, hash, AnchorCheckResult::OK, generation);
+    LOCK(g_anchor_mutex);
+    return g_anchor_ok_cache.erase({height, hash}) > 0;
+}
+
+void DropAnchorCachesForTesting(int unchanged_height)
+{
+    LOCK(g_anchor_mutex);
+    DropAnchorCachesAbove(unchanged_height);
 }
 
 std::optional<uint256> AnchorCertifiedSiblingPending(ChainstateManager& chainman,
@@ -1329,10 +1450,18 @@ void AnchorWatchTask(ChainstateManager& chainman)
         //
         // The RPC is issued with no lock held: this file never calls the parent
         // daemon while holding g_anchor_mutex (or cs_main).
-        const int unchanged_height = MainchainUnchangedHeight(old_tip);
-        LOCK(g_anchor_mutex);
-        g_last_mainchain_tip = best;
-        DropAnchorCachesAbove(unchanged_height);
+        bool extension = false;
+        const int unchanged_height = MainchainUnchangedHeight(old_tip, &extension);
+        std::function<void(int)> listener;
+        {
+            LOCK(g_anchor_mutex);
+            g_last_mainchain_tip = best;
+            DropAnchorCachesAbove(unchanged_height);
+            listener = g_mainchain_move_listener;
+        }
+        // A plain extension replaced nothing this watcher has seen, even an
+        // anchor newer than its last poll: no escape is void.
+        if (listener && !extension) listener(unchanged_height);
     }
     if (tip_changed || answered_again) {
         // The daemon moved, or answers again: the next check of its sync must

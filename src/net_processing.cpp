@@ -19,6 +19,7 @@
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <pos_producer.h>
+#include <pos_signing_record.h>
 #include <node/blockstorage.h>
 #include <policy/fees.h>
 #include <policy/policy.h>
@@ -4426,6 +4427,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 Misbehaving(pfrom.GetId(), 10, "invalid poscert");
                 break;
             case PosGossipAction::Relay:
+                // The signing check: a certificate decides its height.
+                PosSigningNoteCertificate(PosCertifiedBlock{hash, height, header.hashPrevBlock, header.m_anchor_height, header.m_anchor_hash},
+                                          PosCertRoute::CERTIFICATE);
                 // A fuller certificate for a block we hold: adopt it, which
                 // relays it on (PosCertificateToRelay), and choose again.
                 if (PosUpgradeCertificate(m_chainman, header)) {

@@ -45,7 +45,7 @@ from test_framework.address import byte_to_base58
 from test_framework.key import ECKey
 from test_framework.p2p import MESSAGEMAP, P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, get_auth_cookie, get_datadir_path, p2p_port, rpc_port
+from test_framework.util import assert_equal, get_auth_cookie, get_datadir_path, p2p_port, pos_sign_after_share_lock, rpc_port
 
 PARENT_BLOCK_SECONDS = 600
 PARENT_WARMUP_BLOCKS = 12
@@ -218,7 +218,9 @@ class PosStallCertUpgradeTest(BitcoinTestFramework):
         B, S = b["hash"], s["hash"]
         assert_equal((b["countersignatures"], s["countersignatures"]), (3, 2))
         assert_equal(z.getbestblockhash(), parent)
-        full = z.recertifyposblock(block_s2, leader, all_keys)
+        # S's rivals at this height (every other candidate, invalidated here)
+        # hold the leader's keys for one grace round: wait it out.
+        full = pos_sign_after_share_lock(z.recertifyposblock, block_s2, leader, all_keys)
         assert_equal(full["hash"], S)
         assert_equal(full["countersignatures"], 4)
         block_s4 = full["hex"]

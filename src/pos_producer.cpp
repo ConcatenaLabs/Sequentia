@@ -17,6 +17,7 @@
 #include <netmessagemaker.h>
 #include <node/miner.h>
 #include <pos.h>
+#include <pos_signing_record.h>
 #include <primitives/block.h>
 #include <protocol.h>
 #include <random.h>
@@ -136,6 +137,12 @@ int PosRecertifyBlock(ChainstateManager& chainman, CBlock& block, const CKey& le
     const StakeRegistry& reg = StakeRegistry::GetInstance();
     const std::set<CPubKey> committee = PosPublicCommitteeSetAt(reg, seed, height);
     const uint256 hash = block.GetHash();
+    // The signing gate (pos_signing_record.h): checked before any key signs.
+    PosSigningGate gate(PosSigningEntryFor(PosSignKind::RECERTIFY, block, height, {leader_key.GetPubKey()}), GetTimeMillis());
+    if (!gate.Allowed()) {
+        error = gate.Check().why;
+        return -1;
+    }
     std::set<CPubKey> signers;
     std::vector<std::vector<unsigned char>> shares;
     for (const CKey& key : member_keys) {
@@ -162,6 +169,11 @@ int PosRecertifyBlock(ChainstateManager& chainman, CBlock& block, const CKey& le
         return -1;
     }
     block.proof.solution = BuildPublicCertificate(leader_sig, *agg, reg, seed, height, signers);
+    gate.Entry().signers.insert(gate.Entry().signers.end(), signers.begin(), signers.end());
+    if (!gate.Record()) {
+        error = POS_SIGNING_RECORD_WRITE_ERROR;
+        return -1;
+    }
     return PublicSeatsOf(reg, seed, height, signers);
 }
 
@@ -487,6 +499,18 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         keystore.AddKey(ckey);
     }
 
+    // The signing gate (pos_signing_record.h): the signing check before any
+    // key signs, and the record durable before the block leaves this function,
+    // or nothing leaves.
+    std::vector<CPubKey> signed_by{pubkey};
+    signed_by.insert(signed_by.end(), vrf_committee.begin(), vrf_committee.end());
+    PosSigningGate gate(PosSigningEntryFor(PosSignKind::CERTIFIED, block, tip->nHeight + 1, std::move(signed_by)), GetTimeMillis());
+    if (!gate.Allowed()) {
+        error = gate.Check().why;
+        err_kind = PosProduceError::MISC;
+        return false;
+    }
+
     // Sign the block: the same three challenge forms generateposblock handles —
     // aggregate-committee (leader ECDSA + one MuSig2 aggregate), leader-only
     // (generic P2PK), or script-multisig committee.
@@ -605,6 +629,12 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
         return false;
     }
 
+    if (!gate.Record()) {
+        error = POS_SIGNING_RECORD_WRITE_ERROR;
+        err_kind = PosProduceError::INTERNAL;
+        return false;
+    }
+
     std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
     if (!chainman.ProcessNewBlock(chainparams, shared_pblock, /*force_processing=*/true, nullptr)) {
         error = "ProcessNewBlock, block not accepted";
@@ -616,6 +646,8 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
     // it produced a block while the chain stood still. A certificate failure
     // (BLOCK_MUTATED) leaves no failed flag on the index, so also require the
     // block to be on the active chain.
+    // Its certificate reached the signing check when it connected
+    // (PosNoteVerifiedCertificate, ConnectTip).
     {
         LOCK(cs_main);
         const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(block.GetHash());
@@ -1045,16 +1077,44 @@ int64_t PosProducer::Step()
         const int64_t propose_now_ms = GetTimeMillis();
         if (propose_now_ms >= propose_ms && connected) {
             bool start;
+            int proposed_before;
             {
                 std::lock_guard<std::mutex> lock(m_gossip_mutex);
                 // Every eligible member proposes once per height (regardless of
                 // having seen others' proposals), so the candidate set — and thus
                 // the round-robin leader order — is complete and common to all.
+                proposed_before = m_proposed_height;
+                start = (m_proposed_height < height);
+            }
+            if (start) {
+                // The signing check, before the block is built: a proposal waits
+                // out the hold for an unreadable record entry, and is never made
+                // at a height a certified block holds (pos_signing_record.h).
+                // Refused, it is tried again at the next poll, so the member
+                // proposes as soon as the check lets it.
+                PosSigningEntry probe;
+                probe.kind = (uint8_t)PosSignKind::PROPOSAL;
+                probe.height = height;
+                const PosSignCheck check = PosSigningCheckNow(probe, GetTimeMillis());
+                if (!check.ok) {
+                    start = false;
+                    if (m_proposal_refused_height != height) {
+                        m_proposal_refused_height = height;
+                        LogPrintf("PoS gossip: not proposing at height %d: %s\n", height, check.why);
+                    }
+                }
+            }
+            if (start) {
+                std::lock_guard<std::mutex> lock(m_gossip_mutex);
                 start = (m_proposed_height < height);
                 if (start) m_proposed_height = height;
             }
             if (start) {
-                ProposeGossip(keys[best_idx]);
+                if (!ProposeGossip(keys[best_idx])) {
+                    // Refused by the signing check after all: try again.
+                    std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                    if (m_proposed_height == height) m_proposed_height = proposed_before;
+                }
                 round_poll = 150;
             }
         }
@@ -1073,13 +1133,11 @@ int64_t PosProducer::Step()
     }
 
     // A host that took part in this height's gossip round and share-signed a
-    // block there (and has since lost its peers) must not now certify a
-    // different block of its own at the same height: its seats would have
-    // signed two blocks at one height.
-    {
-        std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_lock_height == tip->nHeight + 1 && !m_lock_hash.IsNull()) return POS_PRODUCER_POLL_MS;
-    }
+    // block there (and has since lost its peers), in this run or before its
+    // restart (the signing record), must not now certify a different block of
+    // its own at the same height: its seats would have signed two blocks at one
+    // height. A block whose Bitcoin anchor was replaced holds nothing.
+    if (PosSigningSignedAt(tip->nHeight + 1)) return POS_PRODUCER_POLL_MS;
 
     // Due now: assemble, sign, submit. The remaining keys serve as committee
     // signers for the single-host committee case (none for committee = 1).
@@ -1354,7 +1412,7 @@ std::optional<int64_t> PosProducer::ScheduleOriginMs() const
     return ordered.front()->origin_ms;
 }
 
-std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
+std::vector<uint256> PosProducer::RestartCollection(int height, int64_t now)
 {
     // m_gossip_mutex held. Every node reaches this at the same instant (the
     // exhausted schedule is derived from shared data), so all of them re-propose
@@ -1388,12 +1446,7 @@ std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
     // members would sign the re-seeded round's blocks one round apart and
     // split again, round after round. Started here, every locked member's
     // grace ends together, inside the re-seeded round 0.
-    if (!m_lock_hash.IsNull() && m_lock_height == height) {
-        m_lock_grace_start_ms = now;
-        m_lock_queried = false;
-        return m_lock_hash;
-    }
-    return std::nullopt;
+    return PosSigningRestartGrace(height, now);
 }
 
 //! The earliest stamp consensus allows a proposal of a leader whose election
@@ -1410,13 +1463,13 @@ static int64_t GossipStampFloor(const Consensus::Params& cparams, const CBlockIn
     return floor;
 }
 
-void PosProducer::ProposeGossip(const CKey& leader_key)
+bool PosProducer::ProposeGossip(const CKey& leader_key)
 {
     int height = 0;
     auto block = BuildUnsignedBlsBlock(m_chainman, m_mempool, m_chainparams, leader_key, height);
     if (!block) {
         LogPrint(BCLog::VALIDATION, "PoS gossip: failed to build a proposal\n");
-        return;
+        return true;
     }
     // The leader's own election slot at this height, for the log (a test reads
     // it to tell which member ranked first) and for -posbyzantinestampfloor.
@@ -1474,9 +1527,24 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
     std::vector<unsigned char> leader_sig;
     if (!leader_key.Sign(hash, leader_sig)) {
         LogPrint(BCLog::VALIDATION, "PoS gossip: failed to sign proposal\n");
-        return;
+        return true;
     }
     block->proof.solution = CScript() << leader_sig;
+    // The signing record (pos_signing_record.h): the proposal is recorded
+    // before it can leave, whether flooded or assembled into a certificate.
+    bool refused = false;
+    const auto record = [&](const CBlock& b) {
+        PosSigningGate gate(PosSigningEntryFor(PosSignKind::PROPOSAL, b, height, {leader_key.GetPubKey()}), GetTimeMillis());
+        if (!gate.Allowed()) {
+            LogPrintf("PoS gossip: not proposing at height %d: %s\n", height, gate.Check().why);
+            refused = true;
+            return false;
+        }
+        if (gate.Record()) return true;
+        LogPrintf("PoS gossip: not proposing at height %d: %s\n", height, POS_SIGNING_RECORD_WRITE_ERROR);
+        return false;
+    };
+    if (!record(*block)) return !refused;
     uint256 own_beta;
     {
         CBlockIndex* prev;
@@ -1507,10 +1575,11 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         std::vector<unsigned char> sig_b;
         if (leader_key.Sign(block_b->GetHash(), sig_b)) {
             block_b->proof.solution = CScript() << sig_b;
+            if (!record(*block_b)) return true;
             LogPrintf("PoS gossip: BYZANTINE equivocating %s / %s at height %d\n",
                       hash.GetHex(), block_b->GetHash().GetHex(), height);
             FloodProposalSplit(*block, *block_b);
-            return;
+            return true;
         }
     }
 
@@ -1525,10 +1594,11 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         std::vector<unsigned char> sig_fake;
         if (leader_key.Sign(fake->GetHash(), sig_fake)) {
             fake->proof.solution = CScript() << sig_fake;
+            if (!record(*fake)) return true;
             LogPrintf("PoS gossip: BYZANTINE proposing block %s at height %d with fake anchor %s at height %u\n",
                       fake->GetHash().GetHex(), height, fake->m_anchor_hash.GetHex(), fake->m_anchor_height);
             FloodCompactProposal(*fake);
-            return;
+            return true;
         }
     }
 
@@ -1544,14 +1614,16 @@ void PosProducer::ProposeGossip(const CKey& leader_key)
         std::vector<unsigned char> sig_bad;
         if (leader_key.Sign(bad->GetHash(), sig_bad)) {
             bad->proof.solution = CScript() << sig_bad;
+            if (!record(*bad)) return true;
             LogPrintf("PoS gossip: BYZANTINE proposing invalid block %s at height %d\n", bad->GetHash().GetHex(), height);
             FloodCompactProposal(*bad);
-            return;
+            return true;
         }
     }
 
     LogPrintf("PoS gossip: proposing block %s at height %d (election slot %d)\n", hash.GetHex(), height, own_slot);
     FloodCompactProposal(*block);
+    return true;
 }
 
 int64_t PosProducer::DriveRound()
@@ -1644,7 +1716,7 @@ int64_t PosProducer::DriveRound()
     // Determine the current round index and the proposal it backs.
     int round_index;
     std::shared_ptr<const CBlock> backed;
-    std::optional<uint256> restart_lock;
+    std::vector<uint256> restart_lock;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_round_height != height) return POS_PRODUCER_POLL_MS; // no active round yet
@@ -1662,7 +1734,7 @@ int64_t PosProducer::DriveRound()
         }
     }
     if (!backed) {
-        if (restart_lock) SendCertQueryOnce(*restart_lock);
+        PosSigningSendQueries(restart_lock);
         return 150;
     }
 
@@ -1693,45 +1765,36 @@ int64_t PosProducer::DriveRound()
     //    passed (anchors never decrease), so it holds nothing there;
     //  - when anchoring is off, a bounded grace of two rounds.
     {
-        bool ancestry_hold = false;
-        uint256 locked;
-        bool rival_lock = false;
-        {
-            std::lock_guard<std::mutex> lock(m_gossip_mutex);
-            rival_lock = m_lock_height == tip->nHeight && !m_lock_hash.IsNull() &&
-                m_lock_hash != tip->GetBlockHash();
-        }
+        // The block this member signed at the parent's height, other than the
+        // parent, that still binds (the signing check, pos_signing_record.h):
+        // its anchor stands or is not judged yet, and it has not escaped.
+        const std::optional<PosBoundBlock> rival = PosSigningBoundAt(tip->nHeight, tip->GetBlockHash(), now);
         // Read before the gossip lock is taken: finality takes cs_main.
-        const bool parent_final = rival_lock && PosIsImmediatelyFinal(m_chainman, tip);
-        {
-            std::lock_guard<std::mutex> lock(m_gossip_mutex);
-            if (m_lock_height == tip->nHeight && !m_lock_hash.IsNull() &&
-                m_lock_hash != tip->GetBlockHash()) {
-                if (m_lock_grace_start_ms == 0) m_lock_grace_start_ms = now;
-                locked = m_lock_hash;
-                // The release is keyed on the same evidence consensus accepts
-                // for escaping a stall: parent-chain height gap AND real-time
-                // MTP gap (anchor.h, incident 2026-07-17) — a height race
-                // during a parent block-storm must not unlock the hold.
-                // Below the activation height consensus does not check the MTP
-                // gap, so neither does this: CheckEscapingStallMtpGap applies
-                // the gate itself and returns ALLOWED there, which is why no
-                // separate height test is needed here. record_unverified=false:
-                // this is the producer weighing its own options, not a block
-                // being accepted.
-                const bool gap_passed = g_con_bitcoin_anchor && tip->pprev &&
-                    PosEscapingStallAllowed(tip->pprev->m_anchor_height, backed->m_anchor_height) &&
-                    CheckEscapingStallMtpGap(tip->pprev->m_anchor_hash, backed->m_anchor_hash,
-                                             tip->nHeight + 1,
-                                             /*record_unverified=*/false) == EscapeStallTimeVerdict::ALLOWED;
-                const bool grace_passed = !g_con_bitcoin_anchor &&
-                    (now - m_lock_grace_start_ms >= 2 * ROUND_MS);
-                ancestry_hold = !(parent_final || gap_passed || grace_passed);
-            }
+        const bool parent_final = rival && !rival->undecided && PosIsImmediatelyFinal(m_chainman, tip);
+        bool ancestry_hold = false;
+        if (rival) {
+            // The release is keyed on the same evidence consensus accepts
+            // for escaping a stall: parent-chain height gap AND real-time
+            // MTP gap (anchor.h, incident 2026-07-17) — a height race
+            // during a parent block-storm must not unlock the hold.
+            // Below the activation height consensus does not check the MTP
+            // gap, so neither does this: CheckEscapingStallMtpGap applies
+            // the gate itself and returns ALLOWED there, which is why no
+            // separate height test is needed here. record_unverified=false:
+            // this is the producer weighing its own options, not a block
+            // being accepted. While the parent chain gives no verdict on the
+            // signed block's anchor, nothing releases the hold.
+            const bool gap_passed = !rival->undecided && g_con_bitcoin_anchor && tip->pprev &&
+                PosEscapingStallAllowed(tip->pprev->m_anchor_height, backed->m_anchor_height) &&
+                CheckEscapingStallMtpGap(tip->pprev->m_anchor_hash, backed->m_anchor_hash,
+                                         tip->nHeight + 1,
+                                         /*record_unverified=*/false) == EscapeStallTimeVerdict::ALLOWED;
+            const bool grace_passed = !rival->undecided && !g_con_bitcoin_anchor &&
+                (now - rival->grace_start_ms >= 2 * ROUND_MS);
+            ancestry_hold = !(parent_final || gap_passed || grace_passed);
         }
         if (ancestry_hold) {
-            SendCertQueryOnce(locked);
-            return 150; // keep polling: a certificate for X releases via the pin, the parent's finality, the gap or the grace via time
+            return 150; // keep polling: a certificate for the signed block releases via the pin, the parent's finality, the gap or the grace via time
         }
     }
 
@@ -1744,37 +1807,23 @@ int64_t PosProducer::DriveRound()
         if (m_round_height == height && (m_signed_round < round_index || m_backed_hash != backed->GetHash())) {
             want_sign = true;
         }
-        // Share-lock, same-height arm (3B): we already share-signed a
-        // DIFFERENT block at this height. The round schedule says re-vote,
-        // but our shares for the first block are still live and assemblable:
-        // signing the rival now is exactly the protocol-induced double-sign
-        // that lets two blocks certify at one height. Ask the network for a
-        // certificate on the first block (a certificate anywhere is one
-        // ~300-byte round-trip away) and wait ONE grace round; only silence
-        // releases the re-vote. With every signer of X held this way, a
-        // rival cannot reach quorum while X can still certify.
-        if (want_sign && !m_lock_hash.IsNull() && m_lock_height == height &&
-            m_lock_hash != backed->GetHash()) {
-            if (m_lock_grace_start_ms == 0) {
-                m_lock_grace_start_ms = now;
-                want_sign = false;
-            } else if (now - m_lock_grace_start_ms < ROUND_MS) {
-                want_sign = false;
-            }
-            // else: grace expired with no certificate — the re-vote proceeds.
-        }
     }
-    {
-        bool need_query = false;
-        uint256 locked;
-        {
-            std::lock_guard<std::mutex> lock(m_gossip_mutex);
-            if (!want_sign && !m_lock_queried && m_lock_grace_start_ms != 0 && !m_lock_hash.IsNull()) {
-                need_query = true;
-                locked = m_lock_hash;
-            }
-        }
-        if (need_query) SendCertQueryOnce(locked);
+    // Share-lock, same-height arm (3B): we already share-signed a DIFFERENT
+    // block at this height, in this run or before a restart (the signing
+    // record). The round schedule says re-vote, but our shares for the first
+    // block are still live and assemblable: signing the rival now is exactly
+    // the protocol-induced double-sign that lets two blocks certify at one
+    // height. The signing check (pos_signing_record.h) asks the network for a
+    // certificate on the first block (a certificate anywhere is one ~300-byte
+    // round-trip away) and waits ONE grace round; only silence releases the
+    // re-vote. With every signer of X held this way, a rival cannot reach
+    // quorum while X can still certify. A block whose anchor Bitcoin replaced
+    // holds nothing; one whose anchor returned holds again, with a new query
+    // and a new round.
+    if (want_sign) {
+        const PosSignCheck check = PosSigningCheckNow(
+            PosSigningEntryFor(PosSignKind::SHARE, *backed, height, {}), now);
+        if (!check.ok) want_sign = false;
     }
     if (want_sign && !m_byzantine_equivocate) {
         // Lazy validation (paper P6 step 10): validate the backed block only now,
@@ -1814,7 +1863,21 @@ int64_t PosProducer::DriveRound()
         }
         // Valid: commit, collect our own shares (we are a potential aggregator)
         // and flood them (so every node is too).
+        // The signing gate (pos_signing_record.h): the check again, then the
+        // shares, recorded and synced before they can leave, by flood or by an
+        // assembled certificate. A failed write releases nothing; the node is
+        // stopping.
+        PosSigningGate gate(PosSigningEntryFor(PosSignKind::SHARE, *backed, height, {}), now);
+        if (!gate.Allowed()) return 150;
         std::vector<PosShare> shares = MakeLocalShares(*backed);
+        if (!shares.empty()) {
+            for (const PosShare& sh : shares) gate.Entry().signers.push_back(sh.pubkey);
+            if (!gate.Record()) {
+                LogPrintf("PoS gossip: not signing %s at height %d: %s\n", backed->GetHash().GetHex(), height,
+                          POS_SIGNING_RECORD_WRITE_ERROR);
+                return POS_PRODUCER_POLL_MS;
+            }
+        }
         bool still_backed = true;
         {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
@@ -1834,19 +1897,18 @@ int64_t PosProducer::DriveRound()
                     m_backed_hash = backed->GetHash();
                     m_collected.clear(); // shares were for the previous backed leader
                 }
-                // Share-lock: remember what we signed here. Signing anything
-                // ELSE at this height (or on a rival parent) is now gated on
-                // the certificate query + grace above.
-                m_lock_hash = backed->GetHash();
-                m_lock_height = height;
-                m_lock_grace_start_ms = 0;
-                m_lock_queried = false;
+                // The share-lock now holds what we signed here (the record's
+                // entry, appended above): signing anything ELSE at this height
+                // (or on a rival parent) is gated on the certificate query and
+                // the grace.
                 for (PosShare& sh : shares) {
                     if (m_collected.size() < (size_t)PosMaxCommitteeMembers()) m_collected[sh.pubkey] = sh;
                 }
             }
         }
         if (!still_backed) return 150;
+        LogPrint(BCLog::VALIDATION, "PoS gossip: signed %s at height %d (round %d, %u key(s))\n",
+                 backed->GetHash().GetHex(), height, round_index, (unsigned)shares.size());
         for (const PosShare& sh : shares) FloodShare(sh);
     }
 
@@ -1938,6 +2000,8 @@ int64_t PosProducer::DriveRound()
         if (m_chainman.ProcessNewBlock(m_chainparams, final_block, /*force_processing=*/true, nullptr)) {
             LogPrintf("PoS gossip: certified block %s at height %d (round %d, %d committee member(s))\n",
                       final_hash.GetHex(), height, round_index, (int)members_n);
+            // The signing check learned this certificate when the block
+            // connected (PosNoteVerifiedCertificate, ConnectTip).
             // Flood the certificate (the certified header) as its own small
             // object (3A Tier 1): the full block can be lost to a partition
             // or a slow flood; the ~few-hundred-byte certificate crosses on
@@ -2114,7 +2178,7 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     // between members; a block that only arrives within it opens the next
     // collection a little early, where its leader is judged afresh.
     bool equivocation_evidence = false;
-    std::optional<uint256> restart_lock;
+    std::vector<uint256> restart_lock;
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         if (m_round_height == height && (m_excluded.count(parts->leader) || m_candidates.count(parts->leader))) {
@@ -2138,7 +2202,7 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             }
         }
     }
-    if (restart_lock) SendCertQueryOnce(*restart_lock);
+    PosSigningSendQueries(restart_lock);
     if (equivocation_evidence) {
         LogPrintf("PoS gossip: leader %s equivocated at height %d — excluding it\n",
                   HexStr(parts->leader).substr(0, 16), height);
@@ -2322,20 +2386,6 @@ void PosProducer::BroadcastCertificate(const CBlockHeader& header)
     });
 }
 
-void PosProducer::SendCertQueryOnce(const uint256& hash)
-{
-    {
-        std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (m_lock_queried || m_lock_hash != hash) return;
-        m_lock_queried = true;
-    }
-    if (!m_connman) return;
-    LogPrintf("PoS gossip: share-lock at %s — querying peers for a certificate\n", hash.GetHex());
-    m_connman->ForEachNode([&](CNode* pnode) {
-        m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::GETPOSCERT, hash));
-    });
-}
-
 std::optional<CBlockHeader> PosProducer::GetCertificate(const uint256& hash)
 {
     std::lock_guard<std::mutex> lock(m_gossip_mutex);
@@ -2505,6 +2555,9 @@ PosGossipAction PosProducer::OnCertificate(const CBlockHeader& header)
     // A competing certificate holds this node's finality at that height until
     // its block has been received and judged (validation.h).
     PosNoteCompetingCertificate(hash, height);
+    // The signing check: a verified certificate decides its height.
+    PosSigningNoteCertificate(PosCertifiedBlock{hash, height, header.hashPrevBlock, header.m_anchor_height, header.m_anchor_hash},
+                              PosCertRoute::CERTIFICATE);
     const int signer_count = PopulatedSignerCount(header);
     // A verified quorum certificate: pin this height. No rival will be
     // proposed, backed or signed here (Step/DriveRound), and the block is

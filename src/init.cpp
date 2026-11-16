@@ -15,6 +15,7 @@
 #include <pos.h>
 #include <supervision.h>
 #include <pos_producer.h>
+#include <pos_signing_record.h>
 #include <key_io.h>
 #include <blockfilter.h>
 #include <chain.h>
@@ -37,6 +38,7 @@
 #include <mainchainrpc.h>
 #include <mapport.h>
 #include <net.h>
+#include <netmessagemaker.h>
 #include <net_permissions.h>
 #include <net_processing.h>
 #include <netbase.h>
@@ -250,6 +252,12 @@ void Shutdown(NodeContext& node)
         node.pos_producer->Stop();
         node.pos_producer.reset();
     }
+    // The signing check's links to the network and the parent chain go before
+    // the connection manager does.
+    PosSigningSetNetwork(nullptr, nullptr);
+    PosSigningSetAnchorJudge(nullptr);
+    PosSigningSetIndexJudge(nullptr);
+    SetMainchainMoveListener(nullptr);
 
     // Because these depend on each-other, we make sure that neither can be
     // using the other before destroying them.
@@ -1773,6 +1781,49 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     g_pos_reconcile_min_depth = (int)std::clamp<int64_t>(
         gArgs.GetIntArg("-posreconcilemindepth", DEFAULT_POS_RECONCILE_MIN_DEPTH), 1, 1000);
 
+    // SEQUENTIA: the signing record (pos_signing_record.h), read before any
+    // signing path can run: the share-lock it rebuilds holds from the first
+    // round, and every signature appends to it.
+    {
+        std::string record_error;
+        if (!PosSigningRecordLoad(chainparams.GetConsensus().hashGenesisBlock, record_error)) {
+            return InitError(Untranslated(record_error));
+        }
+        // The signing check judges each signed block's Bitcoin anchor, on a
+        // node that watches Bitcoin (g_validate_anchor can be turned off later
+        // in the start, so it is read at each judgement). A replaced anchor
+        // releases at once, so it is believed only from the daemon's answer in
+        // this check (CheckMainchainAnchorsFresh), within the check's bound.
+        PosSigningSetAnchorJudge([](const std::vector<std::pair<uint32_t, uint256>>& anchors)
+                                     -> std::optional<std::vector<PosAnchorStanding>> {
+            if (!g_validate_anchor) return std::nullopt;
+            std::vector<PosAnchorStanding> out;
+            for (const AnchorCheckResult r : CheckMainchainAnchorsFresh(anchors, PosSigningDaemonBudgetMs())) {
+                switch (r) {
+                case AnchorCheckResult::OK: out.push_back(PosAnchorStanding::STANDS); break;
+                // Off the daemon's best chain, or unknown to a daemon whose
+                // best chain is past that height: replaced.
+                case AnchorCheckResult::STALE:
+                case AnchorCheckResult::HEIGHT_MISMATCH:
+                case AnchorCheckResult::NOT_FOUND: out.push_back(PosAnchorStanding::GONE); break;
+                case AnchorCheckResult::NO_CONNECTION: out.push_back(PosAnchorStanding::UNDECIDED); break;
+                }
+            }
+            return out;
+        });
+        SetMainchainMoveListener(PosSigningParentMoved);
+        // The certificate query lives with the check, so that every signing
+        // path reaches it, with or without the producer.
+        CConnman* const connman = node.connman.get();
+        PosSigningSetNetwork(
+            [connman](const uint256& hash) {
+                connman->ForEachNode([&](CNode* pnode) {
+                    connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::GETPOSCERT, hash));
+                });
+            },
+            [connman] { return (int)connman->GetNodeCount(ConnectionDirection::Both); });
+    }
+
     // ********************************************************* Step 7: load block chain
 
     fReindex = args.GetBoolArg("-reindex", false);
@@ -1937,6 +1988,21 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         LogPrintf("Shutdown requested. Exiting.\n");
         return false;
     }
+
+    // SEQUENTIA: with the chain loaded, the signing check learns every block
+    // in its window that the block index holds a verified full certificate
+    // for (pos_signing_record.h), before RPC, peers or the producer can ask
+    // it to sign. From here on, every certificate is noted as it arrives.
+    {
+        LOCK(cs_main);
+        PosSigningNoteIndexAtStart(chainman);
+    }
+    // What a held block binds is read from the block index at each check
+    // (PosIndexStanding): whether it is on the active chain, or failed here
+    // for any reason, including through an ancestor.
+    PosSigningSetIndexJudge([cm = &chainman](const uint256& hash, const uint256& parent) {
+        return PosSigningIndexStanding(*cm, hash, parent);
+    });
 
     // ********************************************************* Step 8: start indexers
     if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {

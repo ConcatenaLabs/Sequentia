@@ -41,6 +41,7 @@
 #include <vector>
 
 class CBlock;
+class CBlockIndex;
 class CChainParams;
 class ChainstateManager;
 namespace Consensus { struct Params; }
@@ -234,7 +235,8 @@ private:
     //! sign it, and flood it as a proposal. Every eligible member proposes, so
     //! the candidate set (and thus the round-robin leader order) is complete and
     //! common to all nodes.
-    void ProposeGossip(const CKey& leader_key);
+    //! Returns false when the signing check refused the proposal (the caller tries again).
+    bool ProposeGossip(const CKey& leader_key);
     //! Drive the active gossip round on the worker thread: sign the round's
     //! backed proposal (the round-robin leader), collect/flood shares, and — on a
     //! quorum — assemble and submit. The round index advances with time so a
@@ -283,7 +285,7 @@ private:
     //! height, if any: the caller must query peers for its certificate, since
     //! the re-seeded round's grace is counted from this restart. m_gossip_mutex
     //! held.
-    std::optional<uint256> RestartCollection(int height, int64_t now);
+    std::vector<uint256> RestartCollection(int height, int64_t now);
     //! Produce shares for every locally-held key that is sortition-eligible for
     //! `block`'s slot.
     std::vector<PosShare> MakeLocalShares(const CBlock& block);
@@ -297,9 +299,6 @@ private:
     void FloodShare(const PosShare& share);
     //! Flood a certified block's header (the certificate) to all peers.
     void BroadcastCertificate(const CBlockHeader& header);
-    //! Ask all peers whether anyone holds a certificate for `hash`
-    //! (getposcert), at most once per lock. Takes m_gossip_mutex internally.
-    void SendCertQueryOnce(const uint256& hash);
     //! If we hold both a certificate and the proposal body for the same block,
     //! attach the certificate and submit the completed block. Returns true if
     //! a block was submitted. Takes m_gossip_mutex internally.
@@ -387,6 +386,7 @@ private:
     uint256 m_backed_hash;                             //!< hash of the proposal we are signing/collecting for
     int m_signed_round{-1};                            //!< highest round index we have signed for
     int m_proposed_height{0};                          //!< height we have already proposed our own block at
+    int m_proposal_refused_height{-1};                 //!< height whose proposal refusal by the signing check was logged
     int m_propose_at_height{0};                        //!< height m_propose_at_ms is for
     //! The tip this producer last scheduled from, and when it first saw it
     //! (PosProposalStartMs). Producer thread only.
@@ -427,11 +427,9 @@ private:
     // grace (a ~few-hundred-byte poscert, one round-trip) and the certificate
     // pin takes over; the quorum arithmetic then makes a second certificate
     // impossible (X's >= quorum signers are all locked, fewer than a quorum
-    // remain free). State under m_gossip_mutex.
-    uint256 m_lock_hash;                               //!< the block we most recently share-signed
-    int m_lock_height{0};                              //!< its height
-    int64_t m_lock_grace_start_ms{0};                  //!< when the lock's grace began (0 = not started)
-    bool m_lock_queried{false};                        //!< getposcert sent for m_lock_hash
+    // remain free). The state lives with the signing record (the signing
+    // check, pos_signing_record.h), per height and per signed block, shared
+    // with every other signing path and rebuilt at a restart.
 
     // Committee-equivocation prevention (Change 4a), worker thread only. While
     // the anchor watcher holds a quorum-certified child of the current tip that

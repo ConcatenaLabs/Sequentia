@@ -37,6 +37,7 @@
 #include <bls.h>
 #include <musig.h>
 #include <pos.h>
+#include <pos_signing_record.h>
 #include <vrf.h>
 #include <policy/value.h>
 #include <primitives/block.h>
@@ -72,8 +73,10 @@
 #include <dynafed.h>
 
 #include <algorithm>
+#include <deque>
 #include <functional>
 #include <limits>
+#include <unordered_map>
 #include <atomic>
 #include <chrono>
 #include <numeric>
@@ -516,6 +519,178 @@ void PosRefreshCertifiedKeys(ChainstateManager& chainman, CBlockIndex* registry_
     for (auto& [chainstate, blocks] : candidates) {
         chainstate->setBlockIndexCandidates.insert(blocks.begin(), blocks.end());
     }
+}
+
+bool PosIndexCertifies(const CBlockIndex* pindex)
+{
+    // Connected here at least once: ConnectBlock verified the certificate the
+    // block carries (a fuller one adopted later was verified on arrival).
+    // A body that has only been measured is not enough: the block hash leaves
+    // the certificate out, so a fake aggregate on a real leader's block would
+    // otherwise count.
+    return pindex->IsValid(BLOCK_VALID_SCRIPTS) && pindex->PosCarriesQuorum();
+}
+
+//! Connected here at least once with its parent's quorum, whether or not it
+//! has failed since (an operator's invalidateblock, the anchor watcher): the
+//! signing check reads its standing at each check (PosSigningIndexStanding).
+static bool PosIndexCertifiedOnce(const CBlockIndex* pindex)
+{
+    return (pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_SCRIPTS && pindex->PosCarriesQuorum();
+}
+
+static void NoteCertified(const CBlockIndex* pindex, PosCertRoute route)
+{
+    PosCertifiedBlock b;
+    b.hash = pindex->GetBlockHash();
+    b.height = pindex->nHeight;
+    b.parent = pindex->pprev ? pindex->pprev->GetBlockHash() : uint256();
+    b.anchor_height = pindex->m_anchor_height;
+    b.anchor_hash = pindex->m_anchor_hash;
+    PosSigningNoteCertificate(b, route);
+}
+
+void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route)
+{
+    if (!g_con_pos || !PosIndexCertifies(pindex)) return;
+    NoteCertified(pindex, route);
+}
+
+//! For the signing check (PosIndexState::revivals): the number of the last
+//! ResetBlockFailureFlags call that revived something. Each such call stamps
+//! its number on every block index entry at or above a block whose failure it
+//! cleared (CBlockIndex::m_pos_revived), so a held block's number is that of
+//! the last call that cleared its own failure or that of a block below it:
+//! clearing either is what can make it valid again, and a revival on another
+//! branch cannot. The stamp lives on the entry, never in a history, so no
+//! length of revival history can make another block's revival move it, and
+//! its memory is bounded by the index.
+static uint64_t g_pos_revival_calls GUARDED_BY(::cs_main){0};
+
+//! The number of the last call that revived `p` or one of its ancestors (0:
+//! none in this run).
+static uint64_t PosRevivalOf(const CBlockIndex* p) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    return p ? p->m_pos_revived : 0;
+}
+
+//! A ResetBlockFailureFlags call cleared the failure marks of `cleared`. A
+//! block failed again before cs_main was let go (ReconsiderAnchoredBlock marks
+//! again the blocks whose anchor is still off Bitcoin's best chain) was not
+//! revived: nobody saw it valid. If any other remains, the call takes a new
+//! number and stamps it on every entry at or above one of them. One pass over
+//! the index, as the clearing itself makes; each entry above the lowest
+//! revived block is walked once (the answers are remembered on the way down).
+static void PosStampRevived(BlockMap& index, const std::vector<CBlockIndex*>& cleared)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    std::unordered_map<const CBlockIndex*, bool> above; // at or above a revived block
+    int lowest = std::numeric_limits<int>::max();
+    for (const CBlockIndex* c : cleared) {
+        if (c->nStatus & BLOCK_FAILED_MASK) continue; // failed again in the same hold
+        above[c] = true;
+        lowest = std::min(lowest, c->nHeight);
+    }
+    if (above.empty()) return;
+    const uint64_t call = ++g_pos_revival_calls;
+    std::vector<const CBlockIndex*> path;
+    for (auto& [_, entry] : index) {
+        if (entry->nHeight < lowest) continue;
+        bool revived = false;
+        path.clear();
+        for (const CBlockIndex* q = entry; q && q->nHeight >= lowest; q = q->pprev) {
+            const auto it = above.find(q);
+            if (it != above.end()) {
+                revived = it->second;
+                break;
+            }
+            path.push_back(q);
+        }
+        for (const CBlockIndex* q : path) above.emplace(q, revived);
+        if (revived) entry->m_pos_revived = call;
+    }
+}
+
+PosIndexState PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent)
+{
+    LOCK(::cs_main);
+    const CChain& active = chainman.ActiveChain();
+    const CBlockIndex* p = chainman.m_blockman.LookupBlockIndex(hash);
+    // A block the index does not hold yet (a certificate only) stands as
+    // its parent does, and is revived as its parent is.
+    if (!p && !parent.IsNull()) p = chainman.m_blockman.LookupBlockIndex(parent);
+    const auto with_revivals = [p](PosIndexState st) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        st.revivals = PosRevivalOf(p);
+        return st;
+    };
+    if (p && p->GetBlockHash() == hash && active.Contains(p)) return with_revivals(PosIndexStanding::ACTIVE);
+    if (!p) return with_revivals(PosIndexStanding::UNKNOWN);
+    // Down to the active chain: InvalidateBlock marks only the blocks it
+    // disconnects, so a side block above a failed one may carry no mark of its
+    // own. The walk is as long as the block's branch, inside the window. It
+    // goes all the way down and names what each failed run failed for, read
+    // at the run's bottom block (the one invalidated): the anchor watcher's
+    // mark is evidence only once the parent chain confirms it now, and a run
+    // below that failed for another reason must not be hidden by it.
+    PosIndexState out{PosIndexStanding::OFF_ACTIVE};
+    const CBlockIndex* const invalidating = chainman.m_anchor_invalidating;
+    for (const CBlockIndex* q = p; q && !active.Contains(q); q = q->pprev) {
+        if (!(q->nStatus & BLOCK_FAILED_MASK)) continue;
+        if (q->pprev && (q->pprev->nStatus & BLOCK_FAILED_MASK)) continue; // not the run's bottom
+        if (q->nStatus & BLOCK_FAILED_ANCHOR) {
+            out.orphan_anchors.emplace_back(q->m_anchor_height, q->m_anchor_hash);
+        } else if (invalidating && q->GetAncestor(invalidating->nHeight) == invalidating) {
+            // The watcher is invalidating this branch now (IsAnchorOrphaned).
+            out.orphan_anchors.emplace_back(invalidating->m_anchor_height, invalidating->m_anchor_hash);
+        } else {
+            out.failed_otherwise = true;
+        }
+    }
+    if (!out.orphan_anchors.empty()) {
+        out.standing = PosIndexStanding::ORPHANED;
+    } else if (out.failed_otherwise) {
+        out.standing = PosIndexStanding::FAILED;
+    }
+    return with_revivals(std::move(out));
+}
+
+void PosSigningNoteIndexAtStart(ChainstateManager& chainman)
+{
+    AssertLockHeld(::cs_main);
+    if (!g_con_pos) return;
+    const CChain& active = chainman.ActiveChain();
+    const CBlockIndex* tip = active.Tip();
+    if (!tip) return;
+    // The window the check keeps (POS_SIGNING_RECORD_WINDOW): below it a
+    // block binds nothing, so nothing older is loaded.
+    const uint64_t ref = g_con_bitcoin_anchor ? tip->m_anchor_height : (uint64_t)tip->nHeight;
+    const auto in_window = [&](const CBlockIndex* p) {
+        const uint64_t key = g_con_bitcoin_anchor ? p->m_anchor_height : (uint64_t)p->nHeight;
+        return ref <= key + POS_SIGNING_RECORD_WINDOW;
+    };
+    const int64_t t0 = GetTimeMicros();
+    size_t noted = 0;
+    // The active chain from the tip down to the window's edge.
+    int lowest = tip->nHeight + 1;
+    for (const CBlockIndex* p = tip; p && in_window(p); p = p->pprev) {
+        lowest = p->nHeight;
+        if (!PosIndexCertifies(p)) continue;
+        NoteCertified(p, PosCertRoute::INDEX_AT_START);
+        ++noted;
+    }
+    // Blocks off the active chain: only at heights the window reaches. The
+    // index has no height order, so this is one pass over its entries that
+    // reads two integers for each block below the window. A block that failed
+    // after it connected is loaded too: the check reads its standing, and
+    // releases a member from it after one round, as in the run before.
+    for (const auto& [hash, pindex] : chainman.m_blockman.m_block_index) {
+        if (pindex->nHeight < lowest || active.Contains(pindex) || !in_window(pindex) || !PosIndexCertifiedOnce(pindex)) continue;
+        NoteCertified(pindex, PosCertRoute::INDEX_AT_START);
+        ++noted;
+    }
+    LogPrintf("Signing record: %u block(s) with a verified full certificate in the window, read from the block index " /* Continued */
+              "of %u entries in %.1f ms\n", (unsigned)noted, (unsigned)chainman.m_blockman.m_block_index.size(),
+              (GetTimeMicros() - t0) / 1000.0);
 }
 
 bool PosUnbondingFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
@@ -4257,6 +4432,15 @@ bool CChainState::FlushStateToDisk(
                     !m_blockman.m_block_tree_db->WritePosFinalized(PosFinalizedHashForDisk())) {
                     return AbortNode(state, "Failed to write the finalized point to the block index database");
                 }
+                // SEQUENTIA: the index on disk now carries every block it
+                // holds in memory; the signing record drops what it knows.
+                if (g_con_pos && this == &m_chainman.ActiveChainstate() && m_chain.Tip()) {
+                    PosSigningRecordIndexWritten(m_chain.Height(), m_chain.Tip()->m_anchor_height,
+                        [this](const uint256& hash) {
+                            const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
+                            return pindex && PosIndexCertifies(pindex);
+                        });
+                }
 
                 // This should be done inside WriteBatchSync, but CBlockIndex is const there
                 for (std::set<CBlockIndex*>::iterator it = setTrimmableBlockIndex.begin(); it != setTrimmableBlockIndex.end(); it++) {
@@ -4604,6 +4788,12 @@ bool PosUpgradeCertificate(ChainstateManager& chainman, const CBlockHeader& head
     // on arrival; PosSetCertified keeps the candidate sets ordered.
     (void)PosRecordCertified(chainman, pindex, PosQuorumAfter(pindex->pprev));
     chainman.m_blockman.MarkBlockIndexDirty(pindex);
+    // A block that connected here has had a certificate verified; the fuller
+    // one was verified on arrival (PosVerifyCertificate). A block that never
+    // connected is noted by the certificate message's route, not here.
+    if (pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
+        PosNoteVerifiedCertificate(pindex, chainman.ActiveChain().Contains(pindex) ? PosCertRoute::CONNECTED : PosCertRoute::UPGRADE);
+    }
 
     // Serve the fuller certificate with the body from now on. Only a block
     // that has never been connected here is moved: its undo data, once
@@ -5270,6 +5460,11 @@ bool CChainState::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew
     }
     // Update m_chain & related variables.
     m_chain.SetTip(pindexNew);
+    // SEQUENTIA: ConnectBlock has just verified this block's certificate, so
+    // the signing check holds it as certified if it carries its parent's
+    // quorum. Every block route (a peer, submitblock, submitposblock,
+    // generateposblock, the gossip assembly, a reindex) connects here.
+    if (g_con_pos && this == &m_chainman.ActiveChainstate()) PosNoteVerifiedCertificate(pindexNew, PosCertRoute::CONNECTED);
     // SEQUENTIA immediate finality: a quorum block's observation window opens
     // when it joins the active chain. Not during the initial block download,
     // whose blocks the network settled long ago: they become final as soon as
@@ -5932,6 +6127,14 @@ bool CChainState::InvalidateBlock(BlockValidationState& state, CBlockIndex* pind
 
 void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     AssertLockHeld(cs_main);
+    std::vector<CBlockIndex*> cleared;
+    ClearBlockFailureFlags(pindex, cleared);
+    PosStampRevived(m_blockman.m_block_index, cleared);
+}
+
+void CChainState::ClearBlockFailureFlags(CBlockIndex* pindex, std::vector<CBlockIndex*>& cleared)
+{
+    AssertLockHeld(cs_main);
 
     int nHeight = pindex->nHeight;
 
@@ -5939,6 +6142,7 @@ void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     BlockMap::iterator it = m_blockman.m_block_index.begin();
     while (it != m_blockman.m_block_index.end()) {
         if (!it->second->IsValid() && it->second->GetAncestor(nHeight) == pindex) {
+            if (it->second->nStatus & BLOCK_FAILED_MASK) cleared.push_back(it->second);
             it->second->nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR);
             m_blockman.m_dirty_blockindex.insert(it->second);
             if (it->second->IsValid(BLOCK_VALID_TRANSACTIONS) && it->second->HaveTxsDownloaded() && setBlockIndexCandidates.value_comp()(m_chain.Tip(), it->second)) {
@@ -5956,6 +6160,7 @@ void CChainState::ResetBlockFailureFlags(CBlockIndex *pindex) {
     // Remove the invalidity flag from all ancestors too.
     while (pindex != nullptr) {
         if (pindex->nStatus & (BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR)) {
+            if (pindex->nStatus & BLOCK_FAILED_MASK) cleared.push_back(pindex);
             pindex->nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_FAILED_ANCHOR);
             m_blockman.m_dirty_blockindex.insert(pindex);
             m_chainman.m_failed_blocks.erase(pindex);
@@ -5981,7 +6186,8 @@ std::vector<CBlockIndex*> CChainState::ReconsiderAnchoredBlock(CBlockIndex* pind
     std::sort(branch.begin(), branch.end(),
               [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
 
-    ResetBlockFailureFlags(pindex);
+    std::vector<CBlockIndex*> cleared;
+    ClearBlockFailureFlags(pindex, cleared);
 
     // Mark again, before any activation can see them, the blocks whose anchor
     // is still orphaned and everything above them: the same marks
@@ -6002,6 +6208,8 @@ std::vector<CBlockIndex*> CChainState::ReconsiderAnchoredBlock(CBlockIndex* pind
         m_blockman.m_dirty_blockindex.insert(entry);
         setBlockIndexCandidates.erase(entry);
     }
+    // Only now, once the blocks still off Bitcoin are failed again.
+    PosStampRevived(m_blockman.m_block_index, cleared);
     return roots;
 }
 

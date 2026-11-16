@@ -173,6 +173,28 @@ def assert_raises_process_error(returncode: int, output: str, fun: Callable, *ar
         raise AssertionError("No exception raised")
 
 
+SHARE_LOCK_REFUSAL = re.compile(r"signs no other block there for (\d+) ms more")
+
+
+def pos_sign_after_share_lock(fun: Callable, *args, **kwds):
+    """Call a signing RPC (generateposblock, musigpartialsign, submitposblock...)
+    that may make a rival of a block this member already signed at the same
+    height. The share-lock refuses such a call, asks its peers for the earlier
+    block's certificate, and names the one grace round it waits
+    (doc/sequentia/04-proof-of-stake.md, "The share-lock"). Wait that round out
+    and call once more, as an operator would; a second refusal is returned to
+    the caller, since the refusal must not outlast one grace round with no
+    certificate."""
+    try:
+        return fun(*args, **kwds)
+    except JSONRPCException as e:
+        m = SHARE_LOCK_REFUSAL.search(e.error.get("message", ""))
+        if not m:
+            raise
+        time.sleep(int(m.group(1)) / 1000.0 + 0.2)
+    return fun(*args, **kwds)
+
+
 def assert_raises_rpc_error(code: Optional[int], message: Optional[str], fun: Callable, *args, **kwds):
     """Run an RPC and verify that a specific JSONRPC exception code and message is raised.
 

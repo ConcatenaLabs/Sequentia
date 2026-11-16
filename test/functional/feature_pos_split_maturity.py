@@ -21,7 +21,7 @@ next claim sweeps it at once.
 from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_raises_rpc_error
+from test_framework.util import assert_equal, assert_raises_rpc_error, pos_sign_after_share_lock
 from test_framework.key import ECKey
 from test_framework.address import byte_to_base58
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxOut
@@ -78,7 +78,7 @@ class PosSplitMaturityTest(BitcoinTestFramework):
 
     def mine(self, n=1):
         for _ in range(n):
-            self.nodes[0].generateposblock(self.a_wif)
+            pos_sign_after_share_lock(self.nodes[0].generateposblock, self.a_wif)
 
     def mine_to(self, height):
         while self.nodes[0].getblockcount() < height:

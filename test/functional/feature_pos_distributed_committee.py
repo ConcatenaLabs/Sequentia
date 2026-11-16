@@ -93,7 +93,9 @@ class PosDistributedCommitteeTest(BitcoinTestFramework):
         pubnonces = [node_for[pk].musignonce(sid, wif_for[pk], members, signhash)['pubnonce']
                      for pk in members]
         # Round 2: a partial signature from each member, on its own node.
-        partials = [node_for[pk].musigpartialsign(sid, wif_for[pk], members, pubnonces, signhash)['partialsig']
+        # With the block: a member's node may not know the hash, and a hash it
+        # cannot place at a height is refused (the signing check).
+        partials = [node_for[pk].musigpartialsign(sid, wif_for[pk], members, pubnonces, signhash, tmpl['block'])['partialsig']
                     for pk in members]
 
         # Aggregate (public) and sanity-check before submitting.

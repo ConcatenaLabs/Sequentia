@@ -46,6 +46,9 @@ struct HTTPReply
     int status;
     int error;
     std::string body;
+    //! Set when the exchange has a deadline: the deadline's timer keeps the
+    //! event loop running, so the reply ends the loop itself.
+    struct event_base* base{nullptr};
 };
 
 const char *http_errorstring(int code)
@@ -73,6 +76,7 @@ const char *http_errorstring(int code)
 static void http_request_done(struct evhttp_request *req, void *ctx)
 {
     HTTPReply *reply = static_cast<HTTPReply*>(ctx);
+    if (reply->base) event_base_loopbreak(reply->base);
 
     if (req == NULL) {
         /* If req is NULL, it means an error occurred while connecting: the
@@ -108,7 +112,7 @@ static void http_error_cb(enum evhttp_request_error err, void *ctx)
 //! Split out so that the single-call and batch paths share one piece of
 //! transport, authentication and error handling. Two copies of this would drift
 //! the first time somebody fixed a bug in one of them.
-static UniValue MainChainHttpJson(const std::string& strRequest)
+static UniValue MainChainHttpJson(const std::string& strRequest, int64_t deadline_ms = 0)
 {
     std::string host = gArgs.GetArg("-mainchainrpchost", DEFAULT_RPCCONNECT);
     int port = gArgs.GetIntArg("-mainchainrpcport", BaseParams().MainchainRPCPort());
@@ -119,10 +123,25 @@ static UniValue MainChainHttpJson(const std::string& strRequest)
     // Synchronously look up hostname
     raii_evhttp_connection evcon = obtain_evhttp_connection_base(base.get(), host, port);
     // Never 0: libevent reads that as "use my own defaults", not "no timeout".
-    evhttp_connection_set_timeout(evcon.get(), std::clamp<int64_t>(gArgs.GetIntArg("-mainchainrpctimeout", DEFAULT_MAINCHAIN_RPC_TIMEOUT),
-                                                                   1, MAX_MAINCHAIN_RPC_TIMEOUT));
+    const int64_t timeout_s = std::clamp<int64_t>(gArgs.GetIntArg("-mainchainrpctimeout", DEFAULT_MAINCHAIN_RPC_TIMEOUT),
+                                                  1, MAX_MAINCHAIN_RPC_TIMEOUT);
+    // A deadline shorter than the timeout bounds the whole exchange, not each
+    // wait: the connection's timeout covers one idle read or write, so it is
+    // set to the deadline too, and the event loop itself stops at the
+    // deadline (a reply still incomplete then counts as none).
+    const bool deadline = deadline_ms > 0 && deadline_ms < timeout_s * 1000;
+    if (deadline) {
+        struct timeval tv;
+        tv.tv_sec = deadline_ms / 1000;
+        tv.tv_usec = (deadline_ms % 1000) * 1000;
+        evhttp_connection_set_timeout_tv(evcon.get(), &tv);
+    } else {
+        // Never 0: libevent reads that as "use my own defaults", not "no timeout".
+        evhttp_connection_set_timeout(evcon.get(), timeout_s);
+    }
 
     HTTPReply response;
+    if (deadline) response.base = base.get();
     raii_evhttp_request req = obtain_evhttp_request(http_request_done, (void*)&response);
     if (req == NULL)
         throw std::runtime_error("create http request failed");
@@ -160,6 +179,15 @@ static UniValue MainChainHttpJson(const std::string& strRequest)
         throw CConnectionFailed("send http request failed");
     }
 
+    if (deadline) {
+        // Requests still pending at the deadline are freed with the
+        // connection below, without their callback, so `response` stays as
+        // it was: status 0, which is read as no connection.
+        struct timeval tv;
+        tv.tv_sec = deadline_ms / 1000;
+        tv.tv_usec = (deadline_ms % 1000) * 1000;
+        event_base_loopexit(base.get(), &tv);
+    }
     event_base_dispatch(base.get());
 
     if (response.status == 0)
@@ -218,6 +246,22 @@ std::vector<UniValue> CallMainChainRPCBatch(const std::string& strMethod,
     }
 
     return MatchBatchReplies(MainChainHttpJson(batch.write() + "\n"), params_list.size(), strMethod);
+}
+
+std::vector<UniValue> CallMainChainRPCCalls(const std::vector<std::pair<std::string, UniValue>>& calls,
+                                            int64_t deadline_ms)
+{
+    if (calls.empty()) return {};
+    g_mainchain_rpc_calls.fetch_add(calls.size(), std::memory_order_relaxed);
+    UniValue batch(UniValue::VARR);
+    {
+        std::lock_guard<std::mutex> lock(g_mainchain_rpc_bymethod_mutex);
+        for (size_t i = 0; i < calls.size(); ++i) {
+            ++g_mainchain_rpc_bymethod[calls[i].first];
+            batch.push_back(JSONRPCRequestObj(calls[i].first, calls[i].second, (int)i));
+        }
+    }
+    return MatchBatchReplies(MainChainHttpJson(batch.write() + "\n", deadline_ms), calls.size(), "calls");
 }
 
 std::vector<UniValue> MatchBatchReplies(const UniValue& valReply, size_t expected,

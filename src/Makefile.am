@@ -238,6 +238,7 @@ BITCOIN_CORE_H = \
   policy/value.h \
   pos.h \
   pos_producer.h \
+  pos_signing_record.h \
   bls.h \
   musig.h \
   vrf.h \
@@ -424,6 +425,7 @@ libbitcoin_node_a_SOURCES = \
   node/miner.cpp \
   node/minisketchwrapper.cpp \
   pos_producer.cpp \
+  pos_signing_record.cpp \
   node/psbt.cpp \
   node/transaction.cpp \
   node/ui_interface.cpp \

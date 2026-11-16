@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -129,6 +130,23 @@ enum class AnchorCheckResult {
  *  and MainchainUnchangedHeight in anchor.cpp. */
 AnchorCheckResult CheckMainchainAnchor(uint32_t height, const uint256& hash);
 
+/** Verdicts for a decision that releases on a replaced anchor (the signing
+ *  check, pos_signing_record.h): every answer that says an anchor is replaced
+ *  comes from the daemon in this call, never from a cache, because a cached
+ *  "off the best chain" stays until the anchor watcher's next tick and Bitcoin
+ *  may have returned since. An anchor in the canonical cache is answered OK
+ *  from it: that answer only ever holds more, never releases. Every other
+ *  anchor, each asked once however often it is named, goes to the daemon in
+ *  one round trip together with getblockchaininfo, ended by `deadline_ms`; an
+ *  anchor unknown to the daemon is NOT_FOUND only if that same reply shows it
+ *  out of its initial download with its best chain at or past the anchor's
+ *  height, and NO_CONNECTION otherwise. With no whole reply by the deadline,
+ *  every anchor not answered from the cache is NO_CONNECTION, and so is every
+ *  call for the next `deadline_ms`, so that checks queued behind one that
+ *  waited do not each wait again. Replies in the order of `anchors`. */
+std::vector<AnchorCheckResult> CheckMainchainAnchorsFresh(const std::vector<std::pair<uint32_t, uint256>>& anchors,
+                                                          int64_t deadline_ms);
+
 /** What the parent chain daemon last said about its sync, as CheckMainchainAnchor
  *  last read it: whether it answered, whether it was still in its initial
  *  download, and its block count (-1 when it did not answer or was syncing).
@@ -139,6 +157,15 @@ struct MainchainSyncSnapshot {
     int blocks{-1};
 };
 MainchainSyncSnapshot GetMainchainSyncSnapshot();
+
+/** Called by the anchor watcher whenever it sees the parent chain reorganize,
+ *  with the height below which nothing changed (the fork point), or -1 when it
+ *  could not tell how the tip moved. A plain extension, where the old tip is
+ *  still on the best chain, calls nothing: it replaced no block, even one newer
+ *  than the watcher's last poll. Set once at the start; the signing check
+ *  (pos_signing_record.h) uses it to void the escape of a block whose anchor
+ *  may have changed side. */
+void SetMainchainMoveListener(std::function<void(int unchanged_height)> listener);
 
 /** The parent chain's height as its daemon reports it once synced, asked again
  *  at most every few seconds; -1 while it is unreachable or still syncing. For
@@ -274,6 +301,16 @@ std::vector<uint256> GetAnchorRecoverySet();
  *  cache that AnchorCertifiedSiblingPending reads. */
 void SetAnchorRecoveryStateForTesting(const std::set<uint256>& invalidated,
                                       const std::set<std::pair<uint32_t, uint256>>& stale);
+
+/** Unit tests only: the anchor caches' guard against an answer that straddles
+ *  a parent tip move. Reads the cache generation as a caller does before it
+ *  asks the daemon, runs `meanwhile` (the daemon's answer in flight), then
+ *  stores OK for the anchor as that answer. Returns whether the canonical
+ *  cache took it, and leaves the cache without it. */
+bool CacheAnchorOkForTesting(uint32_t height, const uint256& hash, const std::function<void()>& meanwhile);
+/** Unit tests only: drop the anchor caches above `unchanged_height`, as the
+ *  watcher does when the parent tip moves (-1: all of them). */
+void DropAnchorCachesForTesting(int unchanged_height);
 
 /** Record that the PoS finality gate rejected a rival branch
  *  (bad-fork-prior-to-pos-final in ContextualCheckBlockHeader). Rivals being

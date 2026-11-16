@@ -164,4 +164,18 @@ BOOST_AUTO_TEST_CASE(one_headers_reply_yields_one_verdict)
     BOOST_CHECK(InterpretAnchorHeaderReply(no_conf, 800000) == AnchorCheckResult::STALE);
 }
 
+BOOST_AUTO_TEST_CASE(an_answer_asked_before_a_parent_move_is_not_cached_after_it)
+{
+    // An OK the daemon gave just before Bitcoin reorganized, arriving after
+    // the watcher dropped the caches for that reorganization, would otherwise
+    // be kept as current until the next reorganization at or below it.
+    const uint256 anchor = uint256S("aa");
+    BOOST_CHECK(CacheAnchorOkForTesting(800000, anchor, [] {}));
+    BOOST_CHECK(!CacheAnchorOkForTesting(800000, anchor, [] { DropAnchorCachesForTesting(799990); }));
+    BOOST_CHECK(!CacheAnchorOkForTesting(800000, anchor, [] { DropAnchorCachesForTesting(-1); }));
+    // Asked after the drop: kept.
+    DropAnchorCachesForTesting(799990);
+    BOOST_CHECK(CacheAnchorOkForTesting(800000, anchor, [] {}));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

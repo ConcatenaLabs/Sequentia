@@ -169,10 +169,12 @@ class PosAncestryLockCertifiedParentTest(BitcoinTestFramework):
             self.wait_until(lambda: n.getbestblockhash() == x_prime, timeout=30)
 
         self.log.info("4) Reconnected, with Bitcoin still at height %d, they certify h+1" % parent_height)
-        # Every member is share-locked on a block of its own half: each queried
-        # its peers for that block's certificate when its collection restarted.
+        # Every member is share-locked on a block of its own half: its signing
+        # record holds a share on a block at h other than X'.
         for n in producers:
-            assert self.log_count(n, "share-lock at ") >= 1, "a member was not share-locked"
+            rivals = [e for e in n.getsigningrecord()["entries"]
+                      if e["kind"] == "share" and e["height"] == h and e["hash"] != x_prime]
+            assert rivals, "a member was not share-locked"
         self.connect_producers([(a, b) for a, b in mesh if (a, b) not in ((1, 2), (3, 4))])
         t0 = time.time()
         self.wait_until(lambda: min(n.getblockcount() for n in producers) >= h + 1, timeout=60)

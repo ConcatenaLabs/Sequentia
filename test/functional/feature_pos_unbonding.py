@@ -38,6 +38,7 @@ from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    pos_sign_after_share_lock,
     assert_equal, assert_raises_rpc_error, get_auth_cookie, get_datadir_path, rpc_port, p2p_port,
 )
 from test_framework.key import ECKey
@@ -118,7 +119,7 @@ class PosUnbondingTest(BitcoinTestFramework):
 
     def mine(self, n=1):
         for _ in range(n):
-            self.nodes[1].generateposblock(self.a_wif)
+            pos_sign_after_share_lock(self.nodes[1].generateposblock, self.a_wif)
 
     def parent(self, n):
         self.generatetoaddress(self.nodes[0], n, self.parent_addr, sync_fun=self.no_op)
@@ -184,7 +185,7 @@ class PosUnbondingTest(BitcoinTestFramework):
         s, p = self.nodes[1], self.nodes[2]
         self.sync_p()
         txids = [p.sendrawtransaction(t.serialize().hex(), 0) for t in txs]
-        blk = p.generateposblock(self.a_wif)["hash"]
+        blk = pos_sign_after_share_lock(p.generateposblock, self.a_wif)["hash"]
         in_block = [t["txid"] for t in p.getblock(blk, 2)["tx"]]
         assert all(t in in_block for t in txids), "the forced transactions are not in the block"
         best = s.getbestblockhash()
@@ -346,7 +347,7 @@ class PosUnbondingTest(BitcoinTestFramework):
     def cross_activation_beside_old_release(self):
         v, o = self.nodes[3], self.nodes[4]
         self.log.info("Crossing height %d beside %s", CROSS, o.getnetworkinfo()["subversion"])
-        v.generateposblock(self.a_wif)
+        pos_sign_after_share_lock(v.generateposblock, self.a_wif)
         self.sync_blocks([v, o])
         if not v.listwallets():
             v.createwallet(wallet_name="", descriptors=False)
@@ -356,24 +357,24 @@ class PosUnbondingTest(BitcoinTestFramework):
             v.importprivkey(wif, "", False)
             v.registerstake(pub, 100)
         while v.getblockcount() < CROSS - 4:
-            v.generateposblock(self.a_wif)
+            pos_sign_after_share_lock(v.generateposblock, self.a_wif)
         self.sync_blocks([v, o])
 
         self.log.info(" below the height the two accept each other's one-step withdrawals")
         r0 = v.withdrawstake(keys[0][2])
         assert "unbonding" not in r0
         self.sync_mempools([v, o])
-        b_o = o.generateposblock(self.a_wif)["hash"]
+        b_o = pos_sign_after_share_lock(o.generateposblock, self.a_wif)["hash"]
         self.sync_blocks([v, o])
         assert_equal(v.getbestblockhash(), b_o)
         assert_equal(v.gettransaction(r0["txid"])["confirmations"], 1)
         r1 = v.withdrawstake(keys[1][2])
         assert "unbonding" not in r1
-        b_v = v.generateposblock(self.a_wif)["hash"]
+        b_v = pos_sign_after_share_lock(v.generateposblock, self.a_wif)["hash"]
         self.sync_blocks([v, o])
         assert_equal(o.getbestblockhash(), b_v)
         while v.getblockcount() < CROSS - 1:
-            v.generateposblock(self.a_wif)
+            pos_sign_after_share_lock(v.generateposblock, self.a_wif)
         self.sync_blocks([v, o])
 
         self.log.info(" at the height O mines a one-step withdrawal and V refuses the block")
@@ -384,10 +385,10 @@ class PosUnbondingTest(BitcoinTestFramework):
         assert_equal(v.testmempoolaccept([T.serialize().hex()])[0]["reject-reason"], "bad-unbond-required")
         self.disconnect_nodes(3, 4)
         o.sendrawtransaction(T.serialize().hex())
-        x = o.generateposblock(self.a_wif)["hash"]
+        x = pos_sign_after_share_lock(o.generateposblock, self.a_wif)["hash"]
         assert T.hash in [t["txid"] for t in o.getblock(x, 2)["tx"]]
-        o.generateposblock(self.a_wif)
-        b_h = v.generateposblock(self.a_wif)["hash"]
+        pos_sign_after_share_lock(o.generateposblock, self.a_wif)
+        b_h = pos_sign_after_share_lock(v.generateposblock, self.a_wif)["hash"]
         with v.assert_debug_log(["ConnectBlock: bad-unbond-required in tx %s" % T.hash]):
             self.connect_nodes(3, 4)
             self.wait_until(lambda: any(t["hash"] == x and t["status"] == "invalid" for t in v.getchaintips()) or
@@ -410,7 +411,7 @@ class PosUnbondingTest(BitcoinTestFramework):
         o.invalidateblock(x)
         self.wait_until(lambda: o.getbestblockhash() == v.getbestblockhash(), timeout=30)
         assert_equal(o.testmempoolaccept([T.serialize().hex()])[0]["reject-reason"], "bad-unbond-required")
-        o.generateposblock(self.a_wif)
+        pos_sign_after_share_lock(o.generateposblock, self.a_wif)
         self.sync_blocks([v, o])
         assert_equal(v.getblockcount(), CROSS + 1)
 

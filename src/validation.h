@@ -213,6 +213,34 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
  *  been rebuilt, before the tip is activated. */
 void PosRefreshCertifiedKeys(ChainstateManager& chainman, CBlockIndex* registry_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+/** SEQUENTIA PoS: whether the block index holds a verified full certificate
+ *  for `pindex`: it connected here at least once (ConnectBlock checked its
+ *  certificate) and carries its parent's certification quorum. */
+bool PosIndexCertifies(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+/** SEQUENTIA PoS: tell the signing check (PosSigningNoteCertificate) that the
+ *  block index holds a verified full certificate for `pindex`, if it does. */
+enum class PosCertRoute;
+void PosNoteVerifiedCertificate(const CBlockIndex* pindex, PosCertRoute route) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+/** SEQUENTIA PoS: what the block index says now of a block the signing check
+ *  holds (pos_signing_record.h, PosIndexStanding): on the active chain, off it,
+ *  failed here, or dropped by the anchor watcher (it or an ancestor), with
+ *  the anchors the watcher's marks name (PosIndexState), and the last call in
+ *  this run that cleared the failure marks of it or of one of its ancestors.
+ *  A block not in the index yet stands, and is revived, as its parent
+ *  `parent` is. Takes cs_main. */
+enum class PosIndexStanding;
+struct PosIndexState;
+PosIndexState PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent);
+
+/** SEQUENTIA PoS: at the start, once the chain is loaded and before any
+ *  signing path runs: every block in the signing record's window that
+ *  connected here with a verified full certificate (failed since or not: the
+ *  check reads its standing), given to the signing check. With the record, this is everything the node knows of the heights
+ *  that bind; the index answers for every entry the record has dropped. */
+void PosSigningNoteIndexAtStart(ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
 // --- SEQUENTIA immediate finality: reconciliation hooks (anchor.cpp monitor) ---
 
 /** The current immediate-finality point (highest active-chain quorum-certified
@@ -867,6 +895,13 @@ public:
 
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** The clearing of ResetBlockFailureFlags, with the blocks whose failure
+     *  it cleared appended to `cleared`, and without the signing check's
+     *  record of the revival (that waits until the caller is done with them;
+     *  see PosStampRevived). */
+    void ClearBlockFailureFlags(CBlockIndex* pindex, std::vector<CBlockIndex*>& cleared)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** SEQUENTIA, on a node that watches Bitcoin: ResetBlockFailureFlags(pindex),
      *  then, in the same cs_main hold, mark failed again every block that
