@@ -250,6 +250,42 @@ repoint_page() {
     | sed -E 's#href="(\.\./)?(.*)"#\2#' | sort -u | sed 's/^/  /'
 }
 
+# --- Stable names follow the newest version ----------------------------------
+# A recipe can name unversioned aliases (PRODUCT_LATEST_ALIASES), symlinks such
+# as ambra-latest.apk that a site links so its download button never needs
+# editing. Each points at the newest versioned file matching the recipe's glob,
+# chosen the same way the cards are, and is repointed on every run, so a release
+# moves the alias with it. The new link is made beside the old one and renamed
+# over it, so a download never meets a missing name.
+update_aliases() {
+  local recipe name glob aliases newest one alias
+  for recipe in "$RECIPE_DIR"/*.sh; do
+    [ -f "$recipe" ] || continue
+    name="$(basename "$recipe" .sh)"
+    # Most recipes name no aliases; grep then fails, which pipefail would make fatal.
+    aliases="$(grep -m1 '^PRODUCT_LATEST_ALIASES=' "$recipe" | cut -d= -f2- | tr -d '"' || true)"
+    [ -n "$aliases" ] || continue
+    glob="$(grep -m1 '^PRODUCT_INDEX_GLOB=' "$recipe" | cut -d= -f2- | tr -d '"')"
+    [ -n "$glob" ] || continue
+    local -a globs=()
+    read -r -a globs <<< "$glob"
+    newest=""
+    for one in "${globs[@]}"; do
+      newest="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name "$one" -printf '%f\n' 2>/dev/null \
+                 | grep -E '[0-9]+\.[0-9]+' | sort -V | tail -1 || true)"
+      [ -n "$newest" ] && break
+    done
+    [ -n "$newest" ] || { log "[$name] no versioned file for its aliases; left as they are"; continue; }
+    local -a names=()
+    read -r -a names <<< "$aliases"
+    for alias in "${names[@]}"; do
+      ln -sfn "$newest" "$DOWNLOAD_DIR/$alias.part"
+      mv -Tf "$DOWNLOAD_DIR/$alias.part" "$DOWNLOAD_DIR/$alias"
+    done
+    log "[$name] ${names[*]} -> $newest"
+  done
+}
+
 # --- Checksums for everything the directory serves ----------------------------
 # One SHA256SUMS over every artifact present, rewritten on every run so it can
 # neither name a file that is gone nor miss one that arrived. Built from the
@@ -318,6 +354,7 @@ for recipe in "$RECIPE_DIR"/*.sh; do
 done
 
 update_index
+update_aliases
 write_checksums
 sign_checksums
 

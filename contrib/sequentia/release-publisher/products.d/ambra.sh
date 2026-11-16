@@ -18,6 +18,9 @@ export LC_ALL=C
 PRODUCT_NAME="ambra"
 PRODUCT_REPO="${SEQ_AMBRA_REPO:-https://github.com/ConcatenaLabs/ambra.git}"
 PRODUCT_INDEX_GLOB="ambra-*.apk"
+# Stable names a site links for "the current Ambra for Android"; the driver keeps
+# them pointing at the newest ambra-<version>.apk.
+PRODUCT_LATEST_ALIASES="ambra-latest.apk ambra-latest-android-testnet.apk ambra-latest"
 
 # Toolchain, as installed on the box. Exported rather than assumed to be on PATH,
 # because the timer runs this with systemd's environment, not a login shell's.

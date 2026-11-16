@@ -25,6 +25,7 @@ built. A recipe defines:
 | `remote_version()` | what version is published upstream |
 | `build(version, outdir)` | put artifacts in `outdir` |
 | `requirements()` | optional: print a reason and fail to be skipped |
+| `PRODUCT_LATEST_ALIASES` | optional: unversioned names (symlinks) that every run points at the newest versioned artifact, for links that never change |
 
 Anything the recipe writes into `outdir` gets published. Nothing else is needed.
 
@@ -35,7 +36,7 @@ Anything the recipe writes into `outdir` gets published. Nothing else is needed.
 | `node` | git **tag** | Linux tarball + Windows installer |
 | `extension` | `manifest.json` | zip of the repo, minus development files |
 | `fulmen` | `package.json` | Linux AppImage + Windows zip + Windows installer |
-| `ambra` | `app/pubspec.yaml` | signed Android APK |
+| `ambra` | `app/pubspec.yaml` | signed Android APK, also at `ambra-latest.apk` |
 | `seqognito` | `package.json` | Linux AppImage + Windows zip + Windows installer |
 | `pignus` | `pignus/__init__.py` | source tarball of the repository, minus development files |
 
