@@ -234,11 +234,6 @@ enum class PosIndexStanding;
 struct PosIndexState;
 PosIndexState PosSigningIndexStanding(ChainstateManager& chainman, const uint256& hash, const uint256& parent);
 
-/** Unit tests: forget which blocks ResetBlockFailureFlags revived (the
- *  record keeps pointers into the block index; a test that frees its own
- *  index entries calls this). */
-void PosSigningForgetRevivalsForTesting() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-
 /** SEQUENTIA PoS: at the start, once the chain is loaded and before any
  *  signing path runs: every block in the signing record's window that
  *  connected here with a verified full certificate (failed since or not: the
@@ -900,6 +895,13 @@ public:
 
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** The clearing of ResetBlockFailureFlags, with the blocks whose failure
+     *  it cleared appended to `cleared`, and without the signing check's
+     *  record of the revival (that waits until the caller is done with them;
+     *  see PosStampRevived). */
+    void ClearBlockFailureFlags(CBlockIndex* pindex, std::vector<CBlockIndex*>& cleared)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** SEQUENTIA, on a node that watches Bitcoin: ResetBlockFailureFlags(pindex),
      *  then, in the same cs_main hold, mark failed again every block that

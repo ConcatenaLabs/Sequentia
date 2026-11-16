@@ -302,6 +302,16 @@ std::vector<uint256> GetAnchorRecoverySet();
 void SetAnchorRecoveryStateForTesting(const std::set<uint256>& invalidated,
                                       const std::set<std::pair<uint32_t, uint256>>& stale);
 
+/** Unit tests only: the anchor caches' guard against an answer that straddles
+ *  a parent tip move. Reads the cache generation as a caller does before it
+ *  asks the daemon, runs `meanwhile` (the daemon's answer in flight), then
+ *  stores OK for the anchor as that answer. Returns whether the canonical
+ *  cache took it, and leaves the cache without it. */
+bool CacheAnchorOkForTesting(uint32_t height, const uint256& hash, const std::function<void()>& meanwhile);
+/** Unit tests only: drop the anchor caches above `unchanged_height`, as the
+ *  watcher does when the parent tip moves (-1: all of them). */
+void DropAnchorCachesForTesting(int unchanged_height);
+
 /** Record that the PoS finality gate rejected a rival branch
  *  (bad-fork-prior-to-pos-final in ContextualCheckBlockHeader). Rivals being
  *  re-offered and re-rejected every few peer retries while the tip stands

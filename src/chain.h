@@ -320,6 +320,15 @@ public:
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 
+    //! (memory only) SEQUENTIA, for the signing check (PosIndexState::revivals):
+    //! the number of the last ResetBlockFailureFlags call in this run that
+    //! cleared the failure of this block or of one of its ancestors and left
+    //! it cleared; 0 if none. Kept on the entry itself, and inherited from the
+    //! parent when the entry is created, so the answer for one block moves
+    //! only when its own ancestry is revived (never because another branch
+    //! was), and costs memory bounded by the index, not by a revival history.
+    uint64_t m_pos_revived{0};
+
     //! SEQUENTIA PoS certification and fork-choice keys (whitepaper §3.8).
     //! m_pos_countersigs is the number of committee members on the fullest
     //! certificate this node has received for the block: the one it arrived

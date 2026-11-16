@@ -23,8 +23,10 @@ return-partial, return-generate: M certifies X, anchored on the newest Bitcoin
 unrelated: M certifies W and X above it; the operator invalidates W. M makes Z
   in W's place after one round, and signs Y, a rival of X, after one more.
   Reconsidering Z, a valid block on another branch, clears nothing: Y is
-  signed again at once, three times. Reconsidering X (W and X come back) and
-  invalidating X again costs Y a fresh round.
+  signed again at once, three times. Z is then invalidated and reconsidered
+  REVIVALS times, more than any history of revivals the node could keep
+  (4,096 records once), and Y is still signed at once. Reconsidering X (W and
+  X come back) and invalidating X again costs Y a fresh round.
 once: X dropped as above; M restarts with the daemon refusing header queries,
   then holding them with no reply. One check asks about X's anchor once
   (it is also the anchor the watcher's mark names) and gives up within half a
@@ -51,6 +53,7 @@ from test_framework.authproxy import JSONRPCException
 from test_framework.util import assert_equal, pos_sign_after_share_lock, rpc_port
 
 CASES = ("return-partial", "return-generate", "once", "unrelated")
+REVIVALS = 4200
 
 
 class PosSigningRecordFreshTest(PosSigningRecordRpcTest):
@@ -215,6 +218,19 @@ class PosSigningRecordFreshTest(PosSigningRecordRpcTest):
             assert_equal(self.status(x), ["invalid"])
             made_at_once(self.log, "unrelated", "Y again after reconsidering Z, a valid block on another branch (%d)" % k,
                          lambda: self.partial(tmpl, "uz%d" % k), self.round_s)
+        # Revivals of Z, which does not lie below X, however many.
+        t0 = time.time()
+        for _ in range(0, REVIVALS, 200):
+            calls = []
+            for _ in range(200):
+                calls += [m.invalidateblock.get_request(z), m.reconsiderblock.get_request(z)]
+            errors = [r["error"] for r in m.batch(calls) if r["error"] is not None]
+            assert not errors, errors[:3]
+        assert_equal(m.getbestblockhash(), z)
+        assert_equal(self.status(x), ["invalid"])
+        self.log.info("unrelated: Z invalidated and reconsidered %d times in %.1f s" % (REVIVALS, time.time() - t0))
+        made_at_once(self.log, "unrelated", "Y again after %d revivals of Z" % REVIVALS,
+                     lambda: self.partial(tmpl, "un"), self.round_s)
         # The original case: X revived and invalidated again, with no check
         # between, owes a fresh round.
         m.reconsiderblock(x)

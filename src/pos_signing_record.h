@@ -164,7 +164,9 @@ enum class PosAnchorStanding {
  *  after one round either way.
  *  GONE releases a block at once, so it must be the daemon's answer in this
  *  check, never a remembered one (init: CheckMainchainAnchorsFresh); STANDS
- *  may come from what the node remembers, since it only ever holds more. The
+ *  may come from what the node remembers, since it only ever holds more (a
+ *  remembered STANDS lasts until the anchor watcher's next tick, so that is
+ *  when a replacement of such an anchor releases the block). The
  *  judge waits for the daemon at most PosSigningDaemonBudgetMs(), and an
  *  anchor not answered by then is UNDECIDED. */
 using PosAnchorJudge = std::function<std::optional<std::vector<PosAnchorStanding>>(

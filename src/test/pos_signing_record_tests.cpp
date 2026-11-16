@@ -1020,7 +1020,6 @@ BOOST_FIXTURE_TEST_CASE(a_revival_counts_only_for_the_block_it_revives, TestingS
     // them with the fixture.
     ChainstateManager& chainman = *m_node.chainman;
     LOCK(cs_main);
-    PosSigningForgetRevivalsForTesting();
     CChainState& cs = chainman.ActiveChainstate();
     CBlockIndex* const genesis = chainman.ActiveChain().Tip();
     const auto add = [&](CBlockIndex* parent, uint32_t status) {
@@ -1089,7 +1088,63 @@ BOOST_FIXTURE_TEST_CASE(a_revival_counts_only_for_the_block_it_revives, TestingS
     fail_again();
     cs.ReconsiderAnchoredBlock(v, [](const CBlockIndex*) { return true; });
     BOOST_CHECK_EQUAL(revivals(x), r4);
-    PosSigningForgetRevivalsForTesting();
+    // A block that arrives above a revived one was revived with it.
+    CBlockHeader above_y;
+    above_y.hashPrevBlock = y->GetBlockHash();
+    above_y.nTime = y->nTime + 1;
+    const CBlockIndex* z = chainman.m_blockman.AddToBlockIndex(above_y);
+    BOOST_CHECK(z->pprev == y);
+    BOOST_CHECK_EQUAL(revivals(z), r4);
+}
+
+BOOST_FIXTURE_TEST_CASE(no_number_of_revivals_elsewhere_moves_a_block, TestingSetup)
+{
+    // X is failed through W (an operator's invalidateblock), off the active
+    // chain; A is a block on another branch that fails and is revived again
+    // and again, far more often than any bound on a history of revivals
+    // (4,096 on the head this replaced). X's number never moves, and the
+    // revival of X's own ancestry still moves it afterwards.
+    ChainstateManager& chainman = *m_node.chainman;
+    LOCK(cs_main);
+    CChainState& cs = chainman.ActiveChainstate();
+    CBlockIndex* const genesis = chainman.ActiveChain().Tip();
+    const auto add = [&](CBlockIndex* parent, uint32_t status) {
+        CBlockIndex* p = new CBlockIndex();
+        p->pprev = parent;
+        p->nHeight = parent->nHeight + 1;
+        p->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA | status;
+        const auto it = chainman.m_blockman.m_block_index.emplace(GetRandHash(), p).first;
+        p->phashBlock = &it->first;
+        p->BuildSkip();
+        return p;
+    };
+    const auto revivals = [&](const CBlockIndex* p) {
+        return PosSigningIndexStanding(chainman, p->GetBlockHash(), uint256()).revivals;
+    };
+    CBlockIndex* w = add(genesis, 0);
+    CBlockIndex* x = add(w, 0);
+    CBlockIndex* a = add(genesis, 0);
+    // X revived once, then failed again: its number is that revival's.
+    w->nStatus |= BLOCK_FAILED_VALID;
+    x->nStatus |= BLOCK_FAILED_CHILD;
+    cs.ResetBlockFailureFlags(w);
+    const uint64_t rx = revivals(x);
+    BOOST_CHECK(rx > 0);
+    w->nStatus |= BLOCK_FAILED_VALID;
+    x->nStatus |= BLOCK_FAILED_CHILD;
+    for (int i = 1; i <= 5000; ++i) {
+        a->nStatus |= BLOCK_FAILED_VALID;
+        cs.ResetBlockFailureFlags(a);
+        if (revivals(x) != rx) {
+            BOOST_ERROR("revival " << i << " of another branch moved X's number from " << rx << " to " << revivals(x));
+            break;
+        }
+    }
+    BOOST_CHECK(revivals(a) > rx);
+    // A block never revived keeps 0 through all of it.
+    BOOST_CHECK_EQUAL(revivals(add(genesis, 0)), 0U);
+    cs.ResetBlockFailureFlags(w);
+    BOOST_CHECK(revivals(x) > revivals(a));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

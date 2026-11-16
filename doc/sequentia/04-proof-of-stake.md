@@ -1204,8 +1204,8 @@ Bitcoin anchor, and judges it again whenever its view of Bitcoin moves:
 
 - the anchor stands: X binds as above;
 - Bitcoin replaced it, or the anchor of a block below X (the anchor watcher
-  then drops X with that block): X binds nothing, at once, and any escape X had
-  is void;
+  then drops X with that block): X binds nothing from the moment the node
+  learns it, and any escape X had is void;
 - Bitcoin returns to it later: X binds again, so the next rival waits for a new
   query and a new round. An escape counts only while the anchor stood unbroken
   (a Bitcoin block that only extends Bitcoin's chain breaks nothing);
@@ -1236,13 +1236,19 @@ not failed for any reason (on the block or on any block below it) and its
 Bitcoin anchor stands. Otherwise:
 
 - Bitcoin replaced its anchor, or the anchor of a block below it (the anchor
-  watcher then drops that block and everything above it): it binds nothing, at
-  once. "Replaced" is the parent chain's verdict now, its daemon's answer in
-  the check itself. It is not the watcher's mark in the block index, which
-  persists on disk until the watcher revives the block, so after a restart it
-  can name an anchor Bitcoin has returned to while the node was stopped; nor
+  watcher then drops that block and everything above it): it binds nothing
+  from the moment the node learns it. "Replaced" is the parent chain's verdict
+  now, its daemon's answer in the check itself. It is not the watcher's mark
+  in the block index, which persists on disk until the watcher revives the
+  block, so after a restart it can name an anchor Bitcoin has returned to
+  while the node was stopped; nor
   is it the watcher's memory of an anchor it found replaced, which lasts until
-  its next tick, while Bitcoin may already have returned. What remains is
+  its next tick, while Bitcoin may already have returned. The one answer the
+  check does not ask the daemon for is "stands", for an anchor the node has
+  already found on Bitcoin's best chain: it keeps that answer until its anchor
+  watcher sees Bitcoin's tip move. A replacement of such an anchor therefore
+  frees the block by the watcher's next tick (every `-anchorpollinterval`
+  seconds), the same tick that drops the block. What remains is
   Bitcoin returning in the instant after the daemon answers: the member then
   signs a rival of a block whose anchor stands again. That is a committee
   following Bitcoin there and back, which the design accepts (there is no
@@ -1270,7 +1276,9 @@ Bitcoin anchor stands. Otherwise:
   nothing was signed at that height while it was valid. Only a revival of that
   block counts: its own failure cleared, or that of a block below it whose
   failure made it fail. A `reconsiderblock` that clears nothing, or clears
-  another branch, leaves its escape as it was.
+  another branch, leaves its escape as it was, however many revivals the node
+  has seen: each block index entry keeps the number of the last revival of
+  its own ancestry.
 
 Invalidating a certified block is the operator's responsibility: if its signers
 then certify a rival, two certified blocks exist at that height.

@@ -188,17 +188,20 @@ class PosFinalityHoldTest(BitcoinTestFramework):
             self.wait_until(lambda: any(x["hash"] == b for x in obs.getposfinality()["held_by"]) or
                             self.has_body(OBS, b), timeout=5)
             if not self.has_body(OBS, b):
-                break
-            self.log.info("  half A already held block %s (attempt %d); splitting again", b[:16], attempt)
+                # Half A keeps extending the chain; finality must not move up to h.
+                self.wait_until(lambda: obs.getblockcount() >= h + 1, timeout=60)
+                time.sleep(max(0, t0 + 8 - time.time()))
+                info = obs.getposfinality()
+                # The twin can also deliver the body late, after the first
+                # look; then O judged it, and this round proves nothing either.
+                if not self.has_body(OBS, b):
+                    break
+            self.log.info("  half A held block %s too (attempt %d); splitting again", b[:16], attempt)
             self.wait_until(lambda: obs.getposfinality()["finalized_height"] >= h, timeout=30)
             self.realign(h, a, b)
             obs.disconnect_p2ps()
         else:
             raise AssertionError("half A held the competing block in every round")
-        # Half A keeps extending the chain; finality must not move up to h.
-        self.wait_until(lambda: obs.getblockcount() >= h + 1, timeout=60)
-        time.sleep(max(0, t0 + 8 - time.time()))
-        info = obs.getposfinality()
         assert info["finalized_height"] < h, info
         assert b in peer.asked, "O did not ask for the competing block"
         self.log.info("  after %.0f s O is still undecided at %d (finalized %d, tip %d)",
