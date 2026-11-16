@@ -259,7 +259,11 @@ The rule has two layers.
   record, or evidence), every block's certificate is verified in order from
   F: block F+1's committee is seeded from F's anchor, on the chain, and each
   later block's from its verified parent's anchor. No committee is seeded by
-  a value whoever shows the branch chooses.
+  a value whoever shows the branch chooses. Every such committee is drawn
+  from the stake registry as it stood at F, the registry block F+1's
+  committee was really drawn from: the node rewinds the stake changes of the
+  blocks above F from their undo data. So no key registered after the seed
+  of the branch's first committee was public can sit on any of them.
 - *The lapse.* A transaction of L stays protected for a candidate B on a
   chain containing F until B's chain has a block R at height H_L and B's
   anchor is more than W above both a_L and R's anchor. This is a function of
@@ -379,7 +383,7 @@ A record is valid in a block B when all of the following hold:
     root;
   - its lost block has not lapsed for B.
 - Every header up to the highest entry carries a certificate that verifies in
-  order from F under the registry at B's parent (see "Certified" above).
+  order from F under the registry at F (see "Certified" above).
 - For each entry, a header at or below it has an anchor at a Bitcoin height
   at most B's anchor height that is not B's anchor's ancestor at that height.
   The node reads that ancestry by walking B's anchor's parents in its Bitcoin
@@ -431,9 +435,19 @@ be spent again.
   time, and the price of judging records from the chain alone. The same holds
   for a coalition that holds a seat quorum at some height by the draw: besides
   certifying that height alone, as it could anyway, it can record a fabricated
-  transaction and freeze a coin until the lapse. With a committee of 12 seats
-  and unequal stakes, such a coalition can hold about 39 % of the stake at
-  some heights. Below a seat quorum nothing can be recorded at all.
+  transaction and freeze a coin until the lapse. The coalition can pick the
+  fork point among the heights of a window (about 2W Bitcoin blocks), but
+  not its committee's members: they come from the registry at the fork
+  point, so it cannot register identities after the seed is known and grind
+  their seats. On the testnet's committee of 12 seats (quorum 7, two stakers
+  holding about 38 % and 36 % of the registered stake), the smallest
+  coalition with a seat quorum at some height of every window holds 39.4 %
+  of the stake. With a committee at its cap of 250 seats (quorum 126), a
+  coalition that splits its stake into many identities at the floor stake
+  reaches a seat quorum at some height of a window with about 42 to 44 % of
+  the stake, and at some height of a day with about 40 to 42 %, whether 250,
+  400 or 1,000 honest stakers hold the rest in equal or unequal stakes.
+  Below a seat quorum nothing can be recorded at all.
 - **Every node judges records alike.** A late node, one syncing from nothing
   with a Bitcoin daemon that never saw the stale block, and one whose daemon
   goes back and forth between a block's header and its body all reach the
@@ -483,9 +497,10 @@ be spent again.
   they had. A deep reorganization replays its blocks at their heights. While
   it does, a block full of due transactions carries nothing else.
 - **Stake changes in the lost branch.** A lost branch whose certificates do
-  not all verify under the registry at B's parent cannot be recorded, because
-  stake changed in its branch or since; the registry at a lost block's own
-  parent is not in B's chain until the lost stake transactions are replayed. Its failing transactions are then
+  not all verify under the registry at F cannot be recorded, because stake
+  changed inside the branch before the entry: the registry at a lost block's
+  own parent is not in B's chain until the lost stake transactions are
+  replayed. A stake change on B's chain after F does not stop a record. Its failing transactions are then
   protected only by the holders' refusal until the lapse, never by nothing:
   the holders bind every outpoint of a lost block whatever its record. A
   stake change is itself a lost transaction, due and replayed in lost order,
@@ -498,7 +513,9 @@ be spent again.
   replay ends.
 - **Record bytes and the check's cost.** A record carries no Bitcoin header.
   Judging one walks B's anchor's parents (at most 2W header reads, cached per
-  anchor) and verifies one certificate per lost header up to its highest
+  anchor), rewinds the stake registry from B's parent to F (one block and
+  its undo data read per height between them, cached per fork point and
+  parent), and verifies one certificate per lost header up to its highest
   entry.
 - **The holders' check per candidate.** The plan (the due run and the
   records owed) is computed once per parent on each holder and shared by the
@@ -535,21 +552,27 @@ also wait for the next Bitcoin block, and in some runs for the whole window.
 
 #### For a buyer's wallet
 
-The lock a buyer pays against must pass three checks, each instant except
-during a live Bitcoin fork:
+A wallet pays against a lock only when `checklock "txid"` answers
+`payable: true`. It runs the three checks the lock must pass, each instant
+except during a live Bitcoin fork, and otherwise lists the reasons in words a
+wallet can show:
 
 - It is certified and final: it has stood the observation window (§6 of
   [`04-proof-of-stake.md`](04-proof-of-stake.md)) with no competing
-  certificate at its height (`getposfinality`).
+  certificate at its height.
 - Bitcoin's tip is uncontested in the buyer's Bitcoin view: no other branch
   within the contest window (§5), as `getchaintips` shows it.
 - Its unburied ancestry holds no transaction that a reorganization can make
-  fail for good (`checklockancestry`). The unburied ancestry is the lock and
-  every ancestor confirmed in a block anchored fewer than W + 1 Bitcoin blocks
-  below the buyer's Bitcoin tip. A payment-proof claim, a peg-in, and a
-  transaction that creates or spends a stake record are never carried over a
-  reorganization, so nor is a lock funded from one: its seller could make
+  fail for good, and was examined whole. The unburied ancestry is the lock
+  and every ancestor confirmed in a block anchored fewer than W + 1 Bitcoin
+  blocks below the buyer's Bitcoin tip. A payment-proof claim, a peg-in, and
+  a transaction that creates or spends a stake record are never carried over
+  a reorganization, so nor is a lock funded from one: its seller could make
   that parent fail by double-spending a Bitcoin payment it made to itself.
+  The walk examines at most 1,000 unburied transactions (and 20,000 lookups
+  in all); a lock whose ancestry is larger is not payable, because a failing
+  ancestor could sit beyond what was examined. A lock funded from older
+  coins passes. `checklockancestry` runs this check alone.
 
 The first two close the one case the duty cannot: two blocks certified at one
 height on two live Bitcoin branches, neither set of signers knowing of the
@@ -567,7 +590,8 @@ a quorum certifies a block that breaks a binding.
 Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_attacks.py` (a
 transaction not yet due while Bitcoin outruns the window, a descendant whose
 certificate does not verify, a record whose first header carries no
-certificate), `feature_pos_lost_autonomous.py`
+certificate, a record certified with keys registered after its fork point
+and its control), `feature_pos_lost_autonomous.py`
 (the autonomous committee at the testnet's round lengths: the gap, a deep
 replay, the member's switch), `feature_pos_lost_replay.py` (the
 due run and its floor, the producer's opt-out, a producer's own-asset block,

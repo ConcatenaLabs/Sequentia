@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <anchor.h>
 #include <assetsdir.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -1920,20 +1921,127 @@ static RPCHelpMan submitlostblock()
         }};
 }
 
+//! The buyer's ancestry walk examines at most this many unburied
+//! transactions, and looks up at most LOCK_ANCESTRY_LOOKUPS transactions in
+//! all (buried parents included). A walk that has not finished within both
+//! answers "not payable": a failing ancestor could sit just beyond what was
+//! examined.
+static constexpr int LOCK_ANCESTRY_BUDGET = 1000;
+static constexpr size_t LOCK_ANCESTRY_LOOKUPS = 20000;
+
+struct LockAncestry {
+    bool complete{true};
+    int unburied{0};
+    size_t examined{0};
+    UniValue failing{UniValue::VARR};
+    std::string first_failing; //!< "<class> <txid>" of the first failing ancestor
+};
+
+//! The lock's unburied ancestry (doc 03, "For a buyer's wallet"): the lock and
+//! every ancestor confirmed in a block anchored fewer than W + 1 Bitcoin
+//! blocks below `btc_tip`, and which of them a Bitcoin reorganization can make
+//! fail for good. Throws when a transaction is not found or not in the active
+//! chain.
+static LockAncestry WalkLockAncestry(ChainstateManager& chainman, const uint256& lock, int btc_tip)
+{
+    LockAncestry out;
+    const CTxMemPool* mempool = nullptr;
+    const uint32_t depth = LostWindow() + 1;
+    std::deque<uint256> todo{lock};
+    std::set<uint256> seen;
+    while (!todo.empty()) {
+        const uint256 txid = todo.front();
+        if (seen.count(txid)) {
+            todo.pop_front();
+            continue;
+        }
+        if (out.unburied >= LOCK_ANCESTRY_BUDGET || seen.size() >= LOCK_ANCESTRY_LOOKUPS) {
+            // Fail closed: work is left and the budget is spent.
+            out.complete = false;
+            break;
+        }
+        todo.pop_front();
+        seen.insert(txid);
+        uint256 hash_block;
+        const CTransactionRef tx = node::GetTransaction(nullptr, mempool, txid, Params().GetConsensus(), hash_block);
+        if (!tx) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "transaction " + txid.GetHex() + " not found (needs -txindex)");
+        {
+            LOCK(cs_main);
+            const CBlockIndex* b = chainman.m_blockman.LookupBlockIndex(hash_block);
+            if (!b || !chainman.ActiveChain().Contains(b)) throw JSONRPCError(RPC_MISC_ERROR, "transaction " + txid.GetHex() + " is not in the active chain");
+            if (btc_tip - (int64_t)b->m_anchor_height >= (int64_t)depth) continue; // buried
+        }
+        ++out.unburied;
+        std::string cls;
+        for (size_t i = 0; i < tx->vin.size() && cls.empty(); ++i) {
+            if (tx->vin[i].m_is_pegin) cls = "peg-in";
+            else if (i < tx->witness.vtxinwit.size() && !tx->witness.vtxinwit[i].m_pegin_witness.stack.empty()) cls = "payment-proof claim";
+        }
+        for (const CTxOut& o : tx->vout) {
+            if (cls.empty() && (DelegationFromTxOut(o) || PayoutFromTxOut(o))) cls = "stake record";
+        }
+        for (const CTxIn& in : tx->vin) {
+            if (in.m_is_pegin) continue;
+            if (cls.empty()) {
+                uint256 hb;
+                if (const CTransactionRef parent = node::GetTransaction(nullptr, mempool, in.prevout.hash, Params().GetConsensus(), hb)) {
+                    if (in.prevout.n < parent->vout.size() &&
+                        (DelegationFromTxOut(parent->vout[in.prevout.n]) || PayoutFromTxOut(parent->vout[in.prevout.n]))) cls = "stake record";
+                }
+            }
+            todo.push_back(in.prevout.hash);
+        }
+        if (!cls.empty()) {
+            UniValue f(UniValue::VOBJ);
+            f.pushKV("txid", txid.GetHex());
+            f.pushKV("class", cls);
+            out.failing.push_back(f);
+            if (out.first_failing.empty()) out.first_failing = cls + " " + txid.GetHex();
+        }
+    }
+    out.examined = seen.size();
+    return out;
+}
+
+static int BitcoinTipHeight()
+{
+    const UniValue r = CallMainChainRPC("getblockcount", UniValue(UniValue::VARR));
+    const UniValue v = find_value(r, "result");
+    if (!find_value(r, "error").isNull() || !v.isNum()) throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "the Bitcoin daemon does not answer");
+    return v.get_int();
+}
+
+static std::string AncestryReason(const LockAncestry& a)
+{
+    if (!a.complete) {
+        return strprintf("the lock's recent ancestry is larger than this check examines (%d transactions), so a "
+                         "transaction that a Bitcoin reorganization can make fail could hide in it: do not pay "
+                         "against this lock; a lock funded from older coins passes", LOCK_ANCESTRY_BUDGET);
+    }
+    if (!a.first_failing.empty()) {
+        return "the lock is funded from a transaction that a Bitcoin reorganization can make fail for good (" +
+               a.first_failing + "), and with it the lock: do not pay against this lock";
+    }
+    return "";
+}
+
 static RPCHelpMan checklockancestry()
 {
     return RPCHelpMan{"checklockancestry",
-        "\nThe buyer's ancestry check on a lock it is about to pay against (doc/sequentia/03-bitcoin-anchoring.md, \"For a buyer's wallet\").\n"
-        "A lock is payable only when its unburied ancestry (the lock and every ancestor confirmed in a block anchored fewer than W + 1\n"
-        "Bitcoin blocks below the Bitcoin daemon's tip) holds no transaction that a Bitcoin reorganization can make fail for good:\n"
-        "a payment-proof claim, a peg-in, or a transaction that creates or spends a stake record. Such a transaction is never carried\n"
-        "over a reorganization, so nor is anything funded from it. The other two conditions (certified and final, an uncontested\n"
-        "Bitcoin tip) are getposfinality's and getchaintips'. Needs -txindex.\n",
+        "\nThe third of the buyer's checks on a lock alone (doc/sequentia/03-bitcoin-anchoring.md, \"For a buyer's wallet\");\n"
+        "checklock runs all three. A lock is payable here only when its unburied ancestry (the lock and every ancestor\n"
+        "confirmed in a block anchored fewer than W + 1 Bitcoin blocks below the Bitcoin daemon's tip) holds no transaction\n"
+        "that a Bitcoin reorganization can make fail for good: a payment-proof claim, a peg-in, or a transaction that creates\n"
+        "or spends a stake record. Such a transaction is never carried over a reorganization, so nor is anything funded from\n"
+        "it. The walk examines at most 1000 unburied transactions (and 20000 lookups in all); when the ancestry is larger the lock\n"
+        "is not payable. Needs -txindex.\n",
         {{"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the lock transaction"}},
         RPCResult{RPCResult::Type::OBJ, "", "", {
-            {RPCResult::Type::BOOL, "payable", "true when the unburied ancestry holds no transaction of a failing class"},
+            {RPCResult::Type::BOOL, "payable", "true when the whole unburied ancestry was examined and holds no transaction of a failing class"},
+            {RPCResult::Type::BOOL, "complete", "false when the ancestry is larger than the walk examines"},
+            {RPCResult::Type::STR, "reason", /*optional=*/true, "why the lock is not payable, in words a wallet can show"},
             {RPCResult::Type::NUM, "depth", "the Bitcoin depth (W + 1) from which an anchor is buried"},
-            {RPCResult::Type::NUM, "unburied", "how many transactions of the ancestry are unburied"},
+            {RPCResult::Type::NUM, "unburied", "how many transactions of the examined ancestry are unburied"},
             {RPCResult::Type::ARR, "failing", "the unburied ancestors of a failing class", {
                 {RPCResult::Type::OBJ, "", "", {
                     {RPCResult::Type::STR_HEX, "txid", "the transaction"},
@@ -1943,64 +2051,85 @@ static RPCHelpMan checklockancestry()
         RPCExamples{HelpExampleCli("checklockancestry", "\"<txid>\"")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             ChainstateManager& chainman = EnsureAnyChainman(request.context);
-            const CTxMemPool* mempool = nullptr;
-            int btc_tip = -1;
+            const LockAncestry a = WalkLockAncestry(chainman, ParseHashV(request.params[0], "txid"), BitcoinTipHeight());
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("payable", a.complete && a.failing.empty());
+            out.pushKV("complete", a.complete);
+            const std::string why = AncestryReason(a);
+            if (!why.empty()) out.pushKV("reason", why);
+            out.pushKV("depth", (int)(LostWindow() + 1));
+            out.pushKV("unburied", a.unburied);
+            out.pushKV("failing", a.failing);
+            return out;
+        }};
+}
+
+static RPCHelpMan checklock()
+{
+    return RPCHelpMan{"checklock",
+        "\nThe buyer's three checks on a lock it is about to pay against, in one call (doc/sequentia/03-bitcoin-anchoring.md,\n"
+        "\"For a buyer's wallet\"). A wallet pays only when \"payable\" is true, and otherwise shows the reasons:\n"
+        "1. the lock's block is certified and final (it has stood the observation window with no competing certificate);\n"
+        "2. Bitcoin's tip is uncontested in this node's Bitcoin view (no competing branch within -anchorcontestwindow);\n"
+        "3. the lock's unburied ancestry holds no transaction that a Bitcoin reorganization can make fail for good\n"
+        "   (checklockancestry), and was examined whole.\n"
+        "Needs -txindex and a Bitcoin daemon.\n",
+        {{"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the lock transaction"}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::BOOL, "payable", "true when all three checks pass"},
+            {RPCResult::Type::ARR, "reasons", "why not, in words a wallet can show; empty when payable", {
+                {RPCResult::Type::STR, "", "one reason"}}},
+            {RPCResult::Type::BOOL, "final", "the lock's block is certified and final"},
+            {RPCResult::Type::BOOL, "bitcoin_uncontested", "Bitcoin's tip is uncontested"},
+            {RPCResult::Type::BOOL, "ancestry_payable", "what checklockancestry answers"},
+            {RPCResult::Type::BOOL, "ancestry_complete", "the ancestry was examined whole"},
+            {RPCResult::Type::ARR, "failing", "the unburied ancestors of a failing class", {
+                {RPCResult::Type::OBJ, "", "", {
+                    {RPCResult::Type::STR_HEX, "txid", "the transaction"},
+                    {RPCResult::Type::STR, "class", "payment-proof claim, peg-in or stake record"},
+                }}}},
+        }},
+        RPCExamples{HelpExampleCli("checklock", "\"<txid>\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            if (!g_con_pos) throw JSONRPCError(RPC_MISC_ERROR, "Proof-of-Stake (con_pos) is not enabled on this chain");
+            ChainstateManager& chainman = EnsureAnyChainman(request.context);
+            const uint256 lock = ParseHashV(request.params[0], "txid");
+            UniValue reasons(UniValue::VARR);
+            // 1. Certified and final.
+            bool final = false, on_chain = false;
             {
-                const UniValue r = CallMainChainRPC("getblockcount", UniValue(UniValue::VARR));
-                const UniValue v = find_value(r, "result");
-                if (!find_value(r, "error").isNull() || !v.isNum()) throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "the Bitcoin daemon does not answer");
-                btc_tip = v.get_int();
-            }
-            const uint32_t depth = LostWindow() + 1;
-            std::deque<uint256> todo{ParseHashV(request.params[0], "txid")};
-            std::set<uint256> seen;
-            UniValue failing(UniValue::VARR);
-            int unburied = 0;
-            while (!todo.empty() && seen.size() < 1000) {
-                const uint256 txid = todo.front();
-                todo.pop_front();
-                if (!seen.insert(txid).second) continue;
                 uint256 hash_block;
-                const CTransactionRef tx = node::GetTransaction(nullptr, mempool, txid, Params().GetConsensus(), hash_block);
-                if (!tx) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "transaction " + txid.GetHex() + " not found (needs -txindex)");
-                {
-                    LOCK(cs_main);
-                    const CBlockIndex* b = chainman.m_blockman.LookupBlockIndex(hash_block);
-                    if (!b || !chainman.ActiveChain().Contains(b)) throw JSONRPCError(RPC_MISC_ERROR, "transaction " + txid.GetHex() + " is not in the active chain");
-                    if (btc_tip - (int64_t)b->m_anchor_height >= (int64_t)depth) continue; // buried
+                const CTransactionRef tx = node::GetTransaction(nullptr, nullptr, lock, Params().GetConsensus(), hash_block);
+                LOCK(cs_main);
+                const CBlockIndex* b = tx ? chainman.m_blockman.LookupBlockIndex(hash_block) : nullptr;
+                if (!b || !chainman.ActiveChain().Contains(b)) {
+                    reasons.push_back("the lock is not in a block of the active chain: wait until it is mined");
+                } else {
+                    on_chain = true;
+                    final = PosIsImmediatelyFinal(chainman, b);
+                    if (!final) reasons.push_back("the lock's block is not final yet: wait until it has stood the observation window with no competing certificate");
                 }
-                ++unburied;
-                std::string cls;
-                for (size_t i = 0; i < tx->vin.size() && cls.empty(); ++i) {
-                    if (tx->vin[i].m_is_pegin) cls = "peg-in";
-                    else if (i < tx->witness.vtxinwit.size() && !tx->witness.vtxinwit[i].m_pegin_witness.stack.empty()) cls = "payment-proof claim";
-                }
-                for (const CTxOut& o : tx->vout) {
-                    if (cls.empty() && (DelegationFromTxOut(o) || PayoutFromTxOut(o))) cls = "stake record";
-                }
-                for (const CTxIn& in : tx->vin) {
-                    if (in.m_is_pegin) continue;
-                    if (cls.empty()) {
-                        uint256 hb;
-                        if (const CTransactionRef parent = node::GetTransaction(nullptr, mempool, in.prevout.hash, Params().GetConsensus(), hb)) {
-                            if (in.prevout.n < parent->vout.size() &&
-                                (DelegationFromTxOut(parent->vout[in.prevout.n]) || PayoutFromTxOut(parent->vout[in.prevout.n]))) cls = "stake record";
-                        }
-                    }
-                    todo.push_back(in.prevout.hash);
-                }
-                if (!cls.empty()) {
-                    UniValue f(UniValue::VOBJ);
-                    f.pushKV("txid", txid.GetHex());
-                    f.pushKV("class", cls);
-                    failing.push_back(f);
-                }
+            }
+            // 2. An uncontested Bitcoin tip.
+            const std::optional<bool> uncontested = MainchainTipUncontested();
+            if (!uncontested) reasons.push_back("the Bitcoin daemon does not answer, so the Bitcoin tip cannot be judged");
+            else if (!*uncontested) reasons.push_back("Bitcoin has a competing branch near its tip: wait until it is resolved");
+            // 3. The ancestry, examined whole.
+            LockAncestry a;
+            bool ancestry_payable = false;
+            if (on_chain) {
+                a = WalkLockAncestry(chainman, lock, BitcoinTipHeight());
+                ancestry_payable = a.complete && a.failing.empty();
+                if (!ancestry_payable) reasons.push_back(AncestryReason(a));
             }
             UniValue out(UniValue::VOBJ);
-            out.pushKV("payable", failing.empty());
-            out.pushKV("depth", (int)depth);
-            out.pushKV("unburied", unburied);
-            out.pushKV("failing", failing);
+            out.pushKV("payable", reasons.empty());
+            out.pushKV("reasons", reasons);
+            out.pushKV("final", final);
+            out.pushKV("bitcoin_uncontested", uncontested.value_or(false));
+            out.pushKV("ancestry_payable", ancestry_payable);
+            out.pushKV("ancestry_complete", a.complete);
+            out.pushKV("failing", a.failing);
             return out;
         }};
 }
@@ -2671,6 +2800,7 @@ static const CRPCCommand commands[] =
     { "hidden",             &getlostblock,             },
     { "hidden",             &submitlostblock,          },
     { "mining",             &checklockancestry,        },
+    { "mining",             &checklock,                },
     { "generating",         &getposblocktemplate,      },
     { "generating",         &submitposblock,           },
     { "util",               &vrfprove,                 },

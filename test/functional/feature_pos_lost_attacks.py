@@ -18,17 +18,28 @@ each asserts the outcome the rule must give and why.
          carrying it is invalid for the certificate of lost header 0.
 - root1: the control: the same record with the first header certified. The
          block is valid and the record binds the coin.
+- late1: two keys K1 and K2 registered on the chain after the fork point F
+         sign the first lost header with three stakers of F's: five of eight
+         seats, a quorum (5) only if K1 and K2 count; the three alone are
+         below F's quorum (4 of 6). The record's committee is drawn from the
+         registry at F, where neither exists: the block carrying it is
+         invalid for the certificate of lost header 0, and the coin stays
+         free.
+- late0: the control: K1 and K2 are registered after F as before, and the
+         first lost header is certified by four stakers of F's under F's
+         registry. The record is valid: a stake change on the chain after F
+         does not stop an honest record.
 
-Run one case per process: LOST_CASES=lx (or desc, root0, root1).
+Run one case per process: LOST_CASES=lx (or desc, root0, root1, late0, late1).
 """
 import os
 import time
 from decimal import Decimal
 
-from feature_pos_lost_blocks import LostBlocksTest, SELLER, HONEST, ALL_KEYS, N, W
+from feature_pos_lost_blocks import LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W, make_key
 from pos_lost_attack_util import (LostP2PDataStore, block_from_hex, corrupt_aggregate, msg_anchor_headers)
 from test_framework.authproxy import JSONRPCException
-from test_framework.messages import CTxOut, CTxOutWitness, hash256, msg_block, tx_from_hex
+from test_framework.messages import CTxOut, CTxOutAsset, CTxOutValue, CTxOutWitness, hash256, msg_block, tx_from_hex
 from test_framework.util import calcfastmerkleroot
 from test_framework.util import assert_equal
 
@@ -94,6 +105,9 @@ def ser_record(version, btc_headers, lost, entries):
 class LostAttacksTest(LostBlocksTest):
     def set_test_params(self):
         super().set_test_params()
+        if any(c.startswith("late") for c in CASES):
+            # Room on the committee for the two late keys (8 seats, quorum 5).
+            self.extra = {i: ["-poscommitteesize=9"] for i in range(N)}
 
     def stored(self, node, block_hash):
         try:
@@ -266,6 +280,130 @@ class LostAttacksTest(LostBlocksTest):
             assert n1.getbestblockhash() != rc["hash"]
             assert lines and "certificate of lost header 0" in lines[0], lines
 
+    # ------------------------------------------------- late0 / late1 (M1)
+    def put_record(self, data):
+        """B on node 1's chain, its coinbase carrying the record, certified by
+        the six stakers; returns (B's hash, the log offset before submitting)."""
+        n1 = self.nodes[1]
+        self.disconnect_all(1)
+        h = self.produce(1, ALL_KEYS, leaders=[SELLER])
+        raw = bytes.fromhex(n1.getblock(h["hash"], 0))
+        blk = n1.getblock(h["hash"], 2)
+        cb = tx_from_hex(blk["tx"][0]["hex"])
+        old_cb = cb.serialize()
+        assert raw.count(old_cb) == 1
+        ci = [k for k, o in enumerate(cb.vout) if o.scriptPubKey[:6] == bytes.fromhex("6a24aa21a9ed")][-1]
+        cb.vout.insert(ci, CTxOut(0, b"\x6a\x04SQLR" + push(data), cb.vout[0].nAsset))
+        if cb.wit.vtxoutwit:
+            cb.wit.vtxoutwit.insert(ci, CTxOutWitness())
+        import test_framework.util as fu
+        fu.node_fastmerkle = n1
+        txs = [cb] + [tx_from_hex(t["hex"]) for t in blk["tx"][1:]]
+        wroot = bytes.fromhex(calcfastmerkleroot([t.calc_witness_hash() for t in txs]))[::-1]
+        nonce = cb.wit.vtxinwit[0].scriptWitness.stack[0]
+        cb.vout[-1 if ci == len(cb.vout) - 1 else ci + 1].scriptPubKey = b"\x6a\x24\xaa\x21\xa9\xed" + hash256(wroot + nonce)
+        cb.rehash()
+        txids = [cb.hash] + [t["txid"] for t in blk["tx"][1:]]
+        root = merkle_root([bytes.fromhex(t)[::-1] for t in txids])
+        new_raw = raw[:36] + root + raw[68:]
+        new_raw = new_raw.replace(old_cb, cb.serialize())
+        n1.invalidateblock(h["hash"])
+        since = self.log_size(1)
+        rc = n1.recertifyposblock(new_raw.hex(), self.stakers[SELLER][0], [self.stakers[j][0] for j in ALL_KEYS if j != SELLER])
+        r = n1.submitblock(rc["hex"])
+        return rc["hash"], r, since
+
+    def case_late(self, late_key_signs):
+        case = "late%d" % int(late_key_signs)
+        a, n1, n5, b = self.nodes[SELLER], self.nodes[1], self.nodes[LATE], self.btc()
+        online = [0, 1, 2, 3, 4]
+        coin = self.fund()
+        tv_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        tv = tx_from_hex(tv_hex)
+        tv_id = tv.rehash()
+        # K1 and K2, not stakers at F: their stake outputs (one atom each, a
+        # weight like each of the six's, with their BLS keys) are signed now
+        # and sent after F.
+        late = [make_key() for _ in range(2)]
+        regs = []
+        for k_wif, k_pub in late:
+            bls = n1.getblsregistration(k_wif)
+            script = a.getstakescript(pubkey=k_pub, csv_blocks=600, blspubkey=bls["blspubkey"], pop=bls["pop"])["script"]
+            kc = self.fund()
+            reg_raw = a.createrawtransaction([{"txid": kc["txid"], "vout": kc["vout"]}],
+                                             [{a.getnewaddress(): Decimal("0.00000001")},
+                                              {a.getnewaddress(): kc["amount"] - Decimal("0.00010001")}, {"fee": Decimal("0.0001")}])
+            rt = tx_from_hex(reg_raw)
+            rt.vout[0] = CTxOut(CTxOutValue(1), bytes.fromhex(script), rt.vout[1].nAsset)
+            regs.append((a.signrawtransactionwithwallet(rt.serialize().hex())["hex"], "-staker=%s:1%s" % (k_pub, bls["spec"])))
+        self.sync_tips(range(N))
+        f_hash = n1.getbestblockhash()
+        assert not any(k_pub in n1.getstakerinfo() for _, k_pub in late)
+        # The first lost header A0 on F, carrying Tv, made apart.
+        if late_key_signs:
+            # Node 5 stops at F and comes back with K1 and K2 as configured
+            # stakers: its registry at F then holds them, as the chain's
+            # registry does after their stake outputs. It signs A0 with three
+            # of the six and K1 and K2.
+            self.stop_node(LATE)
+            self.start_node(LATE, extra_args=self.node_args(LATE) + [spec for _, spec in regs] + ["-checkblocks=0", "-networkactive=0"])
+            assert_equal(n5.getbestblockhash(), f_hash)
+            src, signers = n5, [self.stakers[1][0], self.stakers[2][0]] + [k_wif for k_wif, _ in late]
+        else:
+            self.disconnect_all(SELLER)
+            a.setnetworkactive(False)
+            online = [1, 2, 3, 4]
+            src, signers = a, [self.stakers[j][0] for j in (1, 2, 3)]
+        self.btc_mine(1)  # a Bitcoin block only A0 anchors to
+        time.sleep(2)
+        src.sendrawtransaction(tv_hex)
+        a0, last = None, None
+        for _ in range(200):
+            try:
+                a0 = src.generateposblock(self.stakers[SELLER][0], signers)
+                break
+            except JSONRPCException as e:
+                last = e.error["message"]
+                time.sleep(0.25)
+        assert a0, last
+        a0_blk = src.getblock(a0["hash"], 2)
+        assert tv_id in [t["txid"] for t in a0_blk["tx"]]
+        assert_equal(a0_blk["previousblockhash"], f_hash)
+        self.record(case, "A0", "%s on F %s, %d seats signed (%s), anchored at Bitcoin %d" %
+                    (a0["hash"][:12], f_hash[:12], a0["countersignatures"], "three of F's stakers, K1 and K2" if late_key_signs else "four of F's stakers",
+                     a0_blk["anchorheight"]))
+        # Bitcoin replaces A0's anchor.
+        self.bitcoin_reorg(b.getblockcount() - a0_blk["anchorheight"] + 1)
+        assert b.getblockheader(a0_blk["anchorhash"])["confirmations"] < 1
+        # K1 and K2 register on the honest chain after F.
+        ids = [n1.sendrawtransaction(h) for h, _ in regs]
+        g = self.produce(1, ALL_KEYS, txs_must=ids)
+        self.sync_tips([1, 2, 3, 4])
+        assert all(k_pub in n1.getstakerinfo() for _, k_pub in late)
+        self.record(case, "K1, K2", "stake outputs in block %s at height %d, after F; the committee is now %d seats" %
+                    (g["hash"][:12], g["height"], len(n1.getposschedule()["committee"])))
+        # The record, by hand, in B.
+        leaves = [bytes.fromhex(t["txid"])[::-1] for t in a0_blk["tx"]]
+        pos = [t["txid"] for t in a0_blk["tx"]].index(tv_id)
+        entry = (0, pos, merkle_branch(leaves, pos), tv.serialize_without_witness())
+        data = ser_record(2, [], [bytes.fromhex(src.getblockheader(a0["hash"], False))], [entry])
+        b_hash, r, since = self.put_record(data)
+        lines = self.log_has(1, "carries a record that is not valid", since)
+        self.record(case, "B with the record (%d bytes)" % len(data),
+                    "submitblock %r; node 1's tip is B: %s; %s" % (r, n1.getbestblockhash() == b_hash,
+                                                                 lines[0].split("Lost blocks: ", 1)[-1][:200] if lines else "no record complaint"))
+        if late_key_signs:
+            assert n1.getbestblockhash() != b_hash, "a record certified with a key registered after its fork point was accepted"
+            assert lines and "certificate of lost header 0" in lines[0], lines
+            # The coin stays free: its owner's spend is mined.
+            spend = self.spend(coin, a.getnewaddress(), Decimal("0.002"))
+            sid = n1.sendrawtransaction(spend)
+            h = self.produce(1, ALL_KEYS, txs_must=[sid])
+            self.record(case, "the coin", "spent by its owner at height %d" % h["height"])
+        else:
+            assert_equal(n1.getbestblockhash(), b_hash)
+            assert self.log_has(1, "records 1 bound input", since)
+
     def run_test(self):
         try:
             for c in CASES:
@@ -275,6 +413,8 @@ class LostAttacksTest(LostBlocksTest):
                     self.case_desc()
                 elif c in ("root0", "root1"):
                     self.case_root(c == "root1")
+                elif c in ("late0", "late1"):
+                    self.case_late(c == "late1")
         finally:
             import json
             out = os.environ.get("LOST_RESULTS", "")
