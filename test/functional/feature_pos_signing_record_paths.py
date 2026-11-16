@@ -124,6 +124,9 @@ class PosSigningRecordPathsTest(PosSigningRecordRpcTest):
         self.musig(m, t, "g")
         self.log.info("generate: M signed X=%s at %d partially, then was killed" % (x[:16], t["height"]))
         self.restart()
+        # A template of another second: in X's second, generateposblock
+        # rebuilds X itself, which is the same block again, not a rival.
+        time.sleep(1.1)
         self.refused("generate: generateposblock after the restart",
                      lambda: m.generateposblock(self.stakers[0][0], [w for w, _ in self.stakers[1:]]), x)
         time.sleep(ROUND_S)
