@@ -827,6 +827,23 @@ def _published_list(srv):
     return {"updated": srv.last_admitted_ts, "rates": srv.last_rates}
 
 
+def public_prices(srv):
+    """The body of GET /api/prices without its _meta: the market feed's entries
+    by feed key, plus each registry ticker that feed_aliases maps onto one of
+    them, under that ticker with the same values. A reader then looks an asset
+    up by its own registry ticker (USDC.E, EURC.E, SBTC, TSEQ) and needs no alias
+    table of its own. A ticker the feed already prices keeps its own entry, and
+    an alias whose target the feed does not carry adds nothing."""
+    data = dict(srv.last_prices)
+    for k, v in srv.cfg.get("feed_aliases", {"TSEQ": "SEQ"}).items():
+        if str(k).startswith("_"):
+            continue
+        ticker, target = str(k).upper(), str(v).upper()
+        if ticker not in data and target in srv.last_prices:
+            data[ticker] = dict(srv.last_prices[target])
+    return data
+
+
 def _whitelist_payload(srv):
     """The body of GET /api/whitelist: the published rates, the per-asset
     decisions, and the FRAME both are stated in.
@@ -1540,7 +1557,7 @@ def start_config_ui(price_server, host, port):
             if path == "/api/prices":
                 if self._public_gate(ui_cfg().get("public_api")):
                     return
-                data = dict(srv.last_prices)
+                data = public_prices(srv)
                 data["_meta"] = {"quote_currency": _src(srv)["quote_currency"],
                                  "updated": srv.last_poll_ts, "publisher": srv.source_name,
                                  "format": "sequentia"}

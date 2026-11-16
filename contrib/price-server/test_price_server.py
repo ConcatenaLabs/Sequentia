@@ -867,5 +867,46 @@ class TheListIsServedAtFeewhitelist(unittest.TestCase):
         self.assertEqual(body["rates"], polled.last_rates)
 
 
+class PublicPricesCarryTheAliasedTickers(unittest.TestCase):
+    """/api/prices is looked up by registry ticker, so the aliases are in it."""
+
+    def served(self, aliases, feed):
+        srv = ps.PriceServer(base_cfg(feed_aliases=aliases), dry_run=True)
+        srv.last_prices = {k: {"price": p, "market_cap": None, "volume_24h": None}
+                           for k, p in feed.items()}
+        return ps.public_prices(srv)
+
+    def test_an_alias_is_present_with_the_market_entry_values(self):
+        out = self.served({"USDC.e": "USDC", "EURC.e": "EURC"},
+                          {"USDC": 1.0, "EURC": 1.1002})
+        self.assertEqual(out["USDC.E"]["price"], 1.0)
+        self.assertEqual(out["EURC.E"]["price"], 1.1002)
+        self.assertEqual(out["USDC"]["price"], 1.0)   # the market key stays
+
+    def test_an_alias_whose_target_is_not_in_the_feed_adds_nothing(self):
+        out = self.served({"USDC.e": "USDC", "SBTC": "tBTC"}, {"USDC": 1.0})
+        self.assertNotIn("SBTC", out)
+        self.assertEqual(set(out), {"USDC", "USDC.E"})
+
+    def test_an_alias_onto_a_key_that_is_a_registry_ticker_is_one_hop(self):
+        # SBTC -> TBTC, and TBTC is itself aliased: the alias is not chased.
+        out = self.served({"SBTC": "tBTC", "TBTC": "BTC"}, {"TBTC": 5.0, "BTC": 9.0})
+        self.assertEqual(out["SBTC"]["price"], 5.0)
+        self.assertEqual(out["TBTC"]["price"], 5.0, "a key the feed has keeps its own entry")
+
+    def test_the_entries_are_copies_and_the_comment_key_is_ignored(self):
+        srv = ps.PriceServer(base_cfg(feed_aliases={"_comment": "x", "TSEQ": "SEQ"}), dry_run=True)
+        srv.last_prices = {"SEQ": {"price": 2.0, "market_cap": None, "volume_24h": None}}
+        out = ps.public_prices(srv)
+        out["TSEQ"]["price"] = 99
+        self.assertEqual(srv.last_prices["SEQ"]["price"], 2.0)
+        self.assertNotIn("_COMMENT", out)
+
+    def test_the_fee_rates_do_not_change(self):
+        rates, _ = run_poll(base_cfg(feed_aliases={"USDC.e": "USDC"}),
+                            {"USDC": 1.0}, tickers=["USDC.e"])
+        self.assertEqual(rates, {"USDC.E": 100000000})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
