@@ -175,6 +175,13 @@ void PrefetchAnchorVerdicts(const std::vector<std::pair<uint32_t, uint256>>& ref
 void ScanRawBlockForCheckpoints(const Sidechain::Bitcoin::CBlock& block, int btc_height,
                                 const uint256& btc_hash);
 
+/** Whether Bitcoin's tip is uncontested in this node's Bitcoin view: no
+ *  competing branch within -anchorcontestwindow of the active tip, as the
+ *  producer's anchor back-off reads getchaintips. One of a buyer's checks on a
+ *  lock (doc/sequentia/03-bitcoin-anchoring.md, "For a buyer's wallet").
+ *  nullopt when the Bitcoin daemon does not answer. */
+std::optional<bool> MainchainTipUncontested();
+
 /** Pure selection math for the anti-contested-anchor policy (Fix A), testable
  *  without a parent chain daemon. Given the active tip height, the contest
  *  window, and the competing branches (each a {tip height, branchlen} pair,

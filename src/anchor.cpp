@@ -590,6 +590,21 @@ void LoadPosCheckpointState() EXCLUSIVE_LOCKS_REQUIRED(!g_anchor_mutex)
 
 } // namespace
 
+std::optional<bool> MainchainTipUncontested()
+{
+    try {
+        const UniValue reply = CallMainChainRPC("getblockcount", UniValue(UniValue::VARR));
+        const UniValue v = find_value(reply, "result");
+        if (!find_value(reply, "error").isNull() || !v.isNum()) return std::nullopt;
+        const int tip = v.get_int();
+        int uncontested = -1;
+        if (!GetMainchainUncontestedHeight(tip, uncontested)) return std::nullopt;
+        return uncontested >= tip;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 int MainchainKnownHeight()
 {
     if (!MainchainSyncedTo(0)) return -1;

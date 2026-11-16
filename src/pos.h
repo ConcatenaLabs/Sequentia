@@ -355,6 +355,26 @@ private:
     }
 
 public:
+    StakeRegistry() = default;
+    //! A copy of another registry's state, with an election version of its
+    //! own: the lost-block record check rewinds a copy to a fork point
+    //! (PosRevertBlockStake on it) without touching the live registry.
+    StakeRegistry(const StakeRegistry& o)
+    {
+        LOCK2(m_mutex, o.m_mutex);
+        m_config = o.m_config;
+        m_utxo = o.m_utxo;
+        m_bls = o.m_bls;
+        m_bls_utxo = o.m_bls_utxo;
+        m_bls_utxo_outputs = o.m_bls_utxo_outputs;
+        m_deleg_utxo = o.m_deleg_utxo;
+        m_payout_utxo = o.m_payout_utxo;
+        m_utxo_tranches = o.m_utxo_tranches;
+        m_deleg_height = o.m_deleg_height;
+        m_pot_utxo = o.m_pot_utxo;
+    }
+    StakeRegistry& operator=(const StakeRegistry&) = delete;
+
     static StakeRegistry& GetInstance()
     {
         static StakeRegistry instance;
@@ -1543,6 +1563,8 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 
 /** Exact inverse of PosApplyBlockStake, for tip disconnects (reorgs). */
 void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height);
+/** The same, applied to `registry` rather than the live one. */
+void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height, StakeRegistry& registry);
 
 /** Rebuild the UTXO stake layer by scanning the (flushed) UTXO set. */
 bool RebuildUtxoStake(CCoinsView& view);

@@ -22,6 +22,7 @@
 #include <streams.h>
 #include <sync.h>
 #include <txmempool.h>
+#include <undo.h>
 #include <univalue.h>
 #include <util/system.h>
 #include <util/time.h>
@@ -658,15 +659,59 @@ std::optional<std::map<uint32_t, uint256>> AnchorAncestry(const uint256& anchor,
     return out;
 }
 
-//! 2b-i: the certificates of a lost branch, verified in order from its fork
-//! point under the seat quorum, with the registry at the judged block's
-//! parent. Header 0's committee is seeded from the fork point's anchor (on
-//! the chain), each later one's from its verified predecessor's anchor, so no
-//! committee is seeded by a value an author chooses. Returns how many headers,
-//! from the first, carry such a certificate; `why` says why the next does not.
-size_t CertifiedPrefix(const std::vector<CBlockHeader>& lost, const CBlockIndex* fork, std::string& why)
+//! The stake registry as it stood at `fork`, the registry the committee of
+//! `fork`'s child was drawn from: the live registry, which mirrors `top`,
+//! with the stake changes of every block above `fork` up to `top` reverted
+//! from their undo data. A committee seeded by a value that was public at
+//! `fork` is thereby drawn from stake that existed before that value was
+//! known, so no key registered after it can sit on it (doc 03, "Records and
+//! bindings"). nullptr when `fork` is not below `top` or a block or its undo
+//! data cannot be read (soft: this node's own fault, never a verdict).
+std::shared_ptr<const StakeRegistry> RegistryAt(const CBlockIndex* fork, const CBlockIndex* top) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    static Mutex cache_mutex;
+    static std::map<std::pair<uint256, uint256>, std::shared_ptr<const StakeRegistry>> cache GUARDED_BY(cache_mutex);
+    if (!fork || !top || top->GetAncestor(fork->nHeight) != fork) return nullptr;
+    const std::pair<uint256, uint256> key{fork->GetBlockHash(), top->GetBlockHash()};
+    {
+        LOCK(cache_mutex);
+        auto it = cache.find(key);
+        if (it != cache.end()) return it->second;
+    }
+    auto reg = std::make_shared<StakeRegistry>(StakeRegistry::GetInstance());
+    for (const CBlockIndex* p = top; p != fork; p = p->pprev) {
+        CBlock blk;
+        CBlockUndo undo;
+        if (!ReadBlockFromDisk(blk, p, Params().GetConsensus()) || !node::UndoReadFromDisk(undo, p)) return nullptr;
+        PosRevertBlockStake(blk, undo, p->nHeight, *reg);
+    }
+    LOCK(cache_mutex);
+    if (cache.size() > 16) cache.clear();
+    cache[key] = reg;
+    return reg;
+}
+
+//! 2b-i: the certificates of a lost branch, verified in order from its fork
+//! point under the seat quorum, with the registry at the fork point (the
+//! registry the lost branch's first committee was really drawn from; a stake
+//! change inside the lost branch is not in it, so a header after one does not
+//! verify and its entries fall back to the holders). Header 0's committee is
+//! seeded from the fork point's anchor (on the chain), each later one's from
+//! its verified predecessor's anchor, so no committee is seeded by a value an
+//! author chooses, and none counts a key registered after its seed was
+//! public. `top` is the block the live registry mirrors. Returns how many
+//! headers, from the first, carry such a certificate; `why` says why the next
+//! does not, and `soft` is set when the registry could not be rebuilt.
+size_t CertifiedPrefix(const std::vector<CBlockHeader>& lost, const CBlockIndex* fork, const CBlockIndex* top, std::string& why,
+                       bool& soft) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const std::shared_ptr<const StakeRegistry> at_fork = RegistryAt(fork, top);
+    if (!at_fork) {
+        soft = true;
+        why = "the stake registry at the fork point cannot be rebuilt";
+        return 0;
+    }
+    const StakeRegistry& reg = *at_fork;
     for (size_t k = 0; k < lost.size(); ++k) {
         CBlockIndex parent_view;
         const CBlockIndex* parent = fork;
@@ -737,7 +782,7 @@ std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const uint256& a
     }
     // Certificates (2b-i): every header up to the highest entry, in order.
     std::string why;
-    if (CertifiedPrefix(std::vector<CBlockHeader>(lost.begin(), lost.begin() + top_k + 1), fork, why) <= top_k) return why;
+    if (CertifiedPrefix(std::vector<CBlockHeader>(lost.begin(), lost.begin() + top_k + 1), fork, prev, why, soft) <= top_k) return why;
     // P1: a header at or below each entry whose anchor is at most B's anchor
     // height and is not B's anchor's ancestor there. Heights from F's anchor.
     const uint32_t from_h = fork->m_anchor_height;
@@ -1219,11 +1264,13 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     // whoever shows the block.
     bool rooted = false;
     bool expired = false;
+    uint256 fork_hash;
     {
         LOCK(cs_main);
         const CBlockIndex* p = chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock);
         const CBlockIndex* tip = chainman.ActiveChain().Tip();
         if (p && chainman.ActiveChain().Contains(p)) {
+            fork_hash = p->GetBlockHash();
             height = p->nHeight + 1;
             parent_anchor_h = p->m_anchor_height;
             parent_anchor = p->m_anchor_hash;
@@ -1238,6 +1285,14 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
         LOCK(g_lost_mutex);
         auto it = g_blocks.find(block.hashPrevBlock);
         if (it == g_blocks.end()) return "unknown-parent";
+        // The branch's fork point: its first parent outside the store.
+        const LostBlk* walk = &it->second;
+        for (int guard = 0; guard < LOST_MAX_BRANCH + 1; ++guard) {
+            auto up = g_blocks.find(walk->prev);
+            if (up == g_blocks.end()) break;
+            walk = &up->second;
+        }
+        fork_hash = walk->prev;
         height = it->second.height + 1;
         parent_anchor_h = it->second.anchor_h;
         parent_anchor = it->second.anchor;
@@ -1257,14 +1312,22 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     AnchorState verdict = BestChainVerdict(block.m_anchor_height, block.m_anchor_hash);
     if (verdict == AnchorState::UNKNOWN) return "anchor-unknown";
     if (verdict == AnchorState::OK && !parent_in_store) return "anchor-on-best-chain";
-    // The certificate, with this node's registry (the active tip's): the
-    // duty's view. The record check uses the registry at the judged block's
-    // parent (doc 03, "Records and bindings").
+    // The certificate, with the registry at the branch's fork point, as the
+    // record check reads it (doc 03, "Records and bindings"): no key
+    // registered after the seed of the branch's first committee was public
+    // counts.
     CBlockIndex parent_idx;
     parent_idx.nHeight = height - 1;
     parent_idx.m_anchor_height = parent_anchor_h;
     parent_idx.m_anchor_hash = parent_anchor;
-    const StakeRegistry& reg = StakeRegistry::GetInstance();
+    std::shared_ptr<const StakeRegistry> at_fork;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* fork = chainman.m_blockman.LookupBlockIndex(fork_hash);
+        if (fork && chainman.ActiveChain().Contains(fork)) at_fork = RegistryAt(fork, chainman.ActiveChain().Tip());
+    }
+    if (!at_fork) return "registry-unavailable";
+    const StakeRegistry& reg = *at_fork;
     std::string reason;
     const int signers = PosVerifyBitfieldCertificate(block, &parent_idx, reg, reason);
     if (signers < 0) return "bad-certificate: " + reason;

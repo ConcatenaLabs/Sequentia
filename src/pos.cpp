@@ -2200,7 +2200,11 @@ void PosApplyBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 
 void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height)
 {
-    StakeRegistry& registry = StakeRegistry::GetInstance();
+    PosRevertBlockStake(block, undo, height, StakeRegistry::GetInstance());
+}
+
+void PosRevertBlockStake(const CBlock& block, const CBlockUndo& undo, int height, StakeRegistry& registry)
+{
     // Delegation and payout records first, the exact inverse of their
     // per-transaction application in PosApplyBlockStake: last transaction
     // first, each removing what it created and restoring what it spent.
