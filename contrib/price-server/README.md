@@ -134,10 +134,17 @@ is one config field: point your `source.url` at another operator's
 without a `price` field.)
 
 Each registry ticker that `feed_aliases` maps onto a feed key also appears under
-its own ticker, with that entry's values (`USDC.E` beside `USDC`, `EURC.E` beside
-`EURC`, `TSEQ` beside `SEQ`). A reader looks an asset up by its registry ticker
-and keeps no alias table of its own. A ticker the feed already prices keeps its
-own entry, and an alias whose target the feed does not carry adds nothing.
+its own ticker, with that entry's values (`USDC.E` beside `USD`, `EURC.E` beside
+`EUR`, `TSEQ` beside `SEQ`). A reader looks an asset up by its registry ticker
+and keeps no alias table of its own. The alias wins over an entry the feed has
+under that same ticker, as it does when the rates are made, and an alias whose
+target the feed does not carry adds nothing.
+
+A currency's rate is an entry marked `"fiat": true`, in the quote currency, with
+no market cap or volume (`"USD": {"price": 1.0, "fiat": true}`). An asset mapped
+to one, such as a stablecoin, is valued at that rate and is judged on price,
+change and volatility only: the market-cap and volume floors vet an asset's own
+market and do not apply to a currency.
 
 ### `GET /feewhitelist`
 

@@ -243,6 +243,7 @@ def fetch_prices(source, timeout):
                 "price": float(p),
                 "market_cap": float(v["market_cap"]) if v.get("market_cap") is not None else None,
                 "volume_24h": float(v["volume_24h"]) if v.get("volume_24h") is not None else None,
+                **({"fiat": True} if v.get("fiat") is True else {}),
             }
         elif isinstance(v, (int, float)):  # tolerate {ticker: price} feeds
             out[str(k).upper()] = {"price": float(v), "market_cap": None, "volume_24h": None}
@@ -386,6 +387,12 @@ class PriceServer:
         state.price_history.append(price)
         new_rate = scaled_rate(price, precision)
         mcap, vol = m.get("market_cap"), m.get("volume_24h")
+        # A fiat rate (the feed marks it "fiat": true) is the price of a currency,
+        # which has no market cap or 24h volume of its own. An asset valued at one
+        # (a stablecoin mapped to USD or EUR through feed_aliases) is therefore
+        # judged on price, change and volatility only: the cap and volume floors
+        # exist to vet an asset's own market, and would reject every such asset.
+        fiat = m.get("fiat") is True
 
         forced = listed("always_admit")
         change_ok, change_eval = True, False
@@ -395,9 +402,9 @@ class PriceServer:
                 checks.append(("min_price", price >= t["min_price"], True))
             if "max_price" in t:
                 checks.append(("max_price", price <= t["max_price"], True))
-            if "min_market_cap" in t:
+            if "min_market_cap" in t and not fiat:
                 checks.append(("min_market_cap", mcap is not None and mcap >= t["min_market_cap"], mcap is not None))
-            if "min_volume_24h" in t:
+            if "min_volume_24h" in t and not fiat:
                 checks.append(("min_volume_24h", vol is not None and vol >= t["min_volume_24h"], vol is not None))
             if "max_volatility" in t:
                 checks.append(("max_volatility", state.volatility_ok(t), True))
@@ -832,14 +839,15 @@ def public_prices(srv):
     by feed key, plus each registry ticker that feed_aliases maps onto one of
     them, under that ticker with the same values. A reader then looks an asset
     up by its own registry ticker (USDC.E, EURC.E, SBTC, TSEQ) and needs no alias
-    table of its own. A ticker the feed already prices keeps its own entry, and
-    an alias whose target the feed does not carry adds nothing."""
+    table of its own. The alias wins over an entry the feed has under that same
+    ticker, exactly as it does when the rates are made; an alias whose target the
+    feed does not carry adds nothing."""
     data = dict(srv.last_prices)
     for k, v in srv.cfg.get("feed_aliases", {"TSEQ": "SEQ"}).items():
         if str(k).startswith("_"):
             continue
         ticker, target = str(k).upper(), str(v).upper()
-        if ticker not in data and target in srv.last_prices:
+        if target in srv.last_prices:
             data[ticker] = dict(srv.last_prices[target])
     return data
 

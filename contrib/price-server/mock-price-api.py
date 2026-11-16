@@ -8,6 +8,7 @@ the JSON shape the price server jsonapi source expects. USD is the reference uni
 is mocked: its planned launch price (0.175 USD), walking at most about 0.05% a tick within +/-10%,
 the pace of a quiet market, so the books priced from it rest rather than reprice every tick.
 Issuer offering-reference prices are seeded via POST /seed (static).
+Fiat rates (USD, EUR) are entries marked `"fiat": true` with no market cap or volume.
 Endpoints: GET /prices,/price/<T>,/healthz ; POST /seed.
 
 Every ticker carries `as_of`, the unix time of the reading it serves: a source that stops answering
@@ -27,13 +28,15 @@ import urllib.request
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# EURC is a euro stablecoin, so it takes the same live EUR/USD rate EURX does;
-# USDC is a dollar one and is pinned to 1.00 below exactly as USDX is. They are
-# priced here rather than seeded through /seed because a seeded price carries no
-# market cap or volume, and the price server admits an asset only if it clears
-# those thresholds -- a bridged stablecoin with no price is an asset nobody can
-# pay a fee in, which is the whole point of the open fee market.
-REAL = {"EURX":"EURUSD=X", "EURC":"EURUSD=X", "GOLD":"GC=F", "SILVR":"SI=F", "OILX":"CL=F", "tBTC":"BTC-USD"}
+# The fiat rates, as a real feed's exchange-rate endpoint carries them: one entry per
+# currency, keyed by its code, in the quote currency (USD), marked "fiat": true and
+# with no market cap or volume, which a currency does not have. USD is 1 in a
+# USD-quoted feed; EUR is the live EUR/USD rate. The bridged stablecoins are valued
+# at these (the price server maps USDC.e to USD and EURC.e to EUR). EURC is kept as
+# a market entry under the same EUR/USD reading, and USDC pinned to 1.00 below,
+# for the readers that look them up by market symbol.
+FIAT = {"USD", "EUR"}
+REAL = {"EURX":"EURUSD=X", "EURC":"EURUSD=X", "EUR":"EURUSD=X", "GOLD":"GC=F", "SILVR":"SI=F", "OILX":"CL=F", "tBTC":"BTC-USD"}
 SEQ_DAY1 = 0.175
 SEQ_STEP = 0.0005    # the tSEQ walk's largest step a tick, before its pull to SEQ_DAY1
 SEQ_PULL = 0.01      # the share of its distance to SEQ_DAY1 it closes a tick
@@ -87,6 +90,10 @@ def _judge(t, v):
 
 def _set(t, price, at=None):
     with _lock:
+        if t in FIAT:
+            _state[t] = {"price": max(1e-6, price), "fiat": True,
+                         "as_of": int(at if at is not None else time.time())}
+            return
         s = _state.setdefault(t, {"market_cap":0.0,"volume_24h":0.0})
         s["price"]=max(1e-6,price)
         s["market_cap"]=random.uniform(5e8,5e9)
@@ -105,6 +112,7 @@ def _walk_seq():
 def _fixed():
     _set("USDX", 1.00)
     _set("USDC", 1.00)
+    _set("USD", 1.00)
 
 def _refresh(tick):
     while True:

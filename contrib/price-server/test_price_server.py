@@ -892,7 +892,7 @@ class PublicPricesCarryTheAliasedTickers(unittest.TestCase):
         # SBTC -> TBTC, and TBTC is itself aliased: the alias is not chased.
         out = self.served({"SBTC": "tBTC", "TBTC": "BTC"}, {"TBTC": 5.0, "BTC": 9.0})
         self.assertEqual(out["SBTC"]["price"], 5.0)
-        self.assertEqual(out["TBTC"]["price"], 5.0, "a key the feed has keeps its own entry")
+        self.assertEqual(out["TBTC"]["price"], 9.0, "the alias wins, as it does in the poll")
 
     def test_the_entries_are_copies_and_the_comment_key_is_ignored(self):
         srv = ps.PriceServer(base_cfg(feed_aliases={"_comment": "x", "TSEQ": "SEQ"}), dry_run=True)
@@ -902,10 +902,61 @@ class PublicPricesCarryTheAliasedTickers(unittest.TestCase):
         self.assertEqual(srv.last_prices["SEQ"]["price"], 2.0)
         self.assertNotIn("_COMMENT", out)
 
+    def test_a_stablecoin_takes_the_fiat_rate_not_its_own_market_entry(self):
+        out = self.served({"USDC.e": "USD", "USDC": "USD"}, {"USD": 1.0, "USDC": 0.97})
+        self.assertEqual(out["USDC.E"]["price"], 1.0)
+        self.assertEqual(out["USDC"]["price"], 1.0)
+
     def test_the_fee_rates_do_not_change(self):
         rates, _ = run_poll(base_cfg(feed_aliases={"USDC.e": "USDC"}),
                             {"USDC": 1.0}, tickers=["USDC.e"])
         self.assertEqual(rates, {"USDC.E": 100000000})
+
+
+class FiatPricedAssets(unittest.TestCase):
+    """An asset aliased to a fiat key (USD, EUR) is priced at that rate and is
+    not judged on a market cap or volume the currency does not have."""
+
+    FLOORS = {"default_thresholds": {"require": "all", "min_market_cap": 5e7,
+                                     "min_volume_24h": 1e6}}
+
+    def poll(self, feed):
+        cfg = base_cfg(feed_aliases={"USDC.e": "USD", "EURC.e": "EUR"}, **self.FLOORS)
+        registry = {"USDC.E": (asset_id("usdc.e"), "x.test", 8),
+                    "EURC.E": (asset_id("eurc.e"), "x.test", 8)}
+        real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
+        ps.fetch_registry = lambda url, timeout: dict(registry)
+        ps.fetch_prices = lambda source, timeout: dict(feed)
+        try:
+            srv = ps.PriceServer(dict(cfg), dry_run=True)
+            return srv.poll_once(), {r["ticker"]: r["status"] for r in srv.last_report}
+        finally:
+            ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
+
+    def test_a_fiat_rate_is_admitted_through_the_cap_and_volume_floors(self):
+        feed = {"USD": {"price": 1.0, "market_cap": None, "volume_24h": None, "fiat": True},
+                "EUR": {"price": 1.1002, "market_cap": None, "volume_24h": None, "fiat": True}}
+        rates, status = self.poll(feed)
+        self.assertEqual(rates, {asset_id("usdc.e"): 100000000, asset_id("eurc.e"): 110020000})
+        self.assertEqual(set(status.values()), {"admitted"})
+
+    def test_the_same_entry_without_the_fiat_mark_is_still_refused(self):
+        feed = {"USD": {"price": 1.0, "market_cap": None, "volume_24h": None},
+                "EUR": {"price": 1.1002, "market_cap": None, "volume_24h": None}}
+        rates, status = self.poll(feed)
+        self.assertEqual(rates, {})
+        self.assertIn("min_market_cap", status["USDC.E"])
+
+    def test_the_fiat_mark_survives_the_fetch(self):
+        real = ps.http_get_json
+        ps.http_get_json = lambda url, timeout: {
+            "EUR": {"price": 1.1, "fiat": True}, "USDC": {"price": 1.0, "market_cap": 9}}
+        try:
+            out = ps.fetch_prices({"format": "sequentia", "url": "x"}, 1)
+        finally:
+            ps.http_get_json = real
+        self.assertTrue(out["EUR"]["fiat"])
+        self.assertNotIn("fiat", out["USDC"])
 
 
 if __name__ == "__main__":
