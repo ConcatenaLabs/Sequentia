@@ -133,6 +133,12 @@ is one config field: point your `source.url` at another operator's
 (`_meta` is informational; consumers of the Sequentia format ignore entries
 without a `price` field.)
 
+Each registry ticker that `feed_aliases` maps onto a feed key also appears under
+its own ticker, with that entry's values (`USDC.E` beside `USDC`, `EURC.E` beside
+`EURC`, `TSEQ` beside `SEQ`). A reader looks an asset up by its registry ticker
+and keeps no alias table of its own. A ticker the feed already prices keeps its
+own entry, and an alias whose target the feed does not carry adds nothing.
+
 ### `GET /feewhitelist`
 
 The published list, the one a node connected to this server reads
