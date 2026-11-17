@@ -882,6 +882,9 @@ class PublicPricesCarryTheAliasedTickers(unittest.TestCase):
         self.assertEqual(out["USDC.E"]["price"], 1.0)
         self.assertEqual(out["EURC.E"]["price"], 1.1002)
         self.assertEqual(out["USDC"]["price"], 1.0)   # the market key stays
+        self.assertEqual(out["USDC.E"]["alias_of"], "USDC")
+        self.assertEqual(out["EURC.E"]["alias_of"], "EURC")
+        self.assertNotIn("alias_of", out["USDC"], "a market entry names no alias")
 
     def test_an_alias_whose_target_is_not_in_the_feed_adds_nothing(self):
         out = self.served({"USDC.e": "USDC", "SBTC": "tBTC"}, {"USDC": 1.0})
@@ -906,6 +909,105 @@ class PublicPricesCarryTheAliasedTickers(unittest.TestCase):
         rates, _ = run_poll(base_cfg(feed_aliases={"USDC.e": "USDC"}),
                             {"USDC": 1.0}, tickers=["USDC.e"])
         self.assertEqual(rates, {"USDC.E": 100000000})
+
+
+class TheFeedsDateIsPassedOn(unittest.TestCase):
+    """/api/prices keeps each reading's as_of and static mark: readers judge a
+    price's age by them."""
+
+    def fetched(self, raw):
+        real = ps.http_get_json
+        ps.http_get_json = lambda url, timeout: raw
+        try:
+            return ps.fetch_prices({"format": "sequentia", "url": "x"}, 1)
+        finally:
+            ps.http_get_json = real
+
+    def test_as_of_and_static_survive_the_fetch(self):
+        out = self.fetched({"USDC": {"price": 1.0, "market_cap": 9, "volume_24h": 9, "as_of": 1794861713},
+                            "SEEDED": {"price": 2.0, "static": True}})
+        self.assertEqual(out["USDC"]["as_of"], 1794861713)
+        self.assertNotIn("static", out["USDC"])
+        self.assertIs(out["SEEDED"]["static"], True)
+        self.assertNotIn("as_of", out["SEEDED"])
+
+    def test_junk_dates_are_dropped(self):
+        out = self.fetched({"A": {"price": 1.0, "as_of": "yesterday"},
+                            "B": {"price": 1.0, "as_of": True, "static": "yes"}})
+        self.assertEqual(set(out["A"]), {"price", "market_cap", "volume_24h"})
+        self.assertEqual(set(out["B"]), {"price", "market_cap", "volume_24h"})
+
+    def test_an_alias_carries_its_targets_date(self):
+        srv = ps.PriceServer(base_cfg(feed_aliases={"USDC.e": "USDC"}), dry_run=True)
+        srv.last_prices = self.fetched({"USDC": {"price": 1.0, "as_of": 1794861713}})
+        out = ps.public_prices(srv)
+        self.assertEqual(out["USDC.E"]["as_of"], 1794861713)
+
+    def test_the_fee_rates_do_not_change(self):
+        cfg = base_cfg(feed_aliases={"USDC.e": "USDC"})
+        registry = {"USDC.E": (asset_id("usdc.e"), "x.test", 8)}
+        dated = {"USDC": {"price": 1.0, "market_cap": None, "volume_24h": None, "as_of": 1}}
+        bare = {"USDC": {"price": 1.0, "market_cap": None, "volume_24h": None}}
+        got = []
+        for feed in (dated, bare):
+            real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
+            ps.fetch_registry = lambda url, timeout: dict(registry)
+            ps.fetch_prices = lambda source, timeout, feed=feed: dict(feed)
+            try:
+                got.append(ps.PriceServer(dict(cfg), dry_run=True).poll_once())
+            finally:
+                ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
+        self.assertEqual(got[0], got[1])
+        self.assertEqual(got[0], {asset_id("usdc.e"): 100000000})
+
+
+class AStaleFeedStaysStale(unittest.TestCase):
+    """A reading's age reaches /api/prices unchanged, whatever this server does
+    in between, so a reader's age limit (the leaf makers skip a price older than
+    ten minutes) still fires on a feed that stopped."""
+
+    def poll(self, srv, registry, feed):
+        real_registry, real_prices = ps.fetch_registry, ps.fetch_prices
+        ps.fetch_registry = registry
+        ps.fetch_prices = feed
+        try:
+            return srv.poll_once()
+        finally:
+            ps.fetch_registry, ps.fetch_prices = real_registry, real_prices
+
+    def setUp(self):
+        self.reg = {"USDC.E": (asset_id("usdc.e"), "x.test", 8)}
+        self.srv = ps.PriceServer(base_cfg(feed_aliases={"USDC.e": "USDC"}), dry_run=True)
+        self.old = int(time.time()) - 11 * 60
+
+    def test_a_stale_reading_is_published_with_its_own_date(self):
+        stale = {"USDC": {"price": 1.0, "market_cap": None, "volume_24h": None, "as_of": self.old}}
+        self.poll(self.srv, lambda u, t: dict(self.reg), lambda s, t: dict(stale))
+        out = ps.public_prices(self.srv)
+        self.assertEqual(out["USDC"]["as_of"], self.old)
+        self.assertEqual(out["USDC.E"]["as_of"], self.old)
+        self.assertGreater(time.time() - out["USDC.E"]["as_of"], 600)
+
+    def test_a_feed_that_stops_answering_keeps_its_last_date(self):
+        stale = {"USDC": {"price": 1.0, "market_cap": None, "volume_24h": None, "as_of": self.old}}
+        self.poll(self.srv, lambda u, t: dict(self.reg), lambda s, t: dict(stale))
+
+        def down(s, t):
+            raise OSError("feed down")
+        self.poll(self.srv, lambda u, t: dict(self.reg), down)
+        self.assertEqual(ps.public_prices(self.srv)["USDC.E"]["as_of"], self.old)
+
+    def test_a_registry_outage_does_not_freeze_the_prices(self):
+        fresh = int(time.time())
+
+        def reg_down(u, t):
+            raise OSError("registry down")
+        first = {"USDC": {"price": 1.0, "market_cap": None, "volume_24h": None, "as_of": self.old}}
+        rates = self.poll(self.srv, lambda u, t: dict(self.reg), lambda s, t: dict(first))
+        later = {"USDC": {"price": 1.0, "market_cap": None, "volume_24h": None, "as_of": fresh}}
+        again = self.poll(self.srv, reg_down, lambda s, t: dict(later))
+        self.assertEqual(again, rates, "the rates wait for the registry")
+        self.assertEqual(ps.public_prices(self.srv)["USDC.E"]["as_of"], fresh)
 
 
 if __name__ == "__main__":

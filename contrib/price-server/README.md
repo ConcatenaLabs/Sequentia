@@ -133,11 +133,26 @@ is one config field: point your `source.url` at another operator's
 (`_meta` is informational; consumers of the Sequentia format ignore entries
 without a `price` field.)
 
+An entry carries the feed's `as_of` (the unix time of the reading) and its
+`"static": true` mark when the feed gives them, unchanged, so a reader can tell
+how old a price is from the reading itself rather than from this server's last
+poll.
+
 Each registry ticker that `feed_aliases` maps onto a feed key also appears under
 its own ticker, with that entry's values (`USDC.E` beside `USDC`, `EURC.E` beside
 `EURC`, `TSEQ` beside `SEQ`). A reader looks an asset up by its registry ticker
 and keeps no alias table of its own. A ticker the feed already prices keeps its
-own entry, and an alias whose target the feed does not carry adds nothing.
+own entry, and an alias whose target the feed does not carry adds nothing. An
+added entry names its market key, `"alias_of": "USDC"`, so a reader that lists
+the feed's markets (a choice of reference currency) can leave the aliases out.
+
+The public testnet's feed, `http://sequentiatestnet.com/prices`, is this output
+of the testnet's own price server. A price server that uses it as its market
+source therefore finds the bridged and pegged assets under their registry
+tickers too: with no `feed_aliases` it prices USDC.e, EURC.e, SBTC and tSEQ at
+the markets the testnet maps them to (USDC, EURC, tBTC and SEQ), and with the
+example configuration's aliases it reads the same entries under the market
+symbols.
 
 ### `GET /feewhitelist`
 
