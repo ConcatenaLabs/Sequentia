@@ -882,6 +882,9 @@ class PublicPricesCarryTheAliasedTickers(unittest.TestCase):
         self.assertEqual(out["USDC.E"]["price"], 1.0)
         self.assertEqual(out["EURC.E"]["price"], 1.1002)
         self.assertEqual(out["USDC"]["price"], 1.0)   # the market key stays
+        self.assertEqual(out["USDC.E"]["alias_of"], "USDC")
+        self.assertEqual(out["EURC.E"]["alias_of"], "EURC")
+        self.assertNotIn("alias_of", out["USDC"], "a market entry names no alias")
 
     def test_an_alias_whose_target_is_not_in_the_feed_adds_nothing(self):
         out = self.served({"USDC.e": "USDC", "SBTC": "tBTC"}, {"USDC": 1.0})

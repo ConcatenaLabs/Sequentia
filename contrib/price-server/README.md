@@ -142,7 +142,9 @@ Each registry ticker that `feed_aliases` maps onto a feed key also appears under
 its own ticker, with that entry's values (`USDC.E` beside `USDC`, `EURC.E` beside
 `EURC`, `TSEQ` beside `SEQ`). A reader looks an asset up by its registry ticker
 and keeps no alias table of its own. A ticker the feed already prices keeps its
-own entry, and an alias whose target the feed does not carry adds nothing.
+own entry, and an alias whose target the feed does not carry adds nothing. An
+added entry names its market key, `"alias_of": "USDC"`, so a reader that lists
+the feed's markets (a choice of reference currency) can leave the aliases out.
 
 The public testnet's feed, `http://sequentiatestnet.com/prices`, is this output
 of the testnet's own price server. A price server that uses it as its market

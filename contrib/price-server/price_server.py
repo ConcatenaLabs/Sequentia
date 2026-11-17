@@ -850,14 +850,16 @@ def public_prices(srv):
     them, under that ticker with the same values. A reader then looks an asset
     up by its own registry ticker (USDC.E, EURC.E, SBTC, TSEQ) and needs no alias
     table of its own. A ticker the feed already prices keeps its own entry, and
-    an alias whose target the feed does not carry adds nothing."""
+    an alias whose target the feed does not carry adds nothing. An added entry
+    names its market key (alias_of), so a reader listing the feed's markets (a
+    choice of reference currency) can leave the aliases out."""
     data = dict(srv.last_prices)
     for k, v in srv.cfg.get("feed_aliases", {"TSEQ": "SEQ"}).items():
         if str(k).startswith("_"):
             continue
         ticker, target = str(k).upper(), str(v).upper()
         if ticker not in data and target in srv.last_prices:
-            data[ticker] = dict(srv.last_prices[target])
+            data[ticker] = dict(srv.last_prices[target], alias_of=target)
     return data
 
 
