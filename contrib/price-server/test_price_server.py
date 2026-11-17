@@ -859,6 +859,7 @@ class AStaleFeedStaysStale(unittest.TestCase):
     def test_a_feed_that_stops_answering_keeps_its_last_date(self):
         stale = {"USDC": {"price": 1.0, "market_cap": None, "volume_24h": None, "as_of": self.old}}
         self.poll(self.srv, lambda u, t: dict(self.reg), lambda s, t: dict(stale))
+
         def down(s, t):
             raise OSError("feed down")
         self.poll(self.srv, lambda u, t: dict(self.reg), down)
@@ -866,6 +867,7 @@ class AStaleFeedStaysStale(unittest.TestCase):
 
     def test_a_registry_outage_does_not_freeze_the_prices(self):
         fresh = int(time.time())
+
         def reg_down(u, t):
             raise OSError("registry down")
         first = {"USDC": {"price": 1.0, "market_cap": None, "volume_24h": None, "as_of": self.old}}
