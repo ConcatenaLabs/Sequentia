@@ -267,11 +267,20 @@ def fetch_prices(source, timeout):
             p = v.get("price")
             if p is None:
                 continue
-            out[str(k).upper()] = {
+            entry = {
                 "price": float(p),
                 "market_cap": float(v["market_cap"]) if v.get("market_cap") is not None else None,
                 "volume_24h": float(v["volume_24h"]) if v.get("volume_24h") is not None else None,
             }
+            # The reading's date and the seeded mark are passed on untouched to
+            # /api/prices: a reader that skips a price older than it accepts
+            # (the leaf makers do) needs the feed's own date, not the time this
+            # server last polled. Neither takes part in admission.
+            if isinstance(v.get("as_of"), (int, float)) and not isinstance(v.get("as_of"), bool):
+                entry["as_of"] = int(v["as_of"])
+            if v.get("static") is True:
+                entry["static"] = True
+            out[str(k).upper()] = entry
         elif isinstance(v, (int, float)):  # tolerate {ticker: price} feeds
             out[str(k).upper()] = {"price": float(v), "market_cap": None, "volume_24h": None}
     return out
@@ -333,7 +342,7 @@ class PriceServer:
         self._states = {}            # TICKER -> AssetState
         self.last_rates = {}         # asset_id -> rate (last published)
         self.last_report = []        # [{ticker, id, domain, price, price_unit, rate, status}] for the UI
-        self.last_prices = {}        # TICKER -> {price, market_cap, volume_24h} (for the public API)
+        self.last_prices = {}        # TICKER -> {price, market_cap, volume_24h[, as_of, static]} (for the public API)
         self.last_poll_ts = None     # unix time of the last completed poll
         self.node_status = []        # [{url, ok, error, ts}] result of the last publish per node
         if dry_run:
@@ -562,6 +571,14 @@ class PriceServer:
             registry = fetch_registry(reg_url, timeout)
         except Exception as e:
             log.error("registry fetch failed (%s); cannot map tickers to ids this round", e)
+            # The rates wait for the registry, but /api/prices does not need it: a
+            # combined feed is read whole, so its readers keep fresh prices (and
+            # each reading's own date) through a registry outage.
+            if src.get("format", "sequentia") == "sequentia":
+                try:
+                    self.last_prices = fetch_prices(src, timeout)
+                except Exception as e2:
+                    log.error("price fetch failed: %s", e2)
             return self.last_rates
 
         # 2) fetch prices. feed_aliases remaps a registry ticker to the key the price
@@ -857,6 +874,23 @@ def _src(srv):
         "market_cap_path": s.get("market_cap_path", "market_cap"),
         "volume_24h_path": s.get("volume_24h_path", "volume_24h"),
     }
+
+
+def public_prices(srv):
+    """The body of GET /api/prices without its _meta: the market feed's entries
+    by feed key, plus each registry ticker that feed_aliases maps onto one of
+    them, under that ticker with the same values. A reader then looks an asset
+    up by its own registry ticker (USDC.E, EURC.E, SBTC, TSEQ) and needs no alias
+    table of its own. A ticker the feed already prices keeps its own entry, and
+    an alias whose target the feed does not carry adds nothing."""
+    data = dict(srv.last_prices)
+    for k, v in srv.cfg.get("feed_aliases", {"TSEQ": "SEQ"}).items():
+        if str(k).startswith("_"):
+            continue
+        ticker, target = str(k).upper(), str(v).upper()
+        if ticker not in data and target in srv.last_prices:
+            data[ticker] = dict(srv.last_prices[target])
+    return data
 
 
 def _whitelist_payload(srv):
@@ -1631,7 +1665,7 @@ def start_config_ui(price_server, host, port):
             if path == "/api/prices":
                 if self._public_gate(ui_cfg().get("public_api")):
                     return
-                data = dict(srv.last_prices)
+                data = public_prices(srv)
                 data["_meta"] = {"quote_currency": _src(srv)["quote_currency"],
                                  "updated": srv.last_poll_ts, "publisher": srv.source_name,
                                  "format": "sequentia"}
