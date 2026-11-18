@@ -1277,8 +1277,8 @@ It replaces the hash-locked swap against on-chain bitcoin wherever one is built:
 - the node wallet's convert (`src/wallet/xchainconvert.cpp`);
 - the Sequentia Wallet Kit and the wallets built on it (the web wallet, Ambra
   browser, Ambra mobile);
-- the restricted-asset swap against bitcoin, whose claim leaf keeps the issuer's
-  co-signature beside the buyer's.
+- the restricted-asset swap against bitcoin, whose claim leaf keeps the asset's
+  policy-key co-signature beside the buyer's.
 
 Hash-locked swaps over Lightning are unaffected: they settle without waiting for a
 Bitcoin confirmation.
