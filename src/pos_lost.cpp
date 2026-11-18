@@ -308,6 +308,11 @@ bool LostActive()
     return g_con_pos && g_con_bitcoin_anchor && g_validate_anchor && !g_ignore;
 }
 
+bool LostActiveAt(int height)
+{
+    return LostActive() && Params().GetConsensus().LostBlocksActiveAt(height);
+}
+
 uint32_t LostWindow() { return g_window; }
 
 void LostInit()
@@ -426,7 +431,7 @@ void LostShutdown()
 
 void LostNoteSigned(const CBlock& block, int height)
 {
-    if (!g_bind_signed || !LostActive()) return;
+    if (!g_bind_signed || !LostActiveAt(height)) return;
     LOCK(g_lost_mutex);
     const uint256 h = block.GetHash();
     if (g_signed.count(h)) return;
@@ -588,6 +593,7 @@ void LoadRecorded(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     g_recorded_loaded = true;
     for (const CBlockIndex* p = tip; p && RecordReach(p, tip, tip->nHeight + 1, tip->m_anchor_height); p = p->pprev) {
         if (!(p->nStatus & BLOCK_HAS_LOST_RECORD)) continue;
+        if (!Params().GetConsensus().LostBlocksActiveAt(p->nHeight)) continue;
         CBlock blk;
         if (!ReadBlockFromDisk(blk, p, Params().GetConsensus())) continue;
         std::vector<Binding> b;
@@ -607,6 +613,7 @@ std::map<COutPoint, uint256> ChainBindings(const CBlockIndex* prev, uint32_t anc
     if (g_recorded.empty() || !prev) return out;
     const int height = prev->nHeight + 1;
     for (const CBlockIndex* p = prev; p && RecordReach(p, prev, height, anchor_h); p = p->pprev) {
+        if (!Params().GetConsensus().LostBlocksActiveAt(p->nHeight)) continue;
         auto it = g_recorded.find(p->GetBlockHash());
         if (it == g_recorded.end()) continue;
         for (const Binding& b : it->second) {
@@ -1087,6 +1094,9 @@ bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool j
     AssertLockHeld(::cs_main);
     if (has_record) *has_record = false;
     if (!g_con_pos || !g_con_bitcoin_anchor || !g_validate_anchor || !pindexPrev || g_ignore) return true;
+    // Below the rule's height a record is an ordinary OP_RETURN output: judged by
+    // nothing and binding nothing.
+    if (!Params().GetConsensus().LostBlocksActiveAt(pindexPrev->nHeight + 1)) return true;
     LoadRecorded(pindexPrev);
     std::vector<Binding> mine;
     size_t bytes = 0;
@@ -1130,7 +1140,7 @@ LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor
 {
     AssertLockHeld(::cs_main);
     LostTemplateParts out;
-    if (!LostActive() || !pindexPrev) return out;
+    if (!pindexPrev || !LostActiveAt(pindexPrev->nHeight + 1)) return out;
     LoadRecorded(pindexPrev);
     LOCK(g_lost_mutex);
     Plan plan = PlanLocked(pindexPrev, anchor_height, anchor_hash, view, /*build=*/true);
@@ -1148,7 +1158,7 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
                     BlockValidationState& state)
 {
     AssertLockHeld(::cs_main);
-    if (!LostActive() || !pindexPrev || ibd) return true;
+    if (!pindexPrev || ibd || !LostActiveAt(pindexPrev->nHeight + 1)) return true;
     LOCK(g_lost_mutex);
     std::optional<std::string> why;
     std::string reason;
@@ -1199,7 +1209,7 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
 
 std::optional<uint256> LostConflict(const CTransaction& tx, const CBlockIndex* tip)
 {
-    if (!LostActive() || !tip) return std::nullopt;
+    if (!tip || !LostActiveAt(tip->nHeight + 1)) return std::nullopt;
     LOCK(g_lost_mutex);
     const uint256 txid = tx.GetHash();
     for (const CTxIn& in : tx.vin) {

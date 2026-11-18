@@ -580,16 +580,31 @@ other. The third closes a lock whose own funding can be made to fail.
 
 #### Activation
 
-The rule is active from genesis on a fresh chain. On a running chain it
-starts at a height bound to the chain's genesis hash
-([`CONTRIBUTING.md`](../../CONTRIBUTING.md)), with every committee member
-upgraded. A node on the old rules reads a record as an ordinary `OP_RETURN`
-output and follows the upgraded committee's chain. It parts from it only if
-a quorum certifies a block that breaks a binding.
+The rule refuses blocks that were valid before, so it is height-gated as
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md) requires, by
+`Consensus::Params::lost_blocks_height` and `lost_blocks_chain_genesis`, read
+through `LostBlocksActiveAt(height)`:
+
+- every chain not yet started (mainnet, regtest, every custom chain) has it from
+  genesis; a custom chain can move it with `-con_lost_blocks_height`;
+- the running testnet has no height for it yet, so it is not active there: its
+  height, bound to the testnet's genesis hash, is the owner's, set with one line
+  of `chainparams.cpp` together with the version bump and an all-at-once cutover
+  of every committee member;
+- Bitcoin's and Liquid's chains never have it.
+
+Every part of the rule reads the gate at the height of the block it judges or
+builds: the records and bindings (a record in a block below the height is an
+ordinary `OP_RETURN` output and binds nothing), the holders' duty, the
+producer's template and the mempool's refusal of a lost transaction's respend.
+A node on the old rules reads a record as an ordinary `OP_RETURN` output and
+follows the upgraded committee's chain. It parts from it only if a quorum
+certifies a block that breaks a binding.
 
 `getdeploymentinfo` lists the rule as `lost_blocks`, with its window `W`, on a
-Proof-of-Stake chain; `active` is false on a node that does not watch Bitcoin,
-since such a node holds no lost block.
+Proof-of-Stake chain: `active` for the next block, and `height` once the chain
+has one. `active` is also false on a node that does not watch Bitcoin, since
+such a node holds no lost block.
 
 Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_attacks.py` (a
 transaction not yet due while Bitcoin outruns the window, a descendant whose

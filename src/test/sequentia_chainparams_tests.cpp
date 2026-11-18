@@ -57,6 +57,30 @@ BOOST_AUTO_TEST_CASE(btc_payment_proof_activation_is_pinned)
     SelectParams(CBaseChainParams::REGTEST);
 }
 
+//! The rule for the transactions of a lost block (doc 03, "Activation") is gated
+//! the same way: from genesis on the chains this project starts, not on the
+//! running testnet until its height is chosen, and never on chains not ours.
+BOOST_AUTO_TEST_CASE(lost_blocks_activation_is_pinned)
+{
+    ArgsManager empty;
+    for (const std::string chain : {CBaseChainParams::SEQUENTIA, CBaseChainParams::REGTEST, std::string("elementsregtest")}) {
+        const auto params = CreateChainParams(empty, chain);
+        BOOST_CHECK_MESSAGE(params->GetConsensus().LostBlocksActiveAt(0), chain);
+    }
+    for (const std::string chain : {CBaseChainParams::MAIN, CBaseChainParams::SIGNET, std::string("liquidv1"),
+                                    std::string("liquidv1test"), std::string("liquidtestnet"), CBaseChainParams::TESTNET}) {
+        const auto params = CreateChainParams(empty, chain);
+        BOOST_CHECK_MESSAGE(!params->GetConsensus().LostBlocksActiveAt(1000000), chain);
+    }
+    // The testnet's gate is bound to its genesis: a chain with another genesis has the rule from block 0.
+    const auto testnet = CreateChainParams(empty, CBaseChainParams::TESTNET);
+    Consensus::Params other = testnet->GetConsensus();
+    other.hashGenesisBlock = uint256::ONE;
+    BOOST_CHECK(other.LostBlocksActiveAt(0));
+    BOOST_CHECK(other.BtcPaymentActiveAt(0));
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
 BOOST_AUTO_TEST_CASE(taproot_always_active_on_sequentia_networks)
 {
     CheckTaprootAlwaysActive(CBaseChainParams::SEQUENTIA);

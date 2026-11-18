@@ -110,6 +110,9 @@ bool LostIsRefusal(const std::string& reason);
 //! Whether this node enforces the rule: a PoS chain anchored to Bitcoin, the
 //! anchor validated, and not turned off with the debug-only -posdebugignorelost.
 bool LostActive();
+//! LostActive(), and the chain's lost_blocks_height reached at `height`: whether
+//! the rule applies to the block at that height (Consensus::Params).
+bool LostActiveAt(int height);
 uint32_t LostWindow();
 //! Whether a transaction of a lost block at `lost_height`, anchored at
 //! `lost_anchor_h`, still binds a block at `height` anchored at `anchor_h` on

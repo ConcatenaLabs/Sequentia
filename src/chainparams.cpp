@@ -189,7 +189,9 @@ public:
         strNetworkID = CBaseChainParams::MAIN;
         // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
         // project starts. This one is running and is not ours, so it never has it.
+        // Nor the rule for the transactions of a lost block.
         consensus.btc_payment_height = std::numeric_limits<int>::max();
+        consensus.lost_blocks_height = std::numeric_limits<int>::max();
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
         consensus.nSubsidyHalvingInterval = 210000;
@@ -1321,6 +1323,12 @@ public:
         // genesis so a re-genesis gets it from block 0.
         consensus.btc_payment_height = std::numeric_limits<int>::max();
         consensus.btc_payment_chain_genesis = expected_genesis;
+        // SEQUENTIA: the rule for the transactions of a lost block, the same:
+        // not active on this running chain until its operators choose a height,
+        // which is this one line; bound to the genesis so a re-genesis has it
+        // from block 0.
+        consensus.lost_blocks_height = std::numeric_limits<int>::max();
+        consensus.lost_blocks_chain_genesis = expected_genesis;
 
         // SEQUENTIA: flag day for the SPLIT payout mode (proportional pool
         // payouts through a claimable pot; doc/sequentia/split-payouts-design.md).
@@ -1569,7 +1577,9 @@ public:
         strNetworkID = CBaseChainParams::SIGNET;
         // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
         // project starts. This one is running and is not ours, so it never has it.
+        // Nor the rule for the transactions of a lost block.
         consensus.btc_payment_height = std::numeric_limits<int>::max();
+        consensus.lost_blocks_height = std::numeric_limits<int>::max();
         consensus.signet_blocks = true;
         consensus.signet_challenge.assign(bin.begin(), bin.end());
         consensus.nSubsidyHalvingInterval = 210000;
@@ -1943,6 +1953,7 @@ protected:
         // The default is the chain's own value: 0 for a custom chain, never for
         // a running chain built on this class (liquidtestnet).
         consensus.btc_payment_height = (int)args.GetIntArg("-con_btc_payment_height", consensus.btc_payment_height);
+        consensus.lost_blocks_height = (int)args.GetIntArg("-con_lost_blocks_height", consensus.lost_blocks_height);
         g_split_payout_height = consensus.split_payout_height;
         // SEQUENTIA: coinbase maturity, settable on custom chains so the
         // functional suite can run a chain with the real chains' 1,000 blocks
@@ -2452,7 +2463,9 @@ public:
         strNetworkID = chain;
         // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
         // project starts. This one is running and is not ours, so it never has it.
+        // Nor the rule for the transactions of a lost block.
         consensus.btc_payment_height = std::numeric_limits<int>::max();
+        consensus.lost_blocks_height = std::numeric_limits<int>::max();
         // not a debug chain
         fDefaultConsistencyChecks = false;
 
@@ -2513,7 +2526,9 @@ public:
         strNetworkID = "liquidv1";
         // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
         // project starts. This one is running and is not ours, so it never has it.
+        // Nor the rule for the transactions of a lost block.
         consensus.btc_payment_height = std::numeric_limits<int>::max();
+        consensus.lost_blocks_height = std::numeric_limits<int>::max();
         consensus.nSubsidyHalvingInterval = 150;
         consensus.BIP16Exception = uint256();
         consensus.BIP34Height = 0;

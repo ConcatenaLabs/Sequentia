@@ -514,6 +514,22 @@ struct Params {
         if (!btc_payment_chain_genesis.IsNull() && btc_payment_chain_genesis != hashGenesisBlock) return true;
         return height >= btc_payment_height;
     }
+    //! SEQUENTIA: the rule for the transactions of a lost block (doc 03,
+    //! "Transactions of a lost block"): records and bindings, and the holders'
+    //! duty to carry a lost block's transactions first. A tightening, so gated
+    //! like btc_payment_height: 0 = from genesis (every fresh chain); a running
+    //! chain names a height bound to its genesis hash; a null genesis (custom
+    //! chains, -con_lost_blocks_height) applies the height as it is. The rule
+    //! also needs a Proof-of-Stake chain whose node watches Bitcoin
+    //! (pos_lost.h LostActive).
+    int lost_blocks_height{0};
+    uint256 lost_blocks_chain_genesis;
+    bool LostBlocksActiveAt(int height) const
+    {
+        if (lost_blocks_height == 0) return true;
+        if (!lost_blocks_chain_genesis.IsNull() && lost_blocks_chain_genesis != hashGenesisBlock) return true;
+        return height >= lost_blocks_height;
+    }
     //! SEQUENTIA: flag day for the SPLIT payout mode (pos.h PosPayoutMode),
     //! under which a pool's coinbase pays a claimable pot instead of one drawn
     //! winner, and a new consensus rule constrains any transaction spending a

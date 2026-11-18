@@ -661,7 +661,7 @@ void BlockAssembler::SortForBlock(const CTxMemPool::setEntries& package, std::ve
 // transaction package to work on next.
 void BlockAssembler::addLostReplay(const CBlockIndex* pindexPrev)
 {
-    if (!LostActive()) return;
+    if (!pindexPrev || !LostActiveAt(pindexPrev->nHeight + 1)) return;
     const uint32_t anchor_h = m_anchor_height;
     CCoinsViewCache view(&m_chainstate.CoinsTip());
     LostTemplateParts parts = LostForTemplate(pindexPrev, anchor_h, m_anchor_hash, view);

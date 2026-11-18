@@ -69,6 +69,7 @@
 
 #include <condition_variable>
 #include <limits>
+#include <optional>
 #include <memory>
 #include <mutex>
 
@@ -1860,7 +1861,7 @@ RPCHelpMan getblockchaininfo()
 namespace {
 const std::vector<RPCResult> RPCHelpForDeployment{
     {RPCResult::Type::STR, "type", "one of \"buried\", \"bip9\""},
-    {RPCResult::Type::NUM, "height", /*optional=*/true, "height of the first block which the rules are or will be enforced (only for \"buried\" type, or \"bip9\" type with \"active\" status)"},
+    {RPCResult::Type::NUM, "height", /*optional=*/true, "height of the first block which the rules are or will be enforced (only for \"buried\" type, or \"bip9\" type with \"active\" status; absent for btc_payment and lost_blocks on a chain that has not chosen a height)"},
     {RPCResult::Type::BOOL, "active", "true if the rules are enforced for the mempool and the next block"},
     {RPCResult::Type::NUM, "window", /*optional=*/true, "the window W in Bitcoin blocks during which a lost block's transactions bind their coins (only for \"lost_blocks\")"},
     {RPCResult::Type::OBJ, "bip9", /*optional=*/true, "status of bip9 softforks (only for \"bip9\" type)",
@@ -1884,41 +1885,46 @@ const std::vector<RPCResult> RPCHelpForDeployment{
     }},
 };
 
-// SEQUENTIA: the proof of a bitcoin payment (doc/sequentia/bitcoin-payment-proof.md,
-// section 7): a height-gated tightening, reported as a buried deployment. It is
-// listed only where it is or will be enforced: on a chain whose height is the
-// "never" value (Bitcoin's own chains, the Liquid chains, and a running chain
-// whose operators have not chosen a height) it is absent, which a wallet reads
-// as not active.
-static void BtcPaymentDescPushBack(const CBlockIndex* blockindex, UniValue& softforks, const Consensus::Params& params)
+// SEQUENTIA: the two height-gated rules a swap against on-chain bitcoin needs,
+// reported as buried deployments. "height" is the first block under the rule
+// (0 from genesis); a chain of this project that has not chosen one yet (the
+// running testnet) lists the rule as not active, with no height. Chains that
+// are not this project's (Bitcoin's, Liquid's) never have either rule and do
+// not list them.
+static void GatedDescPushBack(UniValue& softforks, const std::string& name, int gate_height, bool from_genesis,
+                              bool active_next, bool listed, std::optional<int> window)
 {
-    int height;
-    if (params.BtcPaymentActiveAt(0)) {
-        height = 0;
-    } else if (params.btc_payment_height == std::numeric_limits<int>::max()) {
-        return;
-    } else {
-        height = params.btc_payment_height;
-    }
+    if (!listed) return;
     UniValue rv(UniValue::VOBJ);
     rv.pushKV("type", "buried");
-    rv.pushKV("active", params.BtcPaymentActiveAt(blockindex ? blockindex->nHeight + 1 : 0));
-    rv.pushKV("height", height);
-    softforks.pushKV("btc_payment", rv);
+    rv.pushKV("active", active_next);
+    if (from_genesis) {
+        rv.pushKV("height", 0);
+    } else if (gate_height != std::numeric_limits<int>::max()) {
+        rv.pushKV("height", gate_height);
+    }
+    if (window) rv.pushKV("window", *window);
+    softforks.pushKV(name, rv);
 }
 
-// SEQUENTIA: the rule for the transactions of a lost block (doc 03, section 3).
-// It has no activation height: it applies from genesis on every Proof-of-Stake
-// chain whose node watches Bitcoin, which is what "active" reports for this node.
-static void LostBlocksDescPushBack(UniValue& softforks)
+// The proof of a bitcoin payment (doc/sequentia/bitcoin-payment-proof.md, section 7).
+static void BtcPaymentDescPushBack(const CBlockIndex* blockindex, UniValue& softforks, const Consensus::Params& params)
 {
-    if (!g_con_pos) return;
-    UniValue rv(UniValue::VOBJ);
-    rv.pushKV("type", "buried");
-    rv.pushKV("active", LostActive());
-    rv.pushKV("height", 0);
-    rv.pushKV("window", (int)LostWindow());
-    softforks.pushKV("lost_blocks", rv);
+    const bool from_genesis = params.BtcPaymentActiveAt(0);
+    const bool never = !from_genesis && params.btc_payment_height == std::numeric_limits<int>::max();
+    GatedDescPushBack(softforks, "btc_payment", params.btc_payment_height, from_genesis,
+                      params.BtcPaymentActiveAt(blockindex ? blockindex->nHeight + 1 : 0),
+                      /*listed=*/!never || g_con_bitcoin_anchor, std::nullopt);
+}
+
+// The rule for the transactions of a lost block (doc 03, section 3), on
+// Proof-of-Stake chains. "active" also needs this node to watch Bitcoin: a node
+// that does not holds no lost block.
+static void LostBlocksDescPushBack(const CBlockIndex* blockindex, UniValue& softforks, const Consensus::Params& params)
+{
+    const int next = blockindex ? blockindex->nHeight + 1 : 0;
+    GatedDescPushBack(softforks, "lost_blocks", params.lost_blocks_height, params.LostBlocksActiveAt(0),
+                      LostActiveAt(next), /*listed=*/g_con_pos, (int)LostWindow());
 }
 
 UniValue DeploymentInfo(const CBlockIndex* blockindex, const Consensus::Params& consensusParams)
@@ -1934,7 +1940,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const Consensus::Params& 
     SoftForkDescPushBack(blockindex, softforks, consensusParams, Consensus::DEPLOYMENT_TAPROOT);
     SoftForkDescPushBack(blockindex, softforks, consensusParams, Consensus::DEPLOYMENT_SIMPLICITY);
     BtcPaymentDescPushBack(blockindex, softforks, consensusParams);
-    LostBlocksDescPushBack(softforks);
+    LostBlocksDescPushBack(blockindex, softforks, consensusParams);
     return softforks;
 }
 } // anon namespace

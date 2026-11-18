@@ -824,14 +824,18 @@ through `BtcPaymentActiveAt(height)` in the shape of `SimplicityBudget4ActiveAt`
 
 **How a wallet reads it.** `getdeploymentinfo` lists the rule as `btc_payment`,
 a buried deployment: `active` says whether the next block is under it, and
-`height` is its first block (0 from genesis). Where the chain has no height for it
-the entry is absent. A wallet builds the payment lock only where its own node
-reports `btc_payment` active, and otherwise keeps the swap it had; an absent entry
-means not active. On a Proof-of-Stake chain the same call lists `lost_blocks`, the
-rule for the transactions of a lost block, with its window `W`; `active` is false
-on a node that does not watch Bitcoin, which carries no lost block.
-`feature_sequentia_deployments.py` and case `dep` of `feature_pos_lost_blocks.py`
-test both.
+`height` is its first block (0 from genesis). On a chain of this project that has
+not chosen a height yet, such as the running testnet before its flag day, the
+entry is listed not active and without a height; on chains that are not this
+project's it is absent. A wallet builds the payment lock only where its own node
+reports both `btc_payment` and `lost_blocks` active, and otherwise keeps the swap
+it had; an absent entry means not active. `lost_blocks` is the rule for the
+transactions of a lost block, listed on a Proof-of-Stake chain with its window
+`W` (`03-bitcoin-anchoring.md`, "Activation"); its `active` is also false on a
+node that does not watch Bitcoin, which carries no lost block.
+`feature_sequentia_deployments.py`, case `dep` of `feature_pos_lost_blocks.py`,
+`feature_btc_payment_activation.py` and `feature_pos_lost_activation.py` test
+the report and both gates.
 
 ## 8. The swap
 
