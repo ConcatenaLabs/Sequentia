@@ -81,6 +81,60 @@ BOOST_AUTO_TEST_CASE(lost_blocks_activation_is_pinned)
     SelectParams(CBaseChainParams::REGTEST);
 }
 
+static std::unique_ptr<const CChainParams> ParamsWith(const std::string& chain, const std::vector<std::string>& flags)
+{
+    ArgsManager args;
+    SetupChainParamsBaseOptions(args);
+    std::vector<const char*> argv{"sequentiad"};
+    for (const std::string& f : flags) argv.push_back(f.c_str());
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(args.ParseParameters(argv.size(), argv.data(), error), error);
+    return CreateChainParams(args, chain);
+}
+
+//! The custom-chain flags that set the two gates (-con_btc_payment_height,
+//! -con_lost_blocks_height) cannot turn either rule on where the chain fixes
+//! it: liquidtestnet is built on the custom-chain class, so it refuses them
+//! rather than letting them through. And a value that is not a height in
+//! [0, INT_MAX] is refused rather than converted, since a wrapped or misread
+//! value would read as 0, "from genesis".
+BOOST_AUTO_TEST_CASE(activation_height_flags_are_checked)
+{
+    const int max = std::numeric_limits<int>::max();
+    for (const std::string flag : {"-con_btc_payment_height", "-con_lost_blocks_height"}) {
+        const bool btc = flag == "-con_btc_payment_height";
+        for (const std::string value : {"0", "1", "30", "2147483647"}) {
+            BOOST_CHECK_EXCEPTION(ParamsWith("liquidtestnet", {flag + "=" + value}), std::runtime_error,
+                                  HasReason(flag + " is for custom chains only: liquidtestnet fixes its activation heights"));
+        }
+        // Without the flag, liquidtestnet never enforces either rule.
+        const auto liquid = ParamsWith("liquidtestnet", {});
+        BOOST_CHECK(!(btc ? liquid->GetConsensus().BtcPaymentActiveAt(max - 1) : liquid->GetConsensus().LostBlocksActiveAt(max - 1)));
+
+        for (const std::string value : {"4294967296", "4294967326", "2147483648", "-1", "-4294967296", "abc", "", "30x", "1e3"}) {
+            BOOST_CHECK_EXCEPTION(ParamsWith("elementsregtest", {flag + "=" + value}), std::runtime_error,
+                                  HasReason(flag + "=" + value + " is not a block height"));
+            BOOST_CHECK_EXCEPTION(ParamsWith("liquidtestnet", {flag + "=" + value}), std::runtime_error,
+                                  HasReason(" is not a block height"));
+        }
+        BOOST_CHECK_EXCEPTION(ParamsWith("elementsregtest", {"-no" + flag.substr(1)}), std::runtime_error,
+                              HasReason(" is not a block height"));
+
+        for (const auto& [value, height] : std::vector<std::pair<std::string, int>>{{"0", 0}, {"30", 30}, {"2147483647", max}}) {
+            const auto custom = ParamsWith("elementsregtest", {flag + "=" + value});
+            const auto& c = custom->GetConsensus();
+            BOOST_CHECK_EQUAL(btc ? c.btc_payment_height : c.lost_blocks_height, height);
+            const auto active = [&](int h) { return btc ? c.BtcPaymentActiveAt(h) : c.LostBlocksActiveAt(h); };
+            BOOST_CHECK_EQUAL(active(0), height == 0);
+            if (height > 0) {
+                BOOST_CHECK(!active(height - 1));
+                BOOST_CHECK(active(height));
+            }
+        }
+    }
+    SelectParams(CBaseChainParams::REGTEST);
+}
+
 BOOST_AUTO_TEST_CASE(taproot_always_active_on_sequentia_networks)
 {
     CheckTaprootAlwaysActive(CBaseChainParams::SEQUENTIA);

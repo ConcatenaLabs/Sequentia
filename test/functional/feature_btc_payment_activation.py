@@ -15,8 +15,17 @@ with generateblock; the node runs -par=1, so a script failure names itself.
   slot  an anchor floor no block meets, in the slot of an input whose leaf is
         OP_TRUE: ignored at H - 1, refused at H (bad-anchorlock-not-reached).
 
+Both stay refused at H + 1. After a reorganization back below H, a new block at
+H - 1 accepts them again and its successor at H refuses them; switching back to
+the first branch connects its H - 1 block again with the rule off; and a node
+reindexed from disk keeps that block and still refuses the spends above H.
+
 getdeploymentinfo reports btc_payment not active below H, active from the
 block before it.
+
+A height flag (-con_btc_payment_height, -con_lost_blocks_height) that is not a
+block height from 0 to 2147483647 stops the node at start: cast to an int,
+4294967296 would read as 0, "from genesis".
 """
 
 from test_framework.address import program_to_witness
@@ -26,12 +35,14 @@ from test_framework.messages import (
 )
 from test_framework.script import CScript, CScriptOp, OP_DROP, OP_TRUE, taproot_construct
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_node import ErrorMatch
 from test_framework.util import assert_equal
 
 OP_INSPECTBTCPAYMENT = CScriptOp(0xe5)
 NUMS = bytes.fromhex("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
 H = 130
 FEE = 10000
+NO_PROOF = "No valid proof of a bitcoin payment on this input"
 
 
 class BtcPaymentActivationTest(BitcoinTestFramework):
@@ -98,7 +109,7 @@ class BtcPaymentActivationTest(BitcoinTestFramework):
         self.asset = node.dumpassetlabels()["bitcoin"]
         self.generatetoaddress(node, 101, node.getnewaddress(), sync_fun=self.no_op)
         op_leaf = CScript([OP_INSPECTBTCPAYMENT, OP_DROP, OP_DROP, OP_TRUE])
-        coins = {"op": [self.coin(op_leaf) for _ in range(2)], "slot": [self.coin(CScript([OP_TRUE])) for _ in range(2)]}
+        coins = {"op": [self.coin(op_leaf) for _ in range(6)], "slot": [self.coin(CScript([OP_TRUE])) for _ in range(6)]}
         self.generatetoaddress(node, 1, node.getnewaddress(), sync_fun=self.no_op)
         floor = b"\x02" + (999_999).to_bytes(4, "little")
 
@@ -110,9 +121,52 @@ class BtcPaymentActivationTest(BitcoinTestFramework):
         self.block([self.spend(coins["op"][0]), self.spend(coins["slot"][0], [floor])])
         assert_equal(self.dep(), {"type": "buried", "active": True, "height": H})
 
+        hm1 = node.getbestblockhash()
+
         self.log.info("Block H: each is refused for the rule's own reason")
-        self.block([self.spend(coins["op"][1])], "No valid proof of a bitcoin payment on this input")
+        self.block([self.spend(coins["op"][1])], NO_PROOF)
         self.block([self.spend(coins["slot"][1], [floor])], "bad-anchorlock-not-reached")
+        self.block([])
+
+        self.log.info("Block H + 1: still refused")
+        self.block([self.spend(coins["op"][2])], NO_PROOF)
+        self.block([self.spend(coins["slot"][2], [floor])], "bad-anchorlock-not-reached")
+        self.block([])
+        top = node.getbestblockhash()
+        assert_equal(node.getblockcount(), H + 1)
+
+        self.log.info("A reorganization from H + 1 back to H - 2: H - 1 accepts both again, H refuses them")
+        node.invalidateblock(hm1)
+        assert_equal(node.getblockcount(), H - 2)
+        assert_equal(self.dep()["active"], False)
+        self.block([self.spend(coins["op"][3]), self.spend(coins["slot"][3], [floor])])
+        branch_hm1 = node.getbestblockhash()
+        self.block([self.spend(coins["op"][4])], NO_PROOF)
+        self.block([self.spend(coins["slot"][4], [floor])], "bad-anchorlock-not-reached")
+
+        self.log.info("Back to the first branch: its H - 1 is connected again, with the rule off")
+        node.reconsiderblock(hm1)
+        node.invalidateblock(branch_hm1)
+        assert_equal(node.getbestblockhash(), top)
+        node.reconsiderblock(branch_hm1)
+        assert_equal(node.getbestblockhash(), top)
+
+        self.log.info("Reindexed from disk: the H - 1 block is kept, and above H the spends are refused")
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex"])
+        self.wait_until(lambda: node.getbestblockhash() == top, timeout=60)
+        assert_equal(len(node.getblock(node.getblockhash(H - 1))["tx"]), 3)
+        self.block([self.spend(coins["op"][5])], NO_PROOF)
+        self.block([self.spend(coins["slot"][5], [floor])], "bad-anchorlock-not-reached")
+
+        self.log.info("A height flag that is not a block height stops the node at start")
+        self.stop_node(0)
+        for flag in ("-con_btc_payment_height", "-con_lost_blocks_height"):
+            for value in ("4294967296", "4294967426", "-1", "abc"):
+                node.assert_start_raises_init_error(
+                    extra_args=[a for a in self.extra_args[0] if not a.startswith(flag + "=")] + ["%s=%s" % (flag, value)],
+                    expected_msg="Error: %s=%s is not a block height: give a number from 0 (from genesis) to 2147483647" % (flag, value),
+                    match=ErrorMatch.FULL_TEXT)
+                self.log.info("    %s=%s: refused at start", flag, value)
 
 
 if __name__ == '__main__':

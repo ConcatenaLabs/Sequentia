@@ -16,6 +16,7 @@
 #include <supervision.h>
 #include <primitives/transaction.h>
 #include <util/system.h>
+#include <util/strencodings.h>
 #include <crypto/sha256.h>
 
 #include <assert.h>
@@ -1939,6 +1940,29 @@ protected:
             consensus.utxo_recovery.chain_genesis = consensus.hashGenesisBlock;
         }
     }
+    //! SEQUENTIA: set by a chain built on this class that is not a custom chain
+    //! (liquidtestnet), before its own UpdateFromArgs: its activation gates are
+    //! fixed in code, and a custom-chain flag must not move them.
+    bool m_fixed_activation_gates{false};
+    //! SEQUENTIA: the activation height a custom-chain flag names, or `chain_value`
+    //! when the flag is not given. A height is an int, and 0 means "from
+    //! genesis", so anything that is not a plain number in [0, INT_MAX] is
+    //! refused rather than converted: cast to int, 4294967296 wraps to 0 and a
+    //! word reads as 0, both turning the rule on from genesis.
+    int ActivationHeightArg(const ArgsManager& args, const std::string& name, int chain_value) const
+    {
+        if (!args.IsArgSet(name)) return chain_value;
+        if (m_fixed_activation_gates) {
+            throw std::runtime_error(strprintf("%s is for custom chains only: %s fixes its activation heights", name, strNetworkID));
+        }
+        const std::string given = args.IsArgNegated(name) ? "(negated)" : args.GetArg(name, "");
+        int64_t height;
+        if (args.IsArgNegated(name) || !ParseInt64(given, &height) || height < 0 || height > std::numeric_limits<int>::max()) {
+            throw std::runtime_error(strprintf("%s=%s is not a block height: give a number from 0 (from genesis) to %d",
+                                               name, given, std::numeric_limits<int>::max()));
+        }
+        return static_cast<int>(height);
+    }
     void UpdateFromArgs(const ArgsManager& args)
     {
         UpdateActivationParametersFromArgs(args);
@@ -1948,12 +1972,13 @@ protected:
         // the functional suite can exercise the gate. 0 (default) = active from
         // genesis, the correct shape for any fresh chain.
         consensus.split_payout_height = args.GetIntArg("-con_splitpayoutheight", 0);
-        // SEQUENTIA: the bitcoin-payment-proof gate, overridable on custom chains
-        // so the functional suite can show the behaviour before activation.
-        // The default is the chain's own value: 0 for a custom chain, never for
-        // a running chain built on this class (liquidtestnet).
-        consensus.btc_payment_height = (int)args.GetIntArg("-con_btc_payment_height", consensus.btc_payment_height);
-        consensus.lost_blocks_height = (int)args.GetIntArg("-con_lost_blocks_height", consensus.lost_blocks_height);
+        // SEQUENTIA: the bitcoin-payment-proof and lost-block gates, overridable
+        // on custom chains so the functional suite can show the behaviour before
+        // activation. The default is the chain's own value: 0 for a custom chain.
+        // A running chain built on this class (liquidtestnet) fixes both itself
+        // and refuses the flags (ActivationHeightArg).
+        consensus.btc_payment_height = ActivationHeightArg(args, "-con_btc_payment_height", consensus.btc_payment_height);
+        consensus.lost_blocks_height = ActivationHeightArg(args, "-con_lost_blocks_height", consensus.lost_blocks_height);
         g_split_payout_height = consensus.split_payout_height;
         // SEQUENTIA: coinbase maturity, settable on custom chains so the
         // functional suite can run a chain with the real chains' 1,000 blocks
@@ -2463,9 +2488,11 @@ public:
         strNetworkID = chain;
         // SEQUENTIA: the proof of a bitcoin payment belongs to the chains this
         // project starts. This one is running and is not ours, so it never has it.
-        // Nor the rule for the transactions of a lost block.
+        // Nor the rule for the transactions of a lost block. The custom-chain
+        // flags that set both cannot reach these: UpdateFromArgs below refuses them.
         consensus.btc_payment_height = std::numeric_limits<int>::max();
         consensus.lost_blocks_height = std::numeric_limits<int>::max();
+        m_fixed_activation_gates = true;
         // not a debug chain
         fDefaultConsistencyChecks = false;
 
