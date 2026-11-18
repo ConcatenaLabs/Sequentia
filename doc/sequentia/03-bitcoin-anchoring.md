@@ -586,17 +586,25 @@ The rule refuses blocks that were valid before, so it is height-gated as
 through `LostBlocksActiveAt(height)`:
 
 - every chain not yet started (mainnet, regtest, every custom chain) has it from
-  genesis; a custom chain can move it with `-con_lost_blocks_height`;
+  genesis; a custom chain can move it with `-con_lost_blocks_height`, a block
+  height from 0 to 2147483647 (the node refuses to start on anything else);
 - the running testnet has no height for it yet, so it is not active there: its
   height, bound to the testnet's genesis hash, is the owner's, set with one line
   of `chainparams.cpp` together with the version bump and an all-at-once cutover
   of every committee member;
-- Bitcoin's and Liquid's chains never have it.
+- Bitcoin's and Liquid's chains never have it. `liquidtestnet` is built on the
+  custom-chain parameters, and refuses to start with `-con_lost_blocks_height`
+  rather than let it turn the rule on.
 
 Every part of the rule reads the gate at the height of the block it judges or
 builds: the records and bindings (a record in a block below the height is an
 ordinary `OP_RETURN` output and binds nothing), the holders' duty, the
 producer's template and the mempool's refusal of a lost transaction's respend.
+A block lost below the height still binds the first blocks from it: those
+blocks are judged against all the evidence the node holds, so a transaction
+certified in a block lost at the height minus one is due in the block at the
+height (within the window), and its respend is refused there, while the block
+that replaces the lost one is judged by the old rules.
 A node on the old rules reads a record as an ordinary `OP_RETURN` output and
 follows the upgraded committee's chain. It parts from it only if a quorum
 certifies a block that breaks a binding.
@@ -604,9 +612,12 @@ certifies a block that breaks a binding.
 `getdeploymentinfo` lists the rule as `lost_blocks`, with its window `W`, on a
 Proof-of-Stake chain: `active` for the next block, and `height` once the chain
 has one. `active` is also false on a node that does not watch Bitcoin, since
-such a node holds no lost block.
+such a node holds no lost block. `getlostblocks` reports the same `active`.
 
-Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_attacks.py` (a
+The gate is tested in `feature_pos_lost_activation.py` (below and at the
+height, and a block lost below it binding the block at it) and pinned per chain
+in `src/test/sequentia_chainparams_tests.cpp`. The rule is tested in
+`feature_pos_lost_blocks.py`, `feature_pos_lost_attacks.py` (a
 transaction not yet due while Bitcoin outruns the window, a descendant whose
 certificate does not verify, a record whose first header carries no
 certificate, a record certified with keys registered after its fork point

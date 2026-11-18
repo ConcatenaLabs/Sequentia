@@ -271,8 +271,10 @@ the question.
 
 **A node whose Bitcoin daemon is behind** gives no verdict it cannot reach. A
 block recording an anchor its daemon has not reached yet is left aside under
-R3 without being marked invalid, and taken when it is announced again after the
-daemon catches up, in practice with the next block. Until then its mempool
+R3 without being marked invalid. Once the daemon reaches that anchor, the node
+asks its peers for the block again and takes it, within about one
+`anchorpollinterval`, without waiting for the next block (doc 03, "Validation in
+`ContextualCheckBlockHeader`"). Until then its mempool
 refuses a claim whose payment is above its tip's anchor
 (`btcpay-not-in-anchor-chain`), and a claim it holds for re-attachment waits;
 once its daemon has the payment's block, it links a fresh proof itself.
@@ -813,12 +815,16 @@ through `BtcPaymentActiveAt(height)` in the shape of `SimplicityBudget4ActiveAt`
 
 - every chain not yet started (mainnet, regtest, every custom chain) has it from
   genesis; a custom chain can move it with `-con_btc_payment_height`, which the
-  functional tests use to show the behaviour before activation;
+  functional tests use to show the behaviour before activation. The value is a
+  block height from 0 to 2147483647, and the node refuses to start on anything
+  else;
 - the running testnet gets a height bound to its genesis hash, chosen by the
   owner, together with the version bump, the release notes and an all-at-once
   cutover of every node. Until then the testnet does not have it;
 - the running chains that are not this project's (Bitcoin's `main` and `signet`,
   and the Liquid chains) never have it. On them 0xe5 to 0xe7 stay `OP_SUCCESS`.
+  `liquidtestnet` is built on the custom-chain parameters, and refuses to start
+  with `-con_btc_payment_height` rather than let it turn the rule on.
 
 `src/test/sequentia_chainparams_tests.cpp` pins each of these.
 
@@ -1130,8 +1136,8 @@ remains:* neither the payment nor the cancel confirms by `D`, and the payment
 confirms later. Then only the seller's goodwill returns it.
 
 **9.2 The buyer never pays.** The asset is parked until the refund is valid,
-60 blocks after the first block anchored at `D`: about `k + 13` Bitcoin blocks
-after the lock. Then it goes home.
+60 blocks after the first block anchored at `D`: about 13 Bitcoin blocks after
+the lock (6 to `D`, then 60 Sequentia blocks). Then it goes home.
 
 **9.3 A reorganization with the payment double-spent.** The payment's block leaves
 Bitcoin's best chain. Every Sequentia block anchored at or above it leaves too,
@@ -1157,9 +1163,12 @@ and the swap completes at any depth. What can still cost the buyer its payment:
   chain that replaces it and refuse a block that respends it, so the seller needs
   a dishonest quorum of committee seats as well as the producer.
 
-So the buyer's risk after paying is a Bitcoin reorganization combined with a
-dishonest quorum. Without one, no reorganization of any depth costs the buyer
-anything.
+So the buyer's risk after paying is a Bitcoin reorganization that mines the
+payment again outside the lock's heights (above `D`, which the deadline and the
+cancel of 9.1 bound, or at or below `F`, which needs a reorganization deeper
+than every block since the lock was built), or a reorganization combined with a
+dishonest quorum. A reorganization that mines the payment again above `F` and at
+most `D` costs the buyer nothing, at any depth, unless a quorum is dishonest.
 
 **9.5 A seller who fills the blocks.** The seller pays higher fees than the
 claim's on every block from the payment's first anchor until the refund is valid,
@@ -1243,20 +1252,20 @@ equivalent one-to-one pairing.
 
 ## 11. What a user sees
 
-In a wallet's default mode, buying an asset with bitcoin is a payment with a wait,
-and selling one is choosing an amount. No protocol, rail, lock or proof is named,
+In a wallet's default mode, buying an asset with bitcoin is a payment, and
+selling one is choosing an amount. No protocol, rail, lock or proof is named,
 and nothing is offered as a choice.
 
-- **Buying.** "Buy 100 XYZ for 0.0123 BTC." One button. While the wallet waits for
-  the seller's side: "Getting your purchase ready. This usually takes a few
-  minutes." Then "Paying 0.0123 BTC. Your XYZ arrives a minute or two after Bitcoin
+- **Buying.** "Buy 100 XYZ for 0.0123 BTC." One button. The wallet pays as soon
+  as the seller's lock is in a final block, with no step of its own on the page
+  (section 8.2): "Paying 0.0123 BTC. Your XYZ arrives a minute or two after Bitcoin
   confirms the payment, usually within 20 minutes." Then "Bitcoin confirmed your
   payment. Receiving 100 XYZ", and the purchase shows as done, with the balance,
   only once the claim's block is final.
 - **Paying from another wallet:** an address, an amount and a time: "Send exactly
   0.0123 BTC to this address within the next hour."
 - **Selling.** "Sell 100 XYZ." The wallet shows the price and "Waiting for the
-  buyer's bitcoin. This usually takes 20 to 30 minutes." Then the bitcoin balance.
+  buyer's bitcoin. This usually takes about 20 minutes." Then the bitcoin balance.
   A refund shows as done only once its block is final.
 - **A payment that did not confirm in time, cancelled:** "The payment did not
   confirm in time, so your wallet cancelled it. Nothing was spent."
