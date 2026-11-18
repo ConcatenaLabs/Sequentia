@@ -1675,11 +1675,11 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
     }
 }
 
-UniValue LostGetInfo()
+UniValue LostGetInfo(int next_height)
 {
     UniValue out(UniValue::VOBJ);
     LOCK(g_lost_mutex);
-    out.pushKV("active", LostActive());
+    out.pushKV("active", LostActiveAt(next_height));
     out.pushKV("window", (int)g_window);
     UniValue blocks(UniValue::VARR);
     for (const auto& [h, b] : g_blocks) {

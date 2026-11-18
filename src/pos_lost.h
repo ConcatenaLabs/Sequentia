@@ -160,7 +160,9 @@ void LostPeerGone(int64_t peer);
 //! it, and judge again the active chain and every refused block.
 void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool);
 
-UniValue LostGetInfo();
+//! getlostblocks. "active" is whether the rule applies to the block at
+//! `next_height` (the tip's child), as getdeploymentinfo reports it.
+UniValue LostGetInfo(int next_height);
 std::optional<LostEvidenceMsg> LostGetEvidence(const uint256& hash);
 
 #endif // BITCOIN_POS_LOST_H

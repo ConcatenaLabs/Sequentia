@@ -1884,9 +1884,15 @@ static RPCHelpMan getlostblocks()
     return RPCHelpMan{"getlostblocks",
         "\nThe lost blocks this node holds as evidence (doc/sequentia/04-proof-of-stake.md, \"Lost blocks\").\n",
         {},
-        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::BOOL, "active", "whether the rule for the transactions of a lost block applies to the next block: this node watches Bitcoin and the chain has reached the rule's height (getdeploymentinfo, lost_blocks)"},
+            {RPCResult::Type::ELISION, "", ""}}},
         RPCExamples{HelpExampleCli("getlostblocks", "")},
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue { return LostGetInfo(); }};
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            ChainstateManager& chainman = EnsureAnyChainman(request.context);
+            const int next_height = WITH_LOCK(cs_main, return chainman.ActiveChain().Height()) + 1;
+            return LostGetInfo(next_height);
+        }};
 }
 
 static RPCHelpMan getlostblock()
