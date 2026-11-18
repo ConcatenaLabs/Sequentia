@@ -20,7 +20,7 @@ recertifyposblock and submitted; every node runs -par=1):
          (txn-lost-conflict), and the block it builds carries T first.
 
 getdeploymentinfo reports lost_blocks not active below H, active from the block
-before it.
+before it, and getlostblocks reports the same.
 """
 
 import time
@@ -89,12 +89,18 @@ class LostActivationTest(LostSwapTest):
                                   [self.stakers[j][0] for j in ALL_KEYS if j != leader])
         return rc
 
+    @staticmethod
+    def signed(node, raw):
+        res = node.signrawtransactionwithwallet(raw)
+        assert res["complete"], res
+        return res["hex"]
+
     def lost_T(self, case, coin):
         """T, spending `coin` without signalling replacement, certified in L at the next height, then lost."""
         n1, b, a = self.nodes[1], self.btc(), self.nodes[SELLER]
         raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"], "sequence": 0xffffffff}],
                                      [{a.getnewaddress(): coin["amount"] - Decimal("0.001")}, {"fee": Decimal("0.001")}])
-        t_hex = a.signrawtransactionwithwallet(raw)["hex"]
+        t_hex = self.signed(a, raw)
         t_id = tx_from_hex(t_hex).rehash()
         b.generatetoaddress(1, self.bbuyer.getnewaddress())
         time.sleep(2)  # the anchor follows Bitcoin's new tip (-anchorpollinterval=1)
@@ -106,9 +112,13 @@ class LostActivationTest(LostSwapTest):
         self.bitcoin_reorg(2)
         self.wait_lost(L["hash"], HONEST)
         assert_equal(n1.getblockcount(), L["height"] - 1)
+        # The seller's wallet signs against its own node's chain and mempool: until
+        # that node has left L too, T's coin is spent there and the respend would
+        # come back unsigned.
+        self.wait_until(lambda: a.getblockheader(L["hash"])["confirmations"] < 0, timeout=60)
         raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}],
                                      [{a.getnewaddress(): coin["amount"] - Decimal("0.002")}, {"fee": Decimal("0.002")}])
-        r_hex = a.signrawtransactionwithwallet(raw)["hex"]
+        r_hex = self.signed(a, raw)
         self.record(case, "lost", "T %s certified in L at height %d (anchor %d), lost on %s" %
                     (t_id[:16], L["height"], L["block"]["anchorheight"], HONEST))
         return t_hex, t_id, r_hex, L["height"]
@@ -116,7 +126,20 @@ class LostActivationTest(LostSwapTest):
     def dep(self):
         return self.nodes[1].getdeploymentinfo()["deployments"]["lost_blocks"]
 
+    def active(self, expect):
+        """getdeploymentinfo and getlostblocks agree on whether the rule applies to the next block."""
+        n1 = self.nodes[1]
+        assert_equal(self.dep()["active"], expect)
+        assert_equal(n1.getlostblocks()["active"], expect)
+        self.record("active", "tip %d" % n1.getblockcount(), "lost_blocks.active and getlostblocks.active: %s" % expect)
+
     def run_test(self):
+        try:
+            self.body()
+        finally:
+            self.stop_bitcoind()
+
+    def body(self):
         self.wallets()
         n1 = self.nodes[1]
         coins = [self.fund(Decimal("2")), self.fund(Decimal("2"))]
@@ -126,7 +149,7 @@ class LostActivationTest(LostSwapTest):
         while n1.getblockcount() < H - 2:
             self.produce(1, ALL_KEYS)
         self.sync_tips(range(N))
-        assert_equal(self.dep()["active"], False)
+        self.active(False)
         assert_equal(self.dep()["height"], H)
         t_hex, t_id, r_hex, h = self.lost_T("below", coins[0])
         assert_equal(h, H - 1)
@@ -136,7 +159,15 @@ class LostActivationTest(LostSwapTest):
         base, leader = self.produce_by()
         assert_equal(base["height"], H - 1)
         raw = n1.getblock(base["hash"], 0)
-        n1.invalidateblock(base["hash"])
+        # The block is relayed as soon as it is made, and a node that took it
+        # keeps it: a certified block is final against a sibling, so that node
+        # would never follow the forced one. Let every node take it, then
+        # leave it aside everywhere before the forced block is submitted.
+        self.sync_tips(range(N))
+        for node in self.nodes:
+            node.invalidateblock(base["hash"])
+        self.sync_tips(range(N))
+        assert_equal(n1.getblockcount(), H - 2)
         rc = self.forced(raw, leader, drop=[t_hex], add=[r_hex], record=garbage)
         res = n1.submitblock(rc["hex"])
         assert res is None, res
@@ -145,7 +176,7 @@ class LostActivationTest(LostSwapTest):
         self.sync_tips(range(N))
 
         self.log.info("at: the lost block's height is H")
-        assert_equal(self.dep()["active"], True)
+        self.active(True)
         t_hex, t_id, r_hex, h = self.lost_T("at", coins[1])
         assert_equal(h, H)
         why = n1.testmempoolaccept([r_hex])[0].get("reject-reason")

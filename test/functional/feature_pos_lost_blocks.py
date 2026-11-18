@@ -83,6 +83,13 @@ class LostBlocksTest(BitcoinTestFramework):
                 self.btc_proc.terminate()
                 self.btc_proc.wait(timeout=60)
 
+    def shutdown(self):
+        # The bitcoind started in setup_network is stopped however the test
+        # ends, also under a subclass whose run_test does not stop it.
+        if not self.options.noshutdown:
+            self.stop_bitcoind()
+        return super().shutdown()
+
     # ------------------------------------------------------------- network
     def node_args(self, i):
         a = [
