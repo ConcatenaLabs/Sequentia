@@ -13,6 +13,7 @@
 #include <key_io.h>
 #include <pos.h>
 #include <pos_producer.h>
+#include <pos_lost.h>
 #include <vrf.h>
 #include <util/settings.h>
 #include <set>
@@ -67,6 +68,7 @@
 #include <univalue.h>
 
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 
@@ -1860,6 +1862,7 @@ const std::vector<RPCResult> RPCHelpForDeployment{
     {RPCResult::Type::STR, "type", "one of \"buried\", \"bip9\""},
     {RPCResult::Type::NUM, "height", /*optional=*/true, "height of the first block which the rules are or will be enforced (only for \"buried\" type, or \"bip9\" type with \"active\" status)"},
     {RPCResult::Type::BOOL, "active", "true if the rules are enforced for the mempool and the next block"},
+    {RPCResult::Type::NUM, "window", /*optional=*/true, "the window W in Bitcoin blocks during which a lost block's transactions bind their coins (only for \"lost_blocks\")"},
     {RPCResult::Type::OBJ, "bip9", /*optional=*/true, "status of bip9 softforks (only for \"bip9\" type)",
     {
         {RPCResult::Type::NUM, "bit", /*optional=*/true, "the bit (0-28) in the block version field used to signal this softfork (only for \"started\" and \"locked_in\" status)"},
@@ -1881,6 +1884,43 @@ const std::vector<RPCResult> RPCHelpForDeployment{
     }},
 };
 
+// SEQUENTIA: the proof of a bitcoin payment (doc/sequentia/bitcoin-payment-proof.md,
+// section 7): a height-gated tightening, reported as a buried deployment. It is
+// listed only where it is or will be enforced: on a chain whose height is the
+// "never" value (Bitcoin's own chains, the Liquid chains, and a running chain
+// whose operators have not chosen a height) it is absent, which a wallet reads
+// as not active.
+static void BtcPaymentDescPushBack(const CBlockIndex* blockindex, UniValue& softforks, const Consensus::Params& params)
+{
+    int height;
+    if (params.BtcPaymentActiveAt(0)) {
+        height = 0;
+    } else if (params.btc_payment_height == std::numeric_limits<int>::max()) {
+        return;
+    } else {
+        height = params.btc_payment_height;
+    }
+    UniValue rv(UniValue::VOBJ);
+    rv.pushKV("type", "buried");
+    rv.pushKV("active", params.BtcPaymentActiveAt(blockindex ? blockindex->nHeight + 1 : 0));
+    rv.pushKV("height", height);
+    softforks.pushKV("btc_payment", rv);
+}
+
+// SEQUENTIA: the rule for the transactions of a lost block (doc 03, section 3).
+// It has no activation height: it applies from genesis on every Proof-of-Stake
+// chain whose node watches Bitcoin, which is what "active" reports for this node.
+static void LostBlocksDescPushBack(UniValue& softforks)
+{
+    if (!g_con_pos) return;
+    UniValue rv(UniValue::VOBJ);
+    rv.pushKV("type", "buried");
+    rv.pushKV("active", LostActive());
+    rv.pushKV("height", 0);
+    rv.pushKV("window", (int)LostWindow());
+    softforks.pushKV("lost_blocks", rv);
+}
+
 UniValue DeploymentInfo(const CBlockIndex* blockindex, const Consensus::Params& consensusParams)
 {
     UniValue softforks(UniValue::VOBJ);
@@ -1893,6 +1933,8 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const Consensus::Params& 
     SoftForkDescPushBack(blockindex, softforks, consensusParams, Consensus::DEPLOYMENT_TESTDUMMY);
     SoftForkDescPushBack(blockindex, softforks, consensusParams, Consensus::DEPLOYMENT_TAPROOT);
     SoftForkDescPushBack(blockindex, softforks, consensusParams, Consensus::DEPLOYMENT_SIMPLICITY);
+    BtcPaymentDescPushBack(blockindex, softforks, consensusParams);
+    LostBlocksDescPushBack(softforks);
     return softforks;
 }
 } // anon namespace

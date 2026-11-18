@@ -238,7 +238,8 @@ class BlockchainTest(BitcoinTestFramework):
                 },
                 'height': 0,
                 'active': True
-            }
+            },
+            'btc_payment': {'type': 'buried', 'active': True, 'height': 0},
           }
         })
 

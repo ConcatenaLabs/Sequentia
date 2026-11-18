@@ -32,7 +32,7 @@ from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, p2p_port, rpc_port
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
-CASES = os.environ.get("LOST_CASES", "a,b,c,f,g").split(",")
+CASES = os.environ.get("LOST_CASES", "dep,a,b,c,f,g").split(",")
 RESULTS = os.environ.get("LOST_RESULTS", "")
 BASE_BIN = os.environ.get("LOST_BASE_BIN", "")
 W = int(os.environ.get("LOST_WINDOW", "6"))
@@ -739,6 +739,19 @@ class LostBlocksTest(BitcoinTestFramework):
         self.sync_tips(HONEST + [LATE])
         self.record("e", "outcome", "T mined again at height %d" % h["height"])
         self.realign()
+
+    def case_dep(self):
+        """getdeploymentinfo shows both rules: the payment lock from genesis, and the
+        lost-block rule active on every node that runs it, with its window; the seller
+        runs with the rule off (-posdebugignorelost) and says so."""
+        for i in range(N):
+            if i in self.base_nodes and BASE_BIN:
+                continue  # an older binary, which reports neither rule
+            d = self.nodes[i].getdeploymentinfo()["deployments"]
+            assert_equal(d["btc_payment"], {"type": "buried", "active": True, "height": 0})
+            on = not (i == SELLER and i not in self.base_nodes)
+            assert_equal(d["lost_blocks"], {"type": "buried", "active": on, "height": 0, "window": W})
+        self.log.info("[dep] every node reports btc_payment and lost_blocks (window %d)", W)
 
     def run_test(self):
         try:

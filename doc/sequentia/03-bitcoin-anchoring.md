@@ -587,6 +587,10 @@ upgraded. A node on the old rules reads a record as an ordinary `OP_RETURN`
 output and follows the upgraded committee's chain. It parts from it only if
 a quorum certifies a block that breaks a binding.
 
+`getdeploymentinfo` lists the rule as `lost_blocks`, with its window `W`, on a
+Proof-of-Stake chain; `active` is false on a node that does not watch Bitcoin,
+since such a node holds no lost block.
+
 Tested in `feature_pos_lost_blocks.py`, `feature_pos_lost_attacks.py` (a
 transaction not yet due while Bitcoin outruns the window, a descendant whose
 certificate does not verify, a record whose first header carries no
