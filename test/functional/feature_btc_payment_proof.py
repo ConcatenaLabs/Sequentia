@@ -43,6 +43,8 @@ FLOOR_DEPTH = 60
 OP_CHECKANCHORHEIGHTVERIFY = CScriptOp(0xe7)
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
+# The node log line of a block left aside for its anchor being asked for again (anchor.cpp).
+REFETCH = "asking peers again for the block(s) left aside"
 NUMS = bytes.fromhex("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
 SEQ_NONFINAL_RBF = 0xfffffffd
 
@@ -2291,17 +2293,19 @@ class BtcPaymentProofTest(BitcoinTestFramework):
             assert "btcpay-not-in-anchor-chain" in why, why
             self.log.info("    (a) daemon behind: the claim's block is left aside (tip unchanged, nothing marked "
                           "invalid); the claim is refused by its mempool: %s", why)
+            asked = len(self.debug_lines(c, REFETCH))
             feed()
-            # A block left aside for an anchor the daemon had not reached is
-            # taken again when it is announced again: the next block does that.
-            time.sleep(3)
-            assert_equal(c.getbestblockhash(), held_at)
-            self.mine(1)
-            self.wait_for(lambda: c.getbestblockhash() == node.getbestblockhash(), "the third node follows", 120)
+            # Once its daemon reaches the anchor of a block it left aside, the
+            # node asks its peers for that block again (doc 03, "Validation in
+            # ContextualCheckBlockHeader") and takes it, with no new block.
+            assert_equal(node.getbestblockhash(), k)
+            self.wait_for(lambda: c.getbestblockhash() == k, "the third node takes the claim's block", 60)
             assert claim.hash in c.getblock(k)["tx"]
-            self.log.info("    (a) daemon caught up: at the next block the third node took the claim's block")
+            assert len(self.debug_lines(c, REFETCH)) > asked, "the block was not asked for again"
+            self.log.info("    (a) daemon caught up: the third node asked its peers again and took the claim's block, "
+                          "with no new block")
             self.results.append((self.current + " (a)", "daemon behind: block left aside, nothing invalid, mempool: "
-                                 "%s; caught up: block taken" % why))
+                                 "%s; caught up: block asked for again and taken" % why))
 
             # (b) The node alone, its daemon behind: the payment's block leaves its
             # daemon's chain; the payment is mined again where it cannot see yet.
