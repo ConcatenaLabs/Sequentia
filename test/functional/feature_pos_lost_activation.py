@@ -58,6 +58,30 @@ class LostActivationTest(LostSwapTest):
             time.sleep(0.25)
         raise AssertionError("no block: %s" % last)
 
+    def forced_alone(self, height, **kw):
+        """A block forced in at `height` by node 1, rewritten from one node 1 makes
+        while cut off from its peers, so that no other node ever holds the block it
+        replaces. A certified block is final against a sibling: a node that took both
+        would keep the first, and a node rebuilt from disk could take it again."""
+        n1 = self.nodes[1]
+        self.disconnect_all(1)
+        base, leader = self.produce_by()
+        assert_equal(base["height"], height)
+        raw = n1.getblock(base["hash"], 0)
+        n1.invalidateblock(base["hash"])
+        rc = self.forced(raw, leader, **kw)
+        res = n1.submitblock(rc["hex"])
+        assert res is None, res
+        assert_equal(n1.getbestblockhash(), rc["hash"])
+        others = [j for j in range(N) if j != 1]
+        for j in others:
+            self.connect_nodes(1, j)
+        self.sync_tips(range(N))
+        assert_equal(self.nodes[0].getbestblockhash(), rc["hash"])
+        for j in others:
+            assert base["hash"] not in [t["hash"] for t in self.nodes[j].getchaintips()], j
+        return rc
+
     def forced(self, base, leader, drop=(), add=(), record=None):
         """`base` (a block node 1 produced, now invalidated) without the transactions spending what
         `drop` spends, with `add` and with a coinbase record output `record`, certified again."""
@@ -156,24 +180,9 @@ class LostActivationTest(LostSwapTest):
         why = n1.testmempoolaccept([r_hex])[0].get("reject-reason")
         self.record("below", "the respend in the mempool", why)
         assert why != "txn-lost-conflict"
-        base, leader = self.produce_by()
-        assert_equal(base["height"], H - 1)
-        raw = n1.getblock(base["hash"], 0)
-        # The block is relayed as soon as it is made, and a node that took it
-        # keeps it: a certified block is final against a sibling, so that node
-        # would never follow the forced one. Let every node take it, then
-        # leave it aside everywhere before the forced block is submitted.
-        self.sync_tips(range(N))
-        for node in self.nodes:
-            node.invalidateblock(base["hash"])
-        self.sync_tips(range(N))
-        assert_equal(n1.getblockcount(), H - 2)
-        rc = self.forced(raw, leader, drop=[t_hex], add=[r_hex], record=garbage)
-        res = n1.submitblock(rc["hex"])
-        assert res is None, res
-        assert_equal(n1.getbestblockhash(), rc["hash"])
-        self.record("below", "forced", "block %d with the respend and a malformed record instead of T: accepted" % (H - 1))
-        self.sync_tips(range(N))
+        self.forced_alone(H - 1, drop=[t_hex], add=[r_hex], record=garbage)
+        self.record("below", "forced", "block %d with the respend and a malformed record instead of T: accepted "
+                    "by every node" % (H - 1))
 
         self.log.info("at: the lost block's height is H")
         self.active(True)

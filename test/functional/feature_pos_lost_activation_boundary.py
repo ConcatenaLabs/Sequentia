@@ -84,21 +84,8 @@ class LostActivationBoundaryTest(LostActivationTest):
         t_hex, t_id, r_hex, h = self.lost_T("binds", coins[0])
         assert_equal(h, H - 1)
         self.active(False)
-        base, leader = self.produce_by()
-        assert_equal(base["height"], H - 1)
-        raw = n1.getblock(base["hash"], 0)
-        # Every node takes the produced block, then leaves it aside, so that all
-        # of them follow the forced one (a certified block is final against a sibling).
-        self.sync_tips(range(N))
-        for node in self.nodes:
-            node.invalidateblock(base["hash"])
-        self.sync_tips(range(N))
-        rc = self.forced(raw, leader, drop=[t_hex], add=[f1], record=GARBAGE)
-        res = n1.submitblock(rc["hex"])
-        assert res is None, res
-        assert_equal(n1.getbestblockhash(), rc["hash"])
-        self.record("binds", "forced at H - 1", "without T and with a malformed record: accepted")
-        self.sync_tips(range(N))
+        self.forced_alone(H - 1, drop=[t_hex], add=[f1], record=GARBAGE)
+        self.record("binds", "forced at H - 1", "without T and with a malformed record: accepted by every node")
         self.active(True)
         self.refusals("binds", t_hex, t_id, r_hex, H, f2)
 
