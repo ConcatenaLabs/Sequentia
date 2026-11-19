@@ -964,8 +964,8 @@ accepted assets the claim can draw on, like any other.
    of Bitcoin beneath it, can still disconnect it.
 7. **Or the seller refunds**: if no claim has been mined by the time the refund
    is valid (60 blocks after the first block anchored at `R` or above), and the
-   seller's wallet sees no payment to its address mined at a height above `F`
-   and at most `D`. The seller's wallet, too, shows the refund as
+   seller's wallet sees no provable payment to its address (section 4.1) mined
+   at a height above `F` and at most `D`. The seller's wallet, too, shows the refund as
    complete only once its block is final.
 
 The same steps serve both directions of a trade. Whoever holds the asset locks it
@@ -1023,10 +1023,16 @@ the signed claims, the signed payment and the signed cancels before it
 broadcasts the payment, and the service:
 
 - completes the claim as soon as a Sequentia block has anchored at the
-  payment's block or above. The payment is whatever Bitcoin mines above `F` and
-  at or below `D` paying the seller's address at least the amount, whoever made
-  it and whatever coins it spends, since that is what the claim's script
-  accepts: completing the claim needs nothing handed over but the claims;
+  payment's block or above. The payment is the first *provable* transaction
+  Bitcoin mines above `F` and at or below `D` paying the seller's address at
+  least the amount, whoever made it and whatever coins it spends, since that is
+  what a claim can carry: completing the claim needs nothing handed over but the
+  claims. Provable means what section 4.1 accepts (not a coinbase, and without
+  its witness neither 64 bytes long nor above 100,000 bytes). A miner can mine a
+  paying transaction outside those bounds; it opens nothing, so the service
+  passes it over and reads on, as it does a payment whose proof fails, and it
+  never stands in for the buyer's payment or withholds the buyer's cancel. Of
+  several payments in one block, one handed over is taken first;
 - **watches the claim until its block is final** (certified, and its anchor
   buried as the swap requires), not merely mined; after every reorganization
   that disconnects it, resubmits a fresh proof of the payment,
@@ -1040,7 +1046,7 @@ broadcasts the payment, and the service:
   seller the blocks before it to fill against a cheap tier. The cost is that a
   buyer whose claim misses one block in ordinary congestion pays the top tier,
   about 0.03 % of the value;
-- if the payment is still unconfirmed two blocks before `D`, broadcasts the
+- if no provable payment is confirmed two blocks before `D`, broadcasts the
   cancels. Under Bitcoin Core's full replacement the cancel replaces the payment
   if its fee is higher; the template of section 8.3 keeps anyone from making that
   replacement costlier.
