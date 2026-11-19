@@ -435,8 +435,13 @@ covenants whose next fill a later payment can make.
 
 **Size.** A proof is 128 bytes, plus 64 bytes per tree level (12 to 13 levels on
 a full block today, about 800 bytes), plus 80 bytes per linking header, plus the
-payment, typically 200 to 400 bytes. A claim completed as soon as its payment is
-recorded needs no links: about 1.2 kilobytes. A claim completed later links to
+payment, typically 200 to 400 bytes. A swap's wallet makes a payment of at most
+400 bytes without its witness (seven ordinary inputs and two outputs), and the
+claim's fee tiers (section 8.5) are priced for its proof: 1,584 bytes, at 14
+tree levels (a Bitcoin block of up to 16,384 transactions) and two linking
+headers. A heavier payment's claim pays a lower fee rate than its tiers were
+priced for, so a wallet pays from fewer inputs instead. A claim completed as
+soon as its payment is recorded needs no links: about 1.2 kilobytes. A claim completed later links to
 the lowest anchor recorded at or above its payment, typically a few headers. It
 is witness data, so it counts one weight unit per byte toward the block's weight
 limit and the transaction's virtual size, paid at the fee rate of whichever
@@ -955,8 +960,10 @@ accepted assets the claim can draw on, like any other.
 6. **Anyone completes the claim** once the payment is mined at `h` and a
    Sequentia block has anchored at `h` or above, usually one Sequentia block
    later: attaches the proof, linked to that anchor, and the coin anchor, and
-   submits it. It is mined in the next block, so the claim lands about two
-   Sequentia blocks after the payment confirms. The completion service keeps it
+   submits it. The payment proven is one whose completed claim the node
+   accepts, preferring the buyer's (section 8.5). It is mined in the next
+   block, so the claim lands about two Sequentia blocks after the payment
+   confirms. The completion service keeps it
    alive across reorganizations until its block is final, and every node that
    watches Bitcoin helps (sections 6.3, 8.5). **A wallet shows the claim as
    complete only once its block is final** (certified, and its anchor buried),
@@ -965,8 +972,12 @@ accepted assets the claim can draw on, like any other.
 7. **Or the seller refunds**: if no claim has been mined by the time the refund
    is valid (60 blocks after the first block anchored at `R` or above), and the
    seller's wallet sees no provable payment to its address (section 4.1) mined
-   at a height above `F` and at most `D`. The seller's wallet, too, shows the refund as
-   complete only once its block is final.
+   at a height above `F` and at most `D`. The seller's wallet holds back for any
+   such payment, not only for one whose claim the node accepts: it cannot tell
+   whether a claim proving it is still to come, and the payment pays the seller
+   the price, so holding back costs the seller nothing it is owed. The
+   seller's wallet, too, shows the refund as complete only once its block is
+   final.
 
 The same steps serve both directions of a trade. Whoever holds the asset locks it
 and whoever holds the bitcoin pays: when a maker sells an asset the maker locks
@@ -1023,16 +1034,33 @@ the signed claims, the signed payment and the signed cancels before it
 broadcasts the payment, and the service:
 
 - completes the claim as soon as a Sequentia block has anchored at the
-  payment's block or above. The payment is the first *provable* transaction
-  Bitcoin mines above `F` and at or below `D` paying the seller's address at
-  least the amount, whoever made it and whatever coins it spends, since that is
-  what a claim can carry: completing the claim needs nothing handed over but the
-  claims. Provable means what section 4.1 accepts (not a coinbase, and without
-  its witness neither 64 bytes long nor above 100,000 bytes). A miner can mine a
-  paying transaction outside those bounds; it opens nothing, so the service
-  passes it over and reads on, as it does a payment whose proof fails, and it
-  never stands in for the buyer's payment or withholds the buyer's cancel. Of
-  several payments in one block, one handed over is taken first;
+  payment's block or above. **The payment is a payment whose completed claim
+  the node accepts, preferring the buyer's**: a transaction Bitcoin mines above
+  `F` and at or below `D` paying the seller's address at least the amount,
+  whoever made it and whatever coins it spends, since that is what a claim can
+  carry, so completing the claim needs nothing handed over but the claims.
+  Every such transaction a proof can carry is a candidate. Provable means what
+  section 4.1 accepts (not a coinbase, and without its witness neither 64 bytes
+  long nor above 100,000 bytes); a miner can mine a paying transaction outside
+  those bounds, and it opens nothing. The service tries the candidates in turn
+  across the whole window: one handed over first, then the rest by the lightest
+  proof they make, each at every tier the buyer signed, cheapest first. A claim
+  is refused for its weight alone when its fee rate falls below the node's
+  floor or its size passes the standard limit, the only refusals that depend
+  on which payment it proves (the fee is fixed by the transaction id, the proof
+  is not). Refused so at every tier, the candidate is passed over, with every
+  candidate whose proof would be as heavy, and the next is tried at once. It is
+  passed over until Bitcoin's next block, since the floor moves with the fee
+  asset's rate and the mempool, or a reorganization of the blocks read, which
+  drops everything passed over. Whatever else stops a claim depends on the
+  chain, not on the payment (no block anchored at the payment yet, the Bitcoin
+  daemon and the recorded anchors not agreeing, a branch switch between
+  reading a block and its headers, links beyond 2,016, the lock not yet
+  confirmed or a conflicting spend pooled); the service waits on it and tries
+  again, and never passes a payment over for it. So nothing a third party mines,
+  relays or reorganizes fixes the swap on a payment whose claim cannot land, and
+  a payment never stands in for the buyer's or withholds the buyer's cancel
+  until a claim proving it is accepted;
 - **watches the claim until its block is final** (certified, and its anchor
   buried as the swap requires), not merely mined; after every reorganization
   that disconnects it, resubmits a fresh proof of the payment,
@@ -1046,9 +1074,10 @@ broadcasts the payment, and the service:
   seller the blocks before it to fill against a cheap tier. The cost is that a
   buyer whose claim misses one block in ordinary congestion pays the top tier,
   about 0.03 % of the value;
-- if no provable payment is confirmed two blocks before `D`, broadcasts the
-  cancels. Under Bitcoin Core's full replacement the cancel replaces the payment
-  if its fee is higher; the template of section 8.3 keeps anyone from making that
+- if two blocks before `D` the node has accepted no claim proving a payment
+  confirmed in the lock's heights, broadcasts the cancels of every payment it
+  holds that is not confirmed. Under Bitcoin Core's full replacement the
+  cancel replaces the payment if its fee is higher; the template of section 8.3 keeps anyone from making that
   replacement costlier.
 
 **What the service holds, and from whom.** The counterparty holds the buyer's
@@ -1084,6 +1113,16 @@ may take what the buyer's handover needs:
   service's live jobs and those each client starts are capped, except a job
   whose payment Bitcoin vouches for.
 
+**The work follows the chains, not the jobs.** No count cap can tell a real
+buyer's job from an attacker's own (it can lock dust on terms of its own), so the
+service bounds the work instead. It reads each Bitcoin block once for every job,
+keeping which scripts it pays and which coins it spends, so a job whose script and
+coins a block does not touch costs a lookup for it. It works first the jobs with
+a payment or a claim in play, taking turns by receiving script: another turn costs
+another output on Bitcoin, never another address or post, so a buyer whose
+payment is mined is worked within a round, however many jobs and clients there
+are.
+
 A post refused for a limit is answered `429`. **The wallet posts again**, at
 the latest once its payment's parent is broadcast: the payment and its cancels
 are then checked, and taken whatever else the job holds.
@@ -1102,8 +1141,9 @@ the claim's virtual size, divided by the virtual size of all those blocks:
 
     top fee = V × v_claim / (B × N)
 
-with `V` the asset amount locked, `v_claim` the claim's virtual size, `B` a
-block's virtual-size limit and `N` the Sequentia blocks the claim can be mined in
+with `V` the asset amount locked, `v_claim` the claim's virtual size with the
+heaviest proof the swap's wallets allow (section 5), `B` a block's virtual-size
+limit and `N` the Sequentia blocks the claim can be mined in
 at the top tier before the refund is valid. Section 4.4 gives 59 blocks a
 mempool can feed whatever the anchor does: the 59 after the first block anchored
 at or above the payment (that block itself is made before anyone can complete
