@@ -946,8 +946,10 @@ accepted assets the claim can draw on, like any other.
    two tiers of the same claim (section 8.5): the going rate with headroom, and
    a top tier sized so that keeping the claim out costs more than the swap is
    worth. The cancel spends the payment's own inputs back to the buyer
-   at a high fee. The wallet hands all of them to its completion service and to
-   the counterparty.
+   at a high fee. The wallet hands the claims and the cancel to the
+   counterparty, and the claims, the cancel and the signed payment to its
+   completion service, which it does before it broadcasts the payment
+   (section 8.5).
 5. **The buyer pays** the seller's address at least the amount, with an ordinary
    Bitcoin transaction, at a fee for the next block.
 6. **Anyone completes the claim** once the payment is mined at `h` and a
@@ -1016,14 +1018,18 @@ is acceptable or ruled out.
 
 ### 8.5 The completion service and the cancel as a service
 
-A portal operator runs a service that holds no key. It receives each buyer's
-signed claims, signed cancel and the payment's transaction id, and then:
+A portal operator runs a service that holds no key. A buyer's wallet hands it
+the signed claims, the signed payment and the signed cancels before it
+broadcasts the payment, and the service:
 
 - completes the claim as soon as a Sequentia block has anchored at the
-  payment's block or above;
+  payment's block or above. The payment is whatever Bitcoin mines above `F` and
+  at or below `D` paying the seller's address at least the amount, whoever made
+  it and whatever coins it spends, since that is what the claim's script
+  accepts: completing the claim needs nothing handed over but the claims;
 - **watches the claim until its block is final** (certified, and its anchor
   buried as the swap requires), not merely mined; after every reorganization
-  that disconnects it, resubmits a fresh proof of the **buyer's own** payment,
+  that disconnects it, resubmits a fresh proof of the payment,
   linked to the lowest anchor the active chain recorded at or above it, and
   keeps doing so, at a rising tier, until the refund is valid. Nodes re-link proofs themselves
   (section 6.3), but the service never relies on what they kept: this duty is
@@ -1035,9 +1041,46 @@ signed claims, signed cancel and the payment's transaction id, and then:
   buyer whose claim misses one block in ordinary congestion pays the top tier,
   about 0.03 % of the value;
 - if the payment is still unconfirmed two blocks before `D`, broadcasts the
-  cancel. Under Bitcoin Core's full replacement the cancel replaces the payment
+  cancels. Under Bitcoin Core's full replacement the cancel replaces the payment
   if its fee is higher; the template of section 8.3 keeps anyone from making that
   replacement costlier.
+
+**What the service holds, and from whom.** The counterparty holds the buyer's
+claims (section 8.2, step 4) and can post them first, so nothing anyone posts
+may take what the buyer's handover needs:
+
+- **One job per lock.** A job is named by the lock alone. Every post for the
+  lock merges into it, whoever sends it and in whatever order; none takes a
+  place of its own, and a payment's transaction id named in a post is only a
+  hint to find the payment in the Bitcoin daemon's mempool.
+- **Payments by their coins.** The service holds each signed payment handed
+  over that pays the seller's address the amount, known by the coins it spends,
+  with the cancels of it: a cancel spends exactly the coins of a payment held.
+  The Bitcoin daemon judges each payment. One it accepts is broadcast at once
+  (the buyer is about to), so a payment held as vouched for is one Bitcoin
+  pools or has mined: real coins paying the seller, which open the lock if they
+  are mined in time. A handover carrying one is never refused for a limit. A
+  payment the daemon cannot check yet (its parent unbroadcast) is held within a
+  bound (eight in a job, two from one client) and checked again every round
+  until Bitcoin vouches for it. A copy of a payment whose signatures fail never
+  takes its cancels with it.
+- **Several cancels, by witness id.** A cancel is kept if the daemon accepts it,
+  pools it or has mined it: up to four for a payment, the cheapest giving way to
+  one that pays more. One whose coins the daemon does not know yet is kept
+  unchecked (up to 16 for a payment, two from one client) and checked again
+  every round. A cancel is known by its witness transaction id, since a
+  transaction id does not cover the witness: a copy of the buyer's cancel with
+  a bad signature is held beside it and never in its place. Only the payment's
+  signer can make a valid cancel of it, so nobody crowds the buyer's out.
+- **Caps.** A transaction handed over is at most 32 KiB, a job holds at most
+  eight claims, and a lock spans at most 1,008 Bitcoin blocks from `F` to `D`.
+  A new job needs a real lock (an unspent output paying the terms). The
+  service's live jobs and those each client starts are capped, except a job
+  whose payment Bitcoin vouches for.
+
+A post refused for a limit is answered `429`. **The wallet posts again**, at
+the latest once its payment's parent is broadcast: the payment and its cancels
+are then checked, and taken whatever else the job holds.
 
 The buyer's wallet does the same while it is open. Every node that watches
 Bitcoin does the first part as policy (section 6.3). Every tier pays its fee in
