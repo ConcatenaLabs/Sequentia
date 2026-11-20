@@ -1161,8 +1161,8 @@ tried); then the upkeep of claims made (pooled by someone, left out of a block,
 mined); then what intake changed; then candidates passed
 over whose signed fee now covers the node's ask, those clearing it by the most
 first (to go ahead, a claim must pay more, and then it lands and its job leaves);
-then the rest once per Bitcoin block. All but the first two are background: while they
-run the service looks at both chains' tips, and a move ends the round and starts
+then the rest once per Bitcoin block. All but the claims to make is background,
+the upkeep included: while it runs the service looks at both chains' tips, and a move ends the round and starts
 the next at once, so a buyer whose payment was just mined or anchored waits for
 one job's work at most. A candidate passed over never comes
 back because a block arrived, so a job whose claims cannot land, priced under the
