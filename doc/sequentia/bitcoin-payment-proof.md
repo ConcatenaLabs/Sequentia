@@ -1150,7 +1150,8 @@ keeping which scripts it pays and which coins it spends, so a job whose script a
 coins a block does not touch costs a lookup for it; a block read whole is kept
 indexed the same way, so a job it touches reads only its own transactions, and one
 block touching many jobs costs a lookup for each, not a pass over the block for
-each. It reads the node's fee floors once a round. It works a job only when something the job waits on can
+each, and a proof reads its payment's block once for every claim proving a payment
+in it, not once a claim. It reads the node's fee floors once a round. It works a job only when something the job waits on can
 have changed: first the jobs that something new on the chains asks a claim of (a
 block paying their script or spending their coins, a candidate a Sequentia block
 now anchors, their claim gone), taking turns by receiving script, those whose
