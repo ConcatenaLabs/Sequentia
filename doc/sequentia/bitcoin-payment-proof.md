@@ -1135,7 +1135,9 @@ floors once a round. It works a job only when something the job waits on can
 have changed: first the jobs that something new on the chains concerns (a block
 paying their script or spending their coins, a candidate a Sequentia block now
 anchors, their claim pooled, left out, mined or gone), taking turns by receiving
-script; then what intake changed; then candidates passed over whose floor has
+script, those whose claims are worth less than the floor asks for the lightest
+proof their payment can make after the rest (read from the blocks it holds, so
+before they are first tried); then what intake changed; then candidates passed over whose floor has
 fallen; then the rest once per Bitcoin block. A candidate passed over never comes
 back because a block arrived, so a job whose claims cannot land, priced under the
 floor or in assets the node does not accept, is tried once and then costs a
