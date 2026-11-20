@@ -1111,6 +1111,14 @@ broadcasts the payment, and the service:
   seller the blocks before it to fill against a cheap tier. The cost is that a
   buyer whose claim misses one block in ordinary congestion pays the top tier,
   about 0.03 % of the value;
+- sends every claim with no fee ceiling (`sendrawtransaction` with `maxfeerate`
+  0), and sends and checks the Bitcoin payments and cancels it holds the same
+  way. Each carries a fee its signer fixed, which the service cannot lower, so
+  the RPC's default ceiling (0.1 per 1,000 virtual bytes, 10,000 `rfa` a virtual
+  byte) would only refuse what the node takes: the top tier pays a share of the
+  swap's value and the ceiling is a fixed rate, so the top tier of any swap worth
+  more than a few dozen reference units would be refused, leaving a buyer whose
+  going tier cannot land with no tier that can;
 - if two blocks before `D` no claim proving a payment confirmed in the lock's
   heights is pooled or mined, broadcasts the cancels of every payment it holds
   that is not confirmed. A claim the node accepted once and no longer holds
