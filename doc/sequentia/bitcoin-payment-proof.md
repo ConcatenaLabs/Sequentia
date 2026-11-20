@@ -1044,23 +1044,32 @@ broadcasts the payment, and the service:
   long nor above 100,000 bytes); a miner can mine a paying transaction outside
   those bounds, and it opens nothing. The service tries the candidates in turn
   across the whole window: one handed over first, then the rest by the lightest
-  proof they make, each at every tier the buyer signed, cheapest first. A claim
+  proof they make, each at every tier the buyer signed, cheapest first within
+  each fee asset, the assets in the order the buyer signed them. It keeps as
+  candidates every payment handed over and the 32 lightest others: a candidate
+  beyond those is heavier than all 32, so a claim on it is refused wherever theirs
+  are. A claim
   is refused for its weight alone when its fee rate falls below the node's
   floor or its size passes the standard limit, the only refusals that depend
   on which payment it proves (the fee is fixed by the transaction id, the proof
   is not). Refused so at every tier, the candidate is passed over, with every
-  candidate whose proof would be as heavy, and the next is tried at once. It is
-  passed over until Bitcoin's next block, since the floor moves with the fee
-  asset's rate and the mempool, or a reorganization of the blocks read, which
-  drops everything passed over. Whatever else stops a claim depends on the
+  candidate whose proof would be as heavy, and the next is tried at once. It
+  comes back only once what refused it can have changed: the node's floor in the
+  fee asset (its relay floor over the asset's rate) falls to where the fee it
+  refused would meet it, or an asset the node did not accept, in which a tier is
+  signed, is accepted. A claim refused for its size at every tier never comes
+  back, and when no tier is in an asset the node accepts every candidate waits
+  for one that is. A block arriving changes none of this, so it brings nothing
+  back; a reorganization of the blocks read drops everything passed over.
+  Whatever else stops a claim depends on the
   chain, not on the payment (no block anchored at the payment yet, the Bitcoin
   daemon and the recorded anchors not agreeing, a branch switch between
   reading a block and its headers, links beyond 2,016, the lock not yet
   confirmed or a conflicting spend pooled); the service waits on it and tries
   again, and never passes a payment over for it. So nothing a third party mines,
   relays or reorganizes fixes the swap on a payment whose claim cannot land, and
-  a payment never stands in for the buyer's or withholds the buyer's cancel
-  until a claim proving it is accepted;
+  a payment never stands in for the buyer's, and withholds the buyer's cancel
+  only while a claim proving it is pooled or mined;
 - **watches the claim until its block is final** (certified, and its anchor
   buried as the swap requires), not merely mined; after every reorganization
   that disconnects it, resubmits a fresh proof of the payment,
@@ -1074,9 +1083,10 @@ broadcasts the payment, and the service:
   seller the blocks before it to fill against a cheap tier. The cost is that a
   buyer whose claim misses one block in ordinary congestion pays the top tier,
   about 0.03 % of the value;
-- if two blocks before `D` the node has accepted no claim proving a payment
-  confirmed in the lock's heights, broadcasts the cancels of every payment it
-  holds that is not confirmed. Under Bitcoin Core's full replacement the
+- if two blocks before `D` no claim proving a payment confirmed in the lock's
+  heights is pooled or mined, broadcasts the cancels of every payment it holds
+  that is not confirmed. A claim the node accepted once and no longer holds
+  (it left the mempool, and every tier is refused now) withholds nothing. Under Bitcoin Core's full replacement the
   cancel replaces the payment if its fee is higher; the template of section 8.3 keeps anyone from making that
   replacement costlier.
 
@@ -1096,19 +1106,22 @@ may take what the buyer's handover needs:
   pools or has mined: real coins paying the seller, which open the lock if they
   are mined in time. A handover carrying one is never refused for a limit. A
   payment the daemon cannot check yet (its parent unbroadcast) is held within a
-  bound (eight in a job, two from one client) and checked again every round
-  until Bitcoin vouches for it. A copy of a payment whose signatures fail never
+  bound (eight in a job, two from one client, 64 KiB with the unchecked cancels
+  below) and checked again as the chains move until Bitcoin vouches for it.
+  Each signed payment is held once, however many jobs it vouches for. A copy of a payment whose signatures fail never
   takes its cancels with it.
 - **Several cancels, by witness id.** A cancel is kept if the daemon accepts it,
   pools it or has mined it: up to four for a payment, the cheapest giving way to
   one that pays more. One whose coins the daemon does not know yet is kept
   unchecked (up to 16 for a payment, two from one client) and checked again
-  every round. A cancel is known by its witness transaction id, since a
+  as the chains move. A payment's checked cancels take at most 32 KiB in a job,
+  the cheapest giving way. A cancel is known by its witness transaction id, since a
   transaction id does not cover the witness: a copy of the buyer's cancel with
   a bad signature is held beside it and never in its place. Only the payment's
   signer can make a valid cancel of it, so nobody crowds the buyer's out.
 - **Caps.** A transaction handed over is at most 32 KiB, a job holds at most
-  eight claims, and a lock spans at most 1,008 Bitcoin blocks from `F` to `D`.
+  eight claims of at most 16 KiB each, and a lock spans at most 1,008 Bitcoin
+  blocks from `F` to `D`.
   A new job needs a real lock (an unspent output paying the terms). The
   service's live jobs and those each client starts are capped, except a job
   whose payment Bitcoin vouches for.
@@ -1117,11 +1130,24 @@ may take what the buyer's handover needs:
 buyer's job from an attacker's own (it can lock dust on terms of its own), so the
 service bounds the work instead. It reads each Bitcoin block once for every job,
 keeping which scripts it pays and which coins it spends, so a job whose script and
-coins a block does not touch costs a lookup for it. It works first the jobs with
-a payment or a claim in play, taking turns by receiving script: another turn costs
-another output on Bitcoin, never another address or post, so a buyer whose
-payment is mined is worked within a round, however many jobs and clients there
-are.
+coins a block does not touch costs a lookup for it, and it reads the node's fee
+floors once a round. It works a job only when something the job waits on can
+have changed: first the jobs that something new on the chains concerns (a block
+paying their script or spending their coins, a candidate a Sequentia block now
+anchors, their claim pooled, left out, mined or gone), taking turns by receiving
+script; then what intake changed; then candidates passed over whose floor has
+fallen; then the rest once per Bitcoin block. A candidate passed over never comes
+back because a block arrived, so a job whose claims cannot land, priced under the
+floor or in assets the node does not accept, is tried once and then costs a
+lookup, however many there are and on however many scripts. A buyer whose payment
+is mined is worked in the first turns of the round after a block anchors it,
+behind only jobs that something new on the chains concerns in that round, each of
+which cost whoever made it an output in a new Bitcoin block or a claim the node
+takes. Measured on regtest against 750 to 40,000 such jobs, each on its own
+receiving script with claims under the floor, the buyer's claim was pooled within
+2 seconds of its anchoring block and its cancel sent within a second of `D - 2`.
+Memory follows the jobs by a bound per job, not by what a payment weighs: each
+signed payment is held once however many jobs it vouches for.
 
 A post refused for a limit is answered `429`. **The wallet posts again**, at
 the latest once its payment's parent is broadcast: the payment and its cancels
