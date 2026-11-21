@@ -89,17 +89,15 @@ def merkle_branch(leaves, pos):
     return branch
 
 
-def ser_record(version, btc_headers, lost, entries):
-    """LostRecord: version 1 carries Bitcoin headers, version 2 does not."""
-    out = bytes([version])
-    if version == 1:
-        out += ser_cs(len(btc_headers)) + b"".join(ser_bytes(h) for h in btc_headers)
-    out += ser_cs(len(lost)) + b"".join(ser_bytes(h) for h in lost)
+def ser_record(btc_headers, lost, entries):
+    """LostRecord: the lost headers, the entries (whole transactions), and the
+    Bitcoin headers of the lost anchors off the judged block's ancestry."""
+    out = bytes([3]) + ser_cs(len(lost)) + b"".join(ser_bytes(h) for h in lost)
     out += ser_cs(len(entries))
     for k, pos, branch, tx in entries:
         out += k.to_bytes(4, "little") + pos.to_bytes(4, "little")
         out += ser_cs(len(branch)) + b"".join(branch) + ser_bytes(tx)
-    return out
+    return out + ser_cs(len(btc_headers)) + b"".join(ser_bytes(h) for h in btc_headers)
 
 
 class LostAttacksTest(LostBlocksTest):
@@ -109,18 +107,21 @@ class LostAttacksTest(LostBlocksTest):
             # Room on the committee for the two late keys (8 seats, quorum 5).
             self.extra = {i: ["-poscommitteesize=9"] for i in range(N)}
 
+    def stale_headers(self, node, block_hash):
+        """The Bitcoin headers from the best chain to this block's anchor, parents first."""
+        b = self.btc()
+        at = node.getblockheader(block_hash)["anchorhash"]
+        out = []
+        while b.getblockheader(at)["confirmations"] < 0:
+            out.append(bytes.fromhex(b.getblockheader(at, False)))
+            at = b.getblockheader(at)["previousblockhash"]
+        return out[::-1]
+
     def stored(self, node, block_hash):
         try:
             return node.getblock(block_hash, 0)
         except Exception:
             return None
-
-    def new_rule(self):
-        try:
-            self.nodes[1].help("checklockancestry")
-            return "unknown command" not in self.nodes[1].help("checklockancestry").lower()
-        except JSONRPCException:
-            return False
 
     # -------------------------------------------------------------- lx (F4)
     def case_lx(self):
@@ -234,10 +235,9 @@ class LostAttacksTest(LostBlocksTest):
         a1_full = a.getblock(a1["hash"], 2)
         leaves = [bytes.fromhex(t["txid"])[::-1] for t in a1_full["tx"]]
         pos = [t["txid"] for t in a1_full["tx"]].index(tv_id)
-        entry = (1, pos, merkle_branch(leaves, pos), tv.serialize_without_witness())
+        entry = (1, pos, merkle_branch(leaves, pos), tv.serialize_with_witness())
         lost = [bytes.fromhex(a.getblockheader(a0["hash"], False)), bytes.fromhex(a.getblockheader(a1["hash"], False))]
-        version = 2 if self.new_rule() else 1
-        data = ser_record(version, [bytes.fromhex(s_hdr)], lost, [entry])
+        data = ser_record([bytes.fromhex(s_hdr)], lost, [entry])
         # B on the honest chain, its coinbase given the record, re-certified.
         self.sync_tips(HONEST)
         self.disconnect_all(1)
@@ -270,7 +270,7 @@ class LostAttacksTest(LostBlocksTest):
         rc = n1.recertifyposblock(new_raw.hex(), self.stakers[SELLER][0], [self.stakers[j][0] for j in ALL_KEYS if j != SELLER])
         r = n1.submitblock(rc["hex"])
         lines = self.log_has(1, "carries a record that is not valid", since)
-        self.record(case, "B with the record (%d bytes, version %d)" % (len(data), version),
+        self.record(case, "B with the record (%d bytes)" % len(data),
                     "submitblock %r; node 1's tip is B: %s; %s" % (r, n1.getbestblockhash() == rc["hash"],
                                                                  lines[0].split("Lost blocks: ", 1)[-1][:200] if lines else "no record complaint"))
         if certify_first:
@@ -385,8 +385,8 @@ class LostAttacksTest(LostBlocksTest):
         # The record, by hand, in B.
         leaves = [bytes.fromhex(t["txid"])[::-1] for t in a0_blk["tx"]]
         pos = [t["txid"] for t in a0_blk["tx"]].index(tv_id)
-        entry = (0, pos, merkle_branch(leaves, pos), tv.serialize_without_witness())
-        data = ser_record(2, [], [bytes.fromhex(src.getblockheader(a0["hash"], False))], [entry])
+        entry = (0, pos, merkle_branch(leaves, pos), tv.serialize_with_witness())
+        data = ser_record(self.stale_headers(src, a0["hash"]), [bytes.fromhex(src.getblockheader(a0["hash"], False))], [entry])
         b_hash, r, since = self.put_record(data)
         lines = self.log_has(1, "carries a record that is not valid", since)
         self.record(case, "B with the record (%d bytes)" % len(data),

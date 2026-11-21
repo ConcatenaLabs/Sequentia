@@ -357,7 +357,11 @@ class LostSwapTest(LostBlocksTest):
         tmpl = self.log_has(1, "to record of", since[1])
         self.record("sD", "records per block (height, outputs, bytes)", per_block)
         self.record("sD", "plans", [l.split("template on ", 1)[-1][66:260] for l in tmpl[:4]])
-        assert sum(1 for x in per_block if x[1]) >= 2, per_block
+        # A record holds only what is valid in its own block. The claim is; its
+        # descendants spend coins that do not exist until it is mined, so they
+        # are not recordable and the holders' refusal protects them. Binding the
+        # claim's input is what keeps the lock, so one record is the whole cost.
+        assert_equal(sum(1 for x in per_block if x[1]), 1)
         assert all(x[2] <= 25000 + 200 for x in per_block)
         self.realign()
 

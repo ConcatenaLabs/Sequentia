@@ -306,6 +306,7 @@ BASE_SCRIPTS = [
     'feature_pos_lost_blocks.py',
     'feature_pos_lost_activation.py',
     'feature_pos_lost_activation_boundary.py',
+    'feature_pos_lost_record_attacks.py',
     'feature_pos_split_equivocation.py',
     'feature_pos_certified_parent_quorum.py',
     'feature_pos_certified_stall_quorum.py',
