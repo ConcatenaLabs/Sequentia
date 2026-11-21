@@ -124,6 +124,8 @@ constexpr size_t LOST_WAIVER_MAX_CHILDREN = 16;
 std::map<uint256, CBlockHeader> g_waiver_headers GUARDED_BY(g_lost_mutex);
 std::map<uint256, size_t> g_waiver_children GUARDED_BY(g_lost_mutex);
 bool g_waiver_dirty GUARDED_BY(g_lost_mutex){false};
+//! Parents with more certified evidence-only children than LostSiblingCap.
+std::set<uint256> g_sibling_capped GUARDED_BY(g_lost_mutex);
 //! Refused blocks with enough certified blocks above them: this holder follows.
 std::set<uint256> g_waived GUARDED_BY(g_lost_mutex);
 int g_waiver_depth{DEFAULT_LOST_WAIVER_DEPTH};
@@ -219,6 +221,7 @@ void WriteFile() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
             file << *b.block << b.height << b.certified << b.own << b.epoch
                  << b.prot << b.fork_hash << b.fork_height << (uint8_t)b.anchor_state << b.btc << b.seed_ok;
         }
+        file << g_sibling_capped;
         if (!FileCommit(file.Get())) return;
         file.fclose();
         if (!RenameOver(tmp, LostPath())) return;
@@ -455,6 +458,7 @@ void LostInit()
             b.epoch = epoch;
             g_blocks.emplace(b.hash, std::move(b));
         }
+        file >> g_sibling_capped;
         // The duty holds from the first block this node judges after a
         // restart, before any maintenance pass: the bound spends as written.
         // Evidence binds only what the next maintenance pass finds valid here.
@@ -1098,7 +1102,10 @@ Standing StandingOf(const std::set<uint256>& prot) EXCLUSIVE_LOCKS_REQUIRED(g_lo
     }
     std::sort(order.begin(), order.end(), [](const LostBlk* a, const LostBlk* b) { return a->height < b->height; });
     for (const LostBlk* b : order) {
-        if (!b->own && (own_at.count({b->fork_hash, b->height}) || st.blocks_out.count(b->prev))) st.blocks_out.insert(b->hash);
+        if (b->own) continue;
+        if (own_at.count({b->fork_hash, b->height}) || st.blocks_out.count(b->prev) || g_sibling_capped.count(b->prev)) {
+            st.blocks_out.insert(b->hash);
+        }
     }
     std::map<COutPoint, std::set<uint256>> own_spend, evidence_spend;
     for (const LostBlk* b : order) {
@@ -1833,6 +1840,22 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     b.btc = msg.btc;
     b.seed_ok = seed_ok;
     LOCK(g_lost_mutex);
+    {
+        uint32_t certified_children = 0;
+        int below_quorum = 0;
+        for (const auto& [h, x] : g_blocks) {
+            if (x.own || x.prev != block.hashPrevBlock) continue;
+            if (x.certified) ++certified_children; else ++below_quorum;
+        }
+        if (certified && certified_children >= LostSiblingCap(g_window)) {
+            if (g_sibling_capped.insert(block.hashPrevBlock).second) {
+                ++g_gen;
+                g_dirty_file = true;
+            }
+            return "sibling-cap";
+        }
+        if (!certified && below_quorum >= LOST_MAX_BELOW_QUORUM_CHILDREN) return "sibling-below-quorum";
+    }
     if (!certified) {
         // F8: blocks that are not (yet) certified in order are few and bounded.
         size_t n = 0;
@@ -2230,6 +2253,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             g_waived.clear();
             g_waiver_headers.clear();
             g_waiver_children.clear();
+            g_sibling_capped.clear();
         } else if (g_waiver_dirty && !g_refused.empty()) {
             g_waiver_dirty = false;
             // Children by parent: those kept aside, and those the index took

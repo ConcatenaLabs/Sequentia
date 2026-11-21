@@ -27,6 +27,10 @@ stale Bitcoin block as the lost anchor instead of an invented hash):
   branchleaf a key branch of the bound leaf, with a proof no opcode reads, must not pass
   recordrace a record binds a coin to a sibling's respend before the duty names the
              honest lost transaction (use @stale)
+  evidmempool  an evidence-only transaction that stands returns under ordinary fee policy (use @stale)
+  stream     a quorum streams 30 certified siblings: W + 1 held and one plan computed
+  capflood1  one seat floods 12 siblings: a node's restraint holds
+  capflood4  a quorum floods 12 siblings: the restraint lifts
   rebind     a later record tries to move a bound coin to another transaction (use @stale)
   gracetwo   a refund certified at two heights while no record binds the lock
 
@@ -45,7 +49,9 @@ from pos_lost_attack_util import LostP2PDataStore, block_from_hex
 from test_framework.authproxy import JSONRPCException
 from test_framework.messages import (COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutAsset, CTxOutValue, CTxOutWitness,
                                      ser_uint256, tx_from_hex, uint256_from_str)
-from test_framework.util import assert_equal
+from test_framework.messages import hash256
+from test_framework.util import assert_equal, calcfastmerkleroot
+import test_framework.util as fu
 
 CASES = os.environ.get("LOST_CASES", "fab,powneg").split(",")
 STALE = any(c.endswith("@stale") for c in CASES)
@@ -100,7 +106,7 @@ class LostRecordAttacksTest(LostSwapTest):
 
     def set_test_params(self):
         super().set_test_params()
-        self.extra = {SELLER: ["-validateanchor=0"]} if not set(CASES) & {"carried", "rbf", "sB", "sC", "grace", "gracegone", "disp", "sD", "siblingrespend", "siblingbranch", "siblingbefore", "recordrace", "gracetwo", "branchleaf"} else {}
+        self.extra = {SELLER: ["-validateanchor=0"]} if not set(CASES) & {"carried", "rbf", "sB", "sC", "grace", "gracegone", "disp", "sD", "siblingrespend", "siblingbranch", "siblingbefore", "recordrace", "stream", "capflood1", "capflood4", "evidmempool", "gracetwo", "branchleaf"} else {}
         if "grind" in CASES:
             for i in range(N):
                 self.extra.setdefault(i, []).append("-poscommitteesize=3")
@@ -1057,6 +1063,138 @@ class LostRecordAttacksTest(LostSwapTest):
         t_at, r_at = self.block_of(t_id, n1), self.block_of(r.rehash(), n1)
         assert t_at is not None and r_at is None, (t_at, r_at)
         self.blocked(case, "the record is refused; T is mined at height %d" % t_at)
+
+    def hand_block(self, i, tx):
+        """A block on node i's tip carrying only `tx` (or nothing), all keys signing, not connected anywhere."""
+        n = self.nodes[i]
+        hh, k = self.gen(n)
+        blk = block_from_hex(n.getblock(hh, 0))
+        blk.vtx = [blk.vtx[0]] + ([tx] if tx is not None else [])
+        cb = blk.vtx[0]
+        # The coinbase claims nothing: this block's fees differ from the template's.
+        keep = [j for j, o in enumerate(cb.vout) if o.nValue.getAmount() == 0]
+        wits = cb.wit.vtxoutwit
+        cb.vout = [cb.vout[j] for j in keep]
+        if wits:
+            cb.wit.vtxoutwit = [wits[j] for j in keep]
+        ci = [j for j, o in enumerate(cb.vout) if o.scriptPubKey[:6] == bytes.fromhex("6a24aa21a9ed")][-1]
+        fu.node_fastmerkle = n
+        wroot = bytes.fromhex(calcfastmerkleroot([t.calc_witness_hash() for t in blk.vtx]))[::-1]
+        cb.vout[ci].scriptPubKey = b"\x6a\x24\xaa\x21\xa9\xed" + hash256(wroot + cb.wit.vtxinwit[0].scriptWitness.stack[0])
+        for t in blk.vtx:
+            t.rehash()
+        blk.hashMerkleRoot = uint256_from_str(merkle_root([ser_uint256(t.sha256) for t in blk.vtx]))
+        blk.sha256 = None
+        n.invalidateblock(hh)
+        rc = n.recertifyposblock(blk.serialize().hex(), self.wif(k), [self.wif(j) for j in ALL_KEYS])
+        return rc["hex"], rc["hash"]
+
+    def drop_peers(self, i):
+        n = self.nodes[i]
+        for p in n.getpeerinfo():
+            n.disconnectnode(nodeid=p["id"])
+        self.wait_until(lambda: n.getconnectioncount() == 0, timeout=20)
+
+    def holds(self, i):
+        return {b["hash"]: b["own"] for b in self.nodes[i].getlostblocks()["blocks"]}
+
+    def case_evidmempool(self):
+        """What stands of an evidence-only block goes back to the mempool with no priority."""
+        case = "evidmempool"
+        n1 = self.nodes[1]
+        coin = self.fund()
+        e = tx_from_hex(self.spend(coin, n1.getnewaddress(), Decimal("0.001")))
+        e_id = e.rehash()
+        ah, an, btc = self.anchor_choice(self.tip(n1))
+        self.isolate()
+        blk = self.evidence_block([e], ah, an, [0, 1, 2, 3])
+        blk.rehash()
+        self.show_evidence(blk, btc=btc)
+        self.wait_until(lambda: all(blk.hash in self.lost(i) for i in HONEST), timeout=30)
+        self.wait_until(lambda: e_id in n1.getrawmempool(), timeout=30)
+        fees = n1.getmempoolentry(e_id)["fees"]
+        assert_equal(fees["base"], fees["modified"])
+        self.record(case, "mempool", "the evidence transaction is pooled with fees %s, no priority" % fees["base"])
+        h = self.produce(1, [1, 2, 3, 4, 5], leaders=[1, 2, 3, 4, 5])
+        assert e_id in h["block"]["tx"]
+        self.blocked(case, "mined as an ordinary transaction at height %d" % h["height"])
+
+    def capflood(self, case, signers):
+        """Node 3 holds the honest block only as evidence; a coalition floods siblings of it."""
+        n1, n3 = self.nodes[1], self.nodes[3]
+        t_hex, r_hex, t_id, r_id = self.coin_and_spends()
+        self.drop_peers(3)
+        self.btc_mine(1)
+        n1.sendrawtransaction(t_hex)
+        L = self.produce(1, ALL_KEYS, txs_must=[t_id])
+        self.produce(1, ALL_KEYS)
+        self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == n1.getbestblockhash() for i in (0, 1, 2, 4, 5)), timeout=30)
+        hdr = n1.getblockheader(L["hash"])
+        raw_l = block_from_hex(n1.getblock(L["hash"], 0))
+        stale = self.stale_after_reorg(hdr["anchorhash"])
+        self.wait_until(lambda: all(L["hash"] in self.lost(i) for i in (1, 2, 4)), timeout=60)
+        self.wait_until(lambda: self.nodes[SELLER].getblockcount() < L["height"], timeout=30)
+        self.drop_peers(SELLER)
+        raw_l.rehash()
+        self.show_evidence(raw_l, to=3, btc=stale)
+        self.wait_until(lambda: L["hash"] in self.holds(3), timeout=30)
+        hx, _ = self.hand_block(SELLER, tx_from_hex(r_hex))
+        def verdict():
+            try:
+                return "signs it: %r" % n3.testproposedblock(hx)
+            except JSONRPCException as e:
+                return "refuses: %s" % e.error["message"][:60]
+        before = verdict()
+        assert before.startswith("refuses: bad-txns-lost-respend"), before
+        for _ in range(12):
+            dummy = self.blank_wit(self.invented_tx([(int.from_bytes(os.urandom(32), "little"), 0)]))
+            b = self.evidence_block([dummy], hdr["anchorheight"], int(hdr["anchorhash"], 16), signers)
+            self.show_evidence(b, to=3, btc=stale)
+        time.sleep(4)
+        after = verdict()
+        self.record(case, "outcome", "12 siblings by %d seat(s): node 3 holds %d blocks; before: %s; after: %s" % (len(signers), len(self.holds(3)), before, after))
+        return after, len(self.holds(3))
+
+    def case_capflood1(self):
+        after, held = self.capflood("capflood1", [0])
+        if not after.startswith("refuses: bad-txns-lost-respend"):
+            raise AssertionError("ATTACK SUCCEEDED (capflood1): one seat lifted a node's restraint")
+        assert held <= 1 + 2, held
+        self.blocked("capflood1", "one seat cannot lift the restraint")
+
+    def case_capflood4(self):
+        after, held = self.capflood("capflood4", [0, 1, 2, 3])
+        assert after.startswith("signs it"), after
+        assert_equal(held, W + 1)
+        self.record("capflood4", "OUTCOME", "a quorum that signs past the cap lifts the restraint, as the design states")
+
+    def case_stream(self):
+        """A quorum at one height streams certified siblings of an honest lost block."""
+        case = "stream"
+        st = self.gap(case)
+        n1 = self.nodes[1]
+        hdr = n1.getblockheader(st["L"])
+        stale = self.stale_chain(hdr["anchorhash"])
+        self.isolate()
+        since = self.log_size(1)
+        for _ in range(30):
+            dummy = self.blank_wit(self.invented_tx([(int.from_bytes(os.urandom(32), "little"), 0)]))
+            s = self.evidence_block([dummy], hdr["anchorheight"], int(hdr["anchorhash"], 16), [0, 1, 2, 3])
+            self.show_evidence(s, btc=stale)
+            time.sleep(1.2)
+            try:
+                n1.getnewblockhex()
+            except JSONRPCException as e:
+                assert "bad-posvrf-missing" in e.error["message"], e.error
+        time.sleep(3)
+        held = sum(1 for b in n1.getlostblocks()["blocks"] if not b["own"])
+        self.produce(1, [1, 2, 3, 4, 5], leaders=[1, 2, 3, 4, 5])
+        plans = self.log_has(1, "plan computed", since)
+        t_at, r_at = self.block_of(st["t_id"], n1), self.block_of(st["r_id"], n1)
+        self.record(case, "OUTCOME", "30 siblings: node 1 holds %d, %d plan(s) computed; T mined at %s, R at %s" % (held, len(plans), t_at, r_at))
+        assert_equal(held, W + 1)
+        assert_equal(len(plans), 1)
+        assert t_at is not None and r_at is None
 
     def case_rebind(self):
         """The first binding stands: a second record cannot move the coin to another transaction."""

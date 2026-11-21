@@ -137,6 +137,20 @@ LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor
 static constexpr int DEFAULT_LOST_WAIVER_DEPTH = 1;
 int LostWaiverDepth();
 
+//! Certified evidence-only children of one parent a holder keeps: the window
+//! plus one, the number of anchor heights open to a child of that parent (its
+//! anchor up to its anchor + W), so one honest child per height. Honest members
+//! do sign a second child after Bitcoin moves, and more than this many successive
+//! reorganisations inside one window, each undoing a certified child of the same
+//! parent, would pass it: very unlikely, not impossible. Passing it is safe. The
+//! parent's evidence-only blocks then restrain nothing, which leaves a node that
+//! holds them as evidence like a node with no evidence; a holder of a block from
+//! its own chain is unaffected, and nothing becomes valid or invalid. Blocks below
+//! the quorum never count, so seats short of a quorum cannot lift a restraint.
+inline uint32_t LostSiblingCap(uint32_t window) { return window + 1; }
+//! Evidence-only children below the quorum kept per parent.
+static constexpr int LOST_MAX_BELOW_QUORUM_CHILDREN = 2;
+
 //! Whether a refusal reason is one of the holders' duty (soft, re-judged).
 bool LostIsRefusal(const std::string& reason);
 
