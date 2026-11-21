@@ -271,6 +271,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     // claim is taken only when this block's anchor meets it, and an anchor floor
     // only when the anchor of the block FLOOR_DEPTH below this one meets it
     // (doc/sequentia/bitcoin-payment-proof.md 4.4, 6.1). Nothing above reads it.
+    m_prev_for_records = pindexPrev;
     m_btcpay_active = chainparams.GetConsensus().BtcPaymentActiveAt(nHeight);
     m_floor_anchor_height = nHeight >= BtcPayment::FLOOR_DEPTH
         ? (int64_t)pindexPrev->GetAncestor(nHeight - BtcPayment::FLOOR_DEPTH)->m_anchor_height : -1;
@@ -490,6 +491,12 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
                 if (records.proof && records.proof->height > m_anchor_height) return false;
                 if (records.floor && (m_floor_anchor_height < 0 || *records.floor > m_floor_anchor_height)) return false;
             }
+        }
+        // SEQUENTIA: a spend a lost-block record of this chain forbids in this
+        // block (pos_lost.h). The mempool refuses one on entry; one that entered
+        // before the record is skipped here, and evicted by the lost-block pass.
+        if (LostRecordedConflict(it->GetTx(), m_prev_for_records, m_anchor_height, m_chainstate.CoinsTip())) {
+            return false;
         }
         // SEQUENTIA: a privately submitted supervision record already spends
         // this input in the block.

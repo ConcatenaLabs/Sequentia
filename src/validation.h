@@ -211,13 +211,37 @@ bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache&
  *  operation cost as ConnectBlock counts it (0 for the others). `bound`, when
  *  given, is the chain's record bindings: a transaction spending an outpoint
  *  bound to another transaction is LATER (it may return when the binding lapses),
- *  so the duty never asks for what validity forbids. */
+ *  unless the binding yields to it, so the duty never asks for what validity
+ *  forbids. An anchor floor not yet reached is LATER. */
 enum class LostTxCat { DUE, LATER, FAILS, GONE };
+//! One input a record binds: only `txid` may spend it, or a spend through the
+//! tapscript leaf `leaf` that carries a payment proof and no anchor floor (null
+//! when the recorded input does not spend through such a leaf).
+struct LostBoundSpend {
+    uint256 txid;
+    uint256 leaf;
+};
 std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector<CTransactionRef>& txs,
                                                                CCoinsViewCache& base, const CBlockIndex* prev,
                                                                const Consensus::Params& params,
                                                                std::vector<int64_t>* sigops = nullptr,
-                                                               const std::map<COutPoint, uint256>* bound = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                                                               const std::map<COutPoint, LostBoundSpend>* bound = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+/** A record's entries, or the transactions of a block shown as evidence, judged
+ *  in order as a block on `prev` anchored at `anchor_h` / `anchor` would judge
+ *  them: ConnectBlock's own transaction checks, with one exception, that a
+ *  payment proof may link to one of `lost_anchors`. `view` receives the coins of
+ *  each one that passes. Returns, per transaction, why it is not valid there
+ *  (empty when it is). */
+std::vector<std::string> LostJudgeTxsInBlock(const std::vector<CTransactionRef>& txs, CCoinsViewCache& view,
+                                             const CBlockIndex* prev, uint32_t anchor_h, const uint256& anchor,
+                                             const std::set<std::pair<uint32_t, uint256>>& lost_anchors,
+                                             const std::map<COutPoint, LostBoundSpend>& bound) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+/** Whether input `n` of `tx`, run under the script rules of a child of `prev`,
+ *  succeeds with an executed opcode reading every record it carries. */
+bool LostInputReadsRecords(const CTransaction& tx, size_t n, const CCoinsViewCache& view, const CBlockIndex* prev)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* tip,
                             const Consensus::Params& params, TxValidationState& state)
