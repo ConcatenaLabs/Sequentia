@@ -30,13 +30,13 @@ import shutil
 import time
 from decimal import Decimal
 
-from feature_pos_lost_blocks import LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W
+from feature_pos_lost_blocks import WAIVER, LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W
 from test_framework.authproxy import JSONRPCException
 from test_framework.messages import tx_from_hex, CTxInWitness
 from test_framework.script import CScript, OP_0, OP_1, OP_IF, OP_ENDIF, OP_DROP, OP_CHECKMULTISIG
 from test_framework.util import assert_equal
 
-CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6").split(",")
+CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6,b2").split(",")
 ABUSE_TXS = int(os.environ.get("LOST_ABUSE_TXS", "340"))
 
 
@@ -733,13 +733,16 @@ class LostReplayTest(LostBlocksTest):
         self.realign()
 
     # ------------------------------------------------------------ b1, b2
-    def b_setup(self, case):
+    def b_setup(self, case, honest_apart=False):
         """T certified in L while node 5 is offline; Bitcoin replaces L's anchor; a dishonest quorum
         certifies X (R) on the fork point. Node 5 then starts with the seller as its only peer."""
         a = self.nodes[SELLER]
         self.stop_node(LATE)
         online = [0, 1, 2, 3, 4]
         st = self.gap(case, online=online)
+        if honest_apart:
+            # The honest nodes see nothing of X's chain until the case delivers it.
+            self.disconnect_all(SELLER)
         x = self.respend_block(case, st, ALL_KEYS)
         since = [self.log_size(i) for i in online]
         self.start_node(LATE, extra_args=self.node_args(LATE))
@@ -774,27 +777,68 @@ class LostReplayTest(LostBlocksTest):
         self.realign()
 
     def case_b2(self):
-        self.log.info("(b2) the quorum stays dishonest: X's chain goes on certified; holders rejoin at the lapse")
+        self.log.info("(b2) the quorum stays dishonest: holders follow X's chain at the waiver depth, not before")
         st, x = self.b_setup("b2")
         a = self.nodes[SELLER]
-        xs = [x]
-        for _ in range(3):
-            xs.append(self.produce(SELLER, ALL_KEYS, leaders=[SELLER]))
         for j in HONEST:
             self.connect_nodes(LATE, j)
         time.sleep(3)
-        heights = {i: self.nodes[i].getblockcount() for i in HONEST}
         assert all(not self.in_chain(self.nodes[i], x["hash"]) for i in HONEST)
-        self.record("b2", "split", "X's chain certified to height %d on the seller and node 5; honest nodes refuse it (heights %s)" %
-                    (xs[-1]["height"], heights))
-        anchor_l = self.nodes[1].getlostblocks()["blocks"]
-        a_l = [b["anchorheight"] for b in anchor_l if b["hash"] == st["L"]][0]
-        need = a_l + W + 1
+        # Relayed in chain order: X is refused first, then what is built on it.
+        for k in range(1, WAIVER):
+            self.produce(SELLER, ALL_KEYS, leaders=[SELLER])
+            time.sleep(3)
+            assert all(not self.in_chain(self.nodes[i], x["hash"]) for i in HONEST), "followed at %d of %d" % (k, WAIVER)
+        self.record("b2", "below the depth", "%d certified block(s) above X: every honest node still refuses it" % (WAIVER - 1))
         t0 = time.time()
-        self.btc_mine(max(0, need - self.btc().getblockcount()))
-        self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == a.getbestblockhash() for i in HONEST), timeout=900)
-        self.record("b2", "outcome", "Bitcoin at %d > a_L + W = %d: every honest node took X's chain in %.1f s; R mined: %s" %
-                    (self.btc().getblockcount(), a_l + W, time.time() - t0, self.block_of(st["r_id"], self.nodes[1]) is not None))
+        top = self.produce(SELLER, ALL_KEYS, leaders=[SELLER])
+        self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == a.getbestblockhash() for i in HONEST), timeout=90)
+        self.record("b2", "outcome", "%d certified block(s) above X: every honest node took X's chain in %.1f s, tip height %d; R mined: %s" %
+                    (WAIVER, time.time() - t0, top["height"], self.block_of(st["r_id"], self.nodes[1]) is not None))
+        self.mesh(range(N))
+
+    def case_b2o(self):
+        self.log.info("(b2o) the waiver does not depend on delivery order: refused block first, and child headers first")
+        st, x = self.b_setup("b2o", honest_apart=True)
+        a = self.nodes[SELLER]
+        chain = [x] + [self.produce(SELLER, ALL_KEYS, leaders=[SELLER]) for _ in range(WAIVER)]
+        raws = [a.getblock(b["hash"], 0) for b in chain]
+        hdrs = [a.getblockheader(b["hash"], False) for b in chain]
+        top = chain[-1]["hash"]
+        n1, n2 = self.nodes[1], self.nodes[2]
+        for i in HONEST:
+            self.disconnect_all(i)
+        def finish(n):
+            # What was refused before the waiver is offered again, as a peer would.
+            def done():
+                for raw in raws:
+                    n.submitblock(raw)
+                return n.getbestblockhash() == top
+            self.wait_until(done, timeout=60)
+        # The refused block first, then its children in chain order.
+        n1.submitblock(raws[0])
+        assert not self.in_chain(n1, x["hash"])
+        for raw in raws[1:-1]:
+            n1.submitblock(raw)
+        time.sleep(3)
+        assert not self.in_chain(n1, x["hash"]), "followed below the depth (refused block first)"
+        n1.submitblock(raws[-1])
+        finish(n1)
+        self.record("b2o", "refused block first", "node 1 refuses X below the depth and follows at %d certified block(s)" % WAIVER)
+        # The children's headers first.
+        def offer_header(h):
+            try:
+                n2.submitheader(h)
+            except JSONRPCException as e:
+                assert "lost-respend" in e.error["message"], e.error
+        for h in hdrs[:-1]:
+            offer_header(h)
+        n2.submitblock(raws[0])
+        time.sleep(3)
+        assert not self.in_chain(n2, x["hash"]), "followed below the depth (headers first)"
+        offer_header(hdrs[-1])
+        finish(n2)
+        self.record("b2o", "child headers first", "node 2 refuses X below the depth and follows at %d certified block(s)" % WAIVER)
         self.mesh(range(N))
 
     # ---------------------------------------------------------------- hc

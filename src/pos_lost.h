@@ -131,6 +131,12 @@ struct LostTemplateParts {
 };
 LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, const uint256& anchor_hash, CCoinsViewCache& view);
 
+//! How many consecutive certified blocks above a block that breaks the duty make
+//! a holder follow it. One place to change; custom chains can override it for
+//! tests with -poslostwaiverdepth.
+static constexpr int DEFAULT_LOST_WAIVER_DEPTH = 1;
+int LostWaiverDepth();
+
 //! Whether a refusal reason is one of the holders' duty (soft, re-judged).
 bool LostIsRefusal(const std::string& reason);
 
@@ -160,10 +166,12 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
 
 //! The rule, for `block` built on `pindexPrev`, the active tip. Off-chain
 //! evidence is not applied during initial block download, nor to a block that
-//! `certified_descendant` says has a certified descendant. cs_main held.
+//! `certified_descendant` says has a certified descendant, nor to a block at or
+//! above one a quorum has certified past this holder (`just_check`, a block this
+//! node is asked to sign, is not excused by being that block itself). cs_main held.
 bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
                     const std::function<bool()>& certified_descendant, CCoinsViewCache& view,
-                    BlockValidationState& state);
+                    BlockValidationState& state, bool just_check = false);
 
 //! A lost transaction `tx` conflicts with, for the mempool, while a child of
 //! `tip` anchored like it is still bound.

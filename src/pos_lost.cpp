@@ -124,6 +124,9 @@ constexpr size_t LOST_WAIVER_MAX_CHILDREN = 16;
 std::map<uint256, CBlockHeader> g_waiver_headers GUARDED_BY(g_lost_mutex);
 std::map<uint256, size_t> g_waiver_children GUARDED_BY(g_lost_mutex);
 bool g_waiver_dirty GUARDED_BY(g_lost_mutex){false};
+//! Refused blocks with enough certified blocks above them: this holder follows.
+std::set<uint256> g_waived GUARDED_BY(g_lost_mutex);
+int g_waiver_depth{DEFAULT_LOST_WAIVER_DEPTH};
 
 std::vector<std::pair<const CBlockIndex*, std::shared_ptr<const CBlock>>> g_pending GUARDED_BY(::cs_main);
 
@@ -384,6 +387,7 @@ bool LostActiveAt(int height)
 }
 
 uint32_t LostWindow() { return g_window; }
+int LostWaiverDepth() { return g_waiver_depth; }
 
 void LostInit()
 {
@@ -394,6 +398,10 @@ void LostInit()
     g_window = DEFAULT_POS_LOST_WINDOW;
     if (chain != CBaseChainParams::TESTNET && chain != "sequentia") {
         g_window = (uint32_t)std::max<int64_t>(1, gArgs.GetIntArg("-poslostwindow", DEFAULT_POS_LOST_WINDOW));
+    }
+    g_waiver_depth = DEFAULT_LOST_WAIVER_DEPTH;
+    if (chain != CBaseChainParams::TESTNET && chain != "sequentia") {
+        g_waiver_depth = (int)std::max<int64_t>(1, gArgs.GetIntArg("-poslostwaiverdepth", DEFAULT_LOST_WAIVER_DEPTH));
     }
     g_bind_signed = gArgs.GetBoolArg("-poslostbindsigned", false);
     LOCK(g_lost_mutex);
@@ -1482,11 +1490,24 @@ LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor
 
 bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
                     const std::function<bool()>& certified_descendant, CCoinsViewCache& view,
-                    BlockValidationState& state)
+                    BlockValidationState& state, bool just_check)
 {
     AssertLockHeld(::cs_main);
     if (!pindexPrev || ibd || !LostActiveAt(pindexPrev->nHeight + 1)) return true;
     LOCK(g_lost_mutex);
+    if (!g_waived.empty()) {
+        // A quorum has certified past this holder: it takes that block, and the
+        // duty is off above it, or it would be refused again one block later. It
+        // still does not sign the waived block itself.
+        bool waived = !just_check && g_waived.count(block.GetHash()) > 0;
+        const CBlockIndex* w = pindexPrev;
+        for (int i = 0; !waived && w && i <= LOST_MAX_BRANCH; ++i, w = w->pprev) waived = g_waived.count(w->GetBlockHash()) > 0;
+        if (waived) {
+            LogPrintf("Lost blocks: block %s at height %d is at or above a block a quorum certified past this holder; the duty does not bear on it\n",
+                      block.GetHash().ToString(), pindexPrev->nHeight + 1);
+            return true;
+        }
+    }
     std::optional<std::string> why;
     std::string reason;
     if ((why = ViolationLocked(block, pindexPrev, view)) || (why = RecordViolationLocked(block, pindexPrev))) {
@@ -2176,6 +2197,77 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 mempool->PrioritiseTransaction(tx->GetHash(), 100 * COIN);
                 LogPrintf("Lost blocks: lost transaction %s is back in the mempool, first in line\n", tx->GetHash().ToString());
             }
+        }
+    }
+    // The waiver: a function of the headers this node has seen, in any order.
+    {
+        LOCK2(cs_main, g_lost_mutex);
+        if (g_blocks.empty() && g_refused.empty()) {
+            g_waived.clear();
+            g_waiver_headers.clear();
+            g_waiver_children.clear();
+        } else if (g_waiver_dirty && !g_refused.empty()) {
+            g_waiver_dirty = false;
+            // Children by parent: those kept aside, and those the index took
+            // before their ancestor was refused.
+            std::map<uint256, std::vector<CBlockHeader>> kids;
+            for (const auto& [h, hdr] : g_waiver_headers) kids[hdr.hashPrevBlock].push_back(hdr);
+            int lowest = std::numeric_limits<int>::max();
+            for (const uint256& root : g_refused) {
+                if (const CBlockIndex* x = chainman.m_blockman.LookupBlockIndex(root)) lowest = std::min(lowest, x->nHeight);
+            }
+            for (const auto& [h, p] : chainman.m_blockman.m_block_index) {
+                if (!p->pprev || p->nHeight <= lowest || !(p->nStatus & BLOCK_FAILED_MASK) || p->trimmed()) continue;
+                if (!g_waiver_headers.count(h)) kids[p->pprev->GetBlockHash()].push_back(p->GetBlockHeader());
+            }
+            const StakeRegistry& reg = StakeRegistry::GetInstance();
+            bool dropped = false;
+            // The longest run of certified headers above `parent`, up to `need`.
+            std::function<int(const uint256&, const CBlockIndex&, const uint256&, int)> run =
+                [&](const uint256& parent, const CBlockIndex& view, const uint256& root, int need) -> int {
+                if (need <= 0) return 0;
+                auto it = kids.find(parent);
+                if (it == kids.end()) return 0;
+                int best = 0;
+                for (const CBlockHeader& hdr : it->second) {
+                    const uint256 hash = hdr.GetHash();
+                    std::string reason;
+                    const int seats = CertSeatsCached(hdr, &view, root, reg, reason);
+                    if (seats < 0 || seats < PosSlotQuorumAt(reg, view.nHeight + 1)) {
+                        // Junk does not keep a parent's slot.
+                        if (g_waiver_headers.erase(hash)) {
+                            size_t& kept = g_waiver_children[parent];
+                            kept -= std::min<size_t>(kept, 1);
+                            dropped = true;
+                        }
+                        continue;
+                    }
+                    CBlockIndex next;
+                    next.nHeight = view.nHeight + 1;
+                    next.m_anchor_height = hdr.m_anchor_height;
+                    next.m_anchor_hash = hdr.m_anchor_hash;
+                    best = std::max(best, 1 + run(hash, next, root, need - 1));
+                    if (best >= need) break;
+                }
+                return best;
+            };
+            for (const uint256& root : g_refused) {
+                if (g_waived.count(root)) continue;
+                const CBlockIndex* x = chainman.m_blockman.LookupBlockIndex(root);
+                if (!x) continue;
+                CBlockIndex view;
+                view.nHeight = x->nHeight;
+                view.m_anchor_height = x->m_anchor_height;
+                view.m_anchor_hash = x->m_anchor_hash;
+                const int depth = run(root, view, root, g_waiver_depth);
+                if (depth >= g_waiver_depth) {
+                    LogPrintf("Lost blocks: refused block %s has %d certified block(s) above it; following the quorum\n", root.ToString(), depth);
+                    g_waived.insert(root);
+                    changed = true;
+                }
+            }
+            // A slot freed: ask again, in case a real header was turned away.
+            if (dropped) ++g_anchor_refetch_epoch;
         }
     }
     if (gen == g_last_scan_gen && !changed && g_refused_scanned) return;

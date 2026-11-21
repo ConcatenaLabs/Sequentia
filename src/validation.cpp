@@ -4613,8 +4613,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         if (fJustCheck) return false;
         for (const auto& entry : m_blockman.m_block_index) {
             const CBlockIndex* p = entry.second;
-            if (p->nHeight <= pindex->nHeight || !p->PosCarriesQuorum()) continue;
+            if (p->nHeight < pindex->nHeight + LostWaiverDepth() || !p->PosCarriesQuorum()) continue;
             if (p->GetAncestor(pindex->nHeight) != pindex || !p->pprev) continue;
+            {
+                // Every block between carries a quorum too.
+                bool all = true;
+                for (const CBlockIndex* w = p->pprev; w != pindex; w = w->pprev) all = all && w->PosCarriesQuorum();
+                if (!all) continue;
+            }
             // "Certified" means a certificate that verifies, never the flag a
             // header stored before its body was checked (doc 03, "The duty of a
             // holder"): the aggregate under the committee its parent's anchor
@@ -4646,7 +4652,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         pindex->nStatus |= BLOCK_HAS_LOST_RECORD;
         m_blockman.m_dirty_blockindex.insert(pindex);
     }
-    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, IsInitialBlockDownload(), lost_certified_descendant, view, state)) {
+    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, IsInitialBlockDownload(), lost_certified_descendant, view, state, fJustCheck)) {
         return error("%s: LostCheckBlock: %s", __func__, state.ToString());
     }
 

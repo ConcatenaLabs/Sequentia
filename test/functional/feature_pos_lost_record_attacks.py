@@ -1179,7 +1179,8 @@ class LostRecordAttacksTest(LostSwapTest):
         n1 = self.nodes[1]
         self.anchored_block(self.btc().getblockcount())
         fresh, _ = self.buyer_claim(st["lock"], st["pay"])
-        assert n1.testmempoolaccept([fresh.serialize().hex()])[0]["allowed"]
+        verdict = n1.testmempoolaccept([fresh.serialize().hex()])[0]
+        assert verdict["allowed"], verdict
         refund = self.refund(st["lock"])
         rid = refund.rehash()
         self.isolate()
