@@ -173,6 +173,8 @@ private:
     //! whether due lost transactions filled the block.
     std::vector<CTxOut> m_lost_records;
     bool m_lost_cut{false};
+    //! The parent of the block being built, for the records' bindings.
+    const CBlockIndex* m_prev_for_records{nullptr};
     //! SEQUENTIA: the anchor this block carries, chosen before its transactions
     //! so bitcoin-payment claims and anchor floors are taken only when it meets them.
     uint32_t m_anchor_height{0};

@@ -1909,6 +1909,9 @@ static RPCHelpMan getlostblock()
             ss << ev->block;
             UniValue out(UniValue::VOBJ);
             out.pushKV("block", HexStr(ss));
+            UniValue btc(UniValue::VARR);
+            for (const auto& h : ev->btc) btc.push_back(HexStr(h));
+            out.pushKV("btc", btc);
             return out;
         }};
 }
@@ -1917,12 +1920,17 @@ static RPCHelpMan submitlostblock()
 {
     return RPCHelpMan{"submitlostblock",
         "\nOffer one block of a lost branch as evidence, as a peer's poslost message would. Returns \"\" when it was taken, else why not.\n",
-        {{"block", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the block, hex"}},
+        {{"block", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the block, hex"},
+         {"btc", RPCArg::Type::ARR, RPCArg::Default{UniValue::VARR}, "the 80-byte Bitcoin headers from Bitcoin's best chain to the block's stale anchor, parents first",
+          {{"header", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "one header, hex"}}}},
         RPCResult{RPCResult::Type::STR, "", "the verdict"},
         RPCExamples{HelpExampleCli("submitlostblock", "\"<hex>\"")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             LostEvidenceMsg msg;
             if (!DecodeHexBlk(msg.block, request.params[0].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+            if (!request.params[1].isNull()) {
+                for (const UniValue& h : request.params[1].get_array().getValues()) msg.btc.push_back(ParseHexV(h, "header"));
+            }
             return LostAcceptEvidence(EnsureAnyChainman(request.context), msg);
         }};
 }

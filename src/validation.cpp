@@ -887,7 +887,8 @@ static bool IsStandardBtcPaymentSlot(const std::vector<std::vector<unsigned char
 //! the opcodes check 1 to 4.
 static BtcPayVerdict CheckInputBtcPaymentRecords(const CTransaction& tx, size_t i, const CCoinsViewCache& view,
                                                  const CBlockIndex* index, bool in_block, uint32_t anchor_height,
-                                                 std::set<uint256>* proven_blocks, std::string& reason)
+                                                 std::set<uint256>* proven_blocks, std::string& reason,
+                                                 const std::set<std::pair<uint32_t, uint256>>* lost_anchors = nullptr)
 {
     if (tx.vin[i].m_is_pegin || tx.witness.vtxinwit.size() <= i) return BtcPayVerdict::OK;
     const auto& slot = tx.witness.vtxinwit[i].m_pegin_witness.stack;
@@ -927,8 +928,10 @@ static BtcPayVerdict CheckInputBtcPaymentRecords(const CTransaction& tx, size_t 
     // Check 5: the proven block is an ancestor of an anchor this branch
     // recorded, `links` headers below it, at the declared height. A pure
     // function of the chain: no Bitcoin daemon is asked.
+    // A record's entry may instead link to a proven anchor of its lost branch.
     if ((uint64_t)proof.height + proof.links > std::numeric_limits<uint32_t>::max() ||
-        !AnchorRecordedOnBranch(index, proof.height + proof.links, proof.link_end)) {
+        (!AnchorRecordedOnBranch(index, proof.height + proof.links, proof.link_end) &&
+         !(lost_anchors && lost_anchors->count({proof.height + proof.links, proof.link_end})))) {
         reason = in_block ? "bad-btcpay-not-in-anchor-chain" : "btcpay-not-in-anchor-chain";
         return BtcPayVerdict::INVALID;
     }
@@ -939,10 +942,11 @@ static BtcPayVerdict CheckInputBtcPaymentRecords(const CTransaction& tx, size_t 
 static BtcPayVerdict CheckTxBtcPaymentRecords(const CTransaction& tx, const CCoinsViewCache& view,
                                               const CBlockIndex* index, bool in_block,
                                               uint32_t anchor_height, const uint256& anchor_hash,
-                                              std::set<uint256>* proven_blocks, std::string& reason)
+                                              std::set<uint256>* proven_blocks, std::string& reason,
+                                              const std::set<std::pair<uint32_t, uint256>>* lost_anchors = nullptr)
 {
     for (size_t i = 0; i < tx.vin.size(); ++i) {
-        const BtcPayVerdict v = CheckInputBtcPaymentRecords(tx, i, view, index, in_block, anchor_height, proven_blocks, reason);
+        const BtcPayVerdict v = CheckInputBtcPaymentRecords(tx, i, view, index, in_block, anchor_height, proven_blocks, reason, lost_anchors);
         if (v != BtcPayVerdict::OK) return v;
     }
     return BtcPayVerdict::OK;
@@ -1700,8 +1704,12 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // SEQUENTIA: a spend that a lost block's transaction makes is refused
     // while the next block is bound by it (pos_lost.h).
     if (const CBlockIndex* lost_tip = m_active_chainstate.m_chain.Tip()) {
-        if (std::optional<uint256> lost = LostConflict(tx, lost_tip)) {
+        if (std::optional<uint256> lost = LostConflict(tx, lost_tip, m_active_chainstate.CoinsTip())) {
             return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-lost-conflict", lost->GetHex());
+        }
+        // A spend a record of this chain forbids could not enter the next block.
+        if (std::optional<uint256> bound = LostRecordedConflict(tx, lost_tip, lost_tip->m_anchor_height, m_active_chainstate.CoinsTip())) {
+            return state.Invalid(TxValidationResult::TX_CONFLICT, "txn-recorded-conflict", bound->GetHex());
         }
     }
 
@@ -3775,7 +3783,7 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
                                                                CCoinsViewCache& base, const CBlockIndex* prev,
                                                                const Consensus::Params& params,
                                                                std::vector<int64_t>* sigops,
-                                                               const std::map<COutPoint, uint256>* bound)
+                                                               const std::map<COutPoint, LostBoundSpend>* bound)
 {
     AssertLockHeld(cs_main);
     std::vector<std::pair<LostTxCat, std::string>> out;
@@ -3824,9 +3832,12 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
         // valid here until that binding lapses (doc 03, "The duty of a holder").
         if (bound && !bound->empty()) {
             bool held = false;
-            for (const CTxIn& in : tx.vin) {
-                auto b = bound->find(in.prevout);
-                if (b != bound->end() && b->second != tx.GetHash()) { held = true; break; }
+            for (size_t j = 0; j < tx.vin.size(); ++j) {
+                auto b = bound->find(tx.vin[j].prevout);
+                if (b == bound->end() || b->second.txid == tx.GetHash()) continue;
+                if (LostBindingYields(b->second.leaf, tx, j, view, prev)) continue;
+                held = true;
+                break;
             }
             if (held) { put(LostTxCat::LATER, "input bound by a record to another transaction"); continue; }
         }
@@ -3852,7 +3863,8 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
             std::string reason;
             if (CheckTxBtcPaymentRecords(tx, view, &next, /*in_block=*/true, next.m_anchor_height, next.m_anchor_hash,
                                          nullptr, reason) != BtcPayVerdict::OK) {
-                put(LostTxCat::FAILS, reason);
+                // A floor not reached yet opens as the chain grows.
+                put(reason == "bad-anchorlock-not-reached" ? LostTxCat::LATER : LostTxCat::FAILS, reason);
                 continue;
             }
         }
@@ -4367,6 +4379,167 @@ static void SetPosForkChoiceKeys(ChainstateManager& chainman, CBlockIndex* pinde
 /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
  *  can fail if those validity checks fail (among other reasons). */
+//! SEQUENTIA: what ConnectBlock checks of one non-coinbase transaction before its
+//! scripts, in one place, so that a lost-block record's entries are judged by the
+//! block's own rules (LostJudgeTxsInBlock). `add_checks` receives the queued
+//! amount checks as soon as CheckTxInputs passes. `lost_anchors`, for a record's
+//! entry only, are further anchors a payment proof may link to. On failure,
+//! `reason` and `debug` say why.
+static bool CheckTxForBlock(const CTransaction& tx, const CCoinsViewCache& view, const CBlockIndex* pindex, int lock_flags,
+                            const Consensus::Params& params, const std::vector<std::pair<CScript, CScript>>& fedpegscripts,
+                            CAmountMap& fee_map, std::set<std::pair<uint256, COutPoint>>& pegins_spent, bool parallel,
+                            bool cache_results, bool script_checks, const std::function<void(std::vector<CCheck*>&)>& add_checks,
+                            std::set<uint256>* proven_blocks, int64_t* btcpay_micros,
+                            const std::set<std::pair<uint32_t, uint256>>* lost_anchors, std::string& reason, std::string& debug)
+{
+    std::vector<CCheck*> vChecks;
+    TxValidationState tx_state;
+    if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, fee_map, pegins_spent,
+                                  parallel ? &vChecks : nullptr, cache_results, script_checks, fedpegscripts)) {
+        reason = tx_state.GetRejectReason();
+        debug = tx_state.GetDebugMessage();
+        return false;
+    }
+    add_checks(vChecks);
+
+    // SEQUENTIA two-step unbonding (params.h): stake leaves only through
+    // an unbonding output, which unlocks only after the checkpoint depth
+    // of parent-chain blocks has passed since the block that created it.
+    if (g_con_pos && params.PosUnbondingActiveAt(pindex->nHeight)) {
+        const bool by_anchor = g_con_bitcoin_anchor;
+        const int spend_anchor = by_anchor ? (int)pindex->m_anchor_height : pindex->nHeight;
+        const auto anchor_at = [pindex, by_anchor](int h) -> int {
+            const CBlockIndex* a = (h >= 0 && h <= pindex->nHeight) ? pindex->GetAncestor(h) : nullptr;
+            if (!a) return -1;
+            return by_anchor ? (int)a->m_anchor_height : h;
+        };
+        if (!CheckPosUnbondingTx(tx, view, spend_anchor, anchor_at, params.pos_unbond_anchor_depth, reason)) return false;
+    }
+
+    if (!MoneyRange(fee_map)) {
+        reason = "bad-txns-accumulated-fee-outofrange";
+        return false;
+    }
+
+    // Check that transaction is BIP68 final
+    // BIP68 lock checks (as opposed to nLockTime checks) must
+    // be in ConnectBlock because they require the UTXO set
+    std::vector<int> prevheights(tx.vin.size());
+    for (size_t j = 0; j < tx.vin.size(); j++) {
+        prevheights[j] = tx.vin[j].m_is_pegin ? -1 : (int)view.AccessCoin(tx.vin[j].prevout).nHeight;
+    }
+    if (!SequenceLocks(tx, lock_flags, prevheights, *pindex)) {
+        reason = "bad-txns-nonfinal";
+        return false;
+    }
+
+    // SEQUENTIA: the proof of a bitcoin payment and the anchor floor.
+    if (params.BtcPaymentActiveAt(pindex->nHeight)) {
+        const int64_t t_btcpay = GetTimeMicros();
+        const BtcPayVerdict v = CheckTxBtcPaymentRecords(tx, view, pindex, /*in_block=*/true, pindex->m_anchor_height,
+                                                         pindex->m_anchor_hash, proven_blocks, reason, lost_anchors);
+        if (btcpay_micros) *btcpay_micros += GetTimeMicros() - t_btcpay;
+        if (v != BtcPayVerdict::OK) return false;
+    }
+    return true;
+}
+
+std::vector<std::string> LostJudgeTxsInBlock(const std::vector<CTransactionRef>& txs, CCoinsViewCache& view,
+                                             const CBlockIndex* prev, uint32_t anchor_h, const uint256& anchor,
+                                             const std::set<std::pair<uint32_t, uint256>>& lost_anchors,
+                                             const std::map<COutPoint, LostBoundSpend>& bound)
+{
+    AssertLockHeld(cs_main);
+    const Consensus::Params& params = Params().GetConsensus();
+    CBlockIndex next;
+    next.pprev = const_cast<CBlockIndex*>(prev);
+    next.nHeight = prev->nHeight + 1;
+    next.m_anchor_height = anchor_h;
+    next.m_anchor_hash = anchor;
+    const int height = next.nHeight;
+    const int64_t cutoff = prev->GetMedianTimePast();
+    int lock_flags = 0;
+    if (DeploymentActiveAt(next, params, Consensus::DEPLOYMENT_CSV)) lock_flags |= LOCKTIME_VERIFY_SEQUENCE;
+    const unsigned int flags = GetBlockScriptFlags(&next, params);
+    const auto& fedpegscripts = GetValidFedpegScripts(prev, params, true);
+    PosRecordState records;
+    CAmountMap fee_map;
+    int64_t sigops = 0;
+    std::vector<std::string> out;
+    out.reserve(txs.size());
+    for (const CTransactionRef& ref : txs) {
+        const CTransaction& tx = *ref;
+        const auto verdict = [&]() -> std::string {
+            // CheckBlock and ContextualCheckBlock, of one transaction.
+            TxValidationState tx_state;
+            if (tx.IsCoinBase()) return "coinbase";
+            if (!CheckTransaction(tx, tx_state)) return tx_state.GetRejectReason();
+            if (!IsFinalTx(tx, height, cutoff)) return "bad-txns-nonfinal";
+            for (const CTxIn& in : tx.vin) if (in.m_is_pegin) return "peg-in";
+            for (size_t o = 0; o < tx.vout.size(); ++o) {
+                if (view.HaveCoin(COutPoint(tx.GetHash(), o))) return "bad-txns-BIP30";
+            }
+            for (size_t j = 0; j < tx.vin.size(); ++j) {
+                auto b = bound.find(tx.vin[j].prevout);
+                if (b == bound.end() || b->second.txid == tx.GetHash()) continue;
+                if (!LostBindingYields(b->second.leaf, tx, j, view, prev)) return "bad-txns-recorded-respend";
+            }
+            // ConnectBlock's transaction checks, fees accumulated over the run.
+            CAmountMap next_fees = fee_map;
+            std::set<std::pair<uint256, COutPoint>> pegins_spent;
+            std::string reason, debug;
+            if (!CheckTxForBlock(tx, view, &next, lock_flags, params, fedpegscripts, next_fees, pegins_spent, /*parallel=*/false,
+                                 /*cache_results=*/false, /*script_checks=*/true, [](std::vector<CCheck*>&) {}, nullptr, nullptr,
+                                 &lost_anchors, reason, debug)) {
+                return reason;
+            }
+            const int64_t cost = GetTransactionSigOpCost(tx, view, flags);
+            if (sigops + cost > MAX_BLOCK_SIGOPS_COST) return "bad-blk-sigops";
+            std::vector<Coin> spent;
+            for (const CTxIn& in : tx.vin) spent.push_back(view.AccessCoin(in.prevout));
+            PosRecordState next_records = records;
+            if (!PosCheckTxRecords(tx, spent, height, params, next_records, reason, debug)) return reason;
+            PrecomputedTransactionData txdata(params.hashGenesisBlock);
+            if (!CheckInputScripts(tx, tx_state, view, flags, false, false, txdata)) return tx_state.GetRejectReason();
+            sigops += cost;
+            fee_map = std::move(next_fees);
+            records = std::move(next_records);
+            CTxUndo undo;
+            UpdateCoins(tx, view, undo, height);
+            return "";
+        }();
+        out.push_back(verdict);
+    }
+    return out;
+}
+
+bool LostInputReadsRecords(const CTransaction& tx, size_t n, const CCoinsViewCache& view, const CBlockIndex* prev)
+{
+    AssertLockHeld(cs_main);
+    const Consensus::Params& params = Params().GetConsensus();
+    if (!prev || n >= tx.vin.size()) return false;
+    std::vector<CTxOut> spent;
+    spent.reserve(tx.vin.size());
+    for (const CTxIn& in : tx.vin) {
+        if (in.m_is_pegin) return false;
+        const Coin& coin = view.AccessCoin(in.prevout);
+        if (coin.IsSpent()) return false;
+        spent.push_back(coin.out);
+    }
+    const CTxOut spent_here = spent[n];
+    CBlockIndex next;
+    next.pprev = const_cast<CBlockIndex*>(prev);
+    next.nHeight = prev->nHeight + 1;
+    next.m_anchor_height = prev->m_anchor_height;
+    next.m_anchor_hash = prev->m_anchor_hash;
+    const unsigned int flags = GetBlockScriptFlags(&next, params);
+    if (!(flags & SCRIPT_VERIFY_BTCPAYMENT)) return false;
+    PrecomputedTransactionData txdata(params.hashGenesisBlock);
+    txdata.Init(tx, std::move(spent), /*force=*/true);
+    CScriptCheck check(spent_here, tx, n, flags | SCRIPT_VERIFY_BTCPAYMENT_RECORDS_READ, /*cacheIn=*/false, &txdata);
+    return check();
+}
+
 bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex,
                   CCoinsViewCache& view, std::set<std::pair<uint256, COutPoint>>* setPeginsSpent, bool fJustCheck, bool check_pos_rules)
 {
@@ -4464,7 +4637,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         return false;
     };
     bool lost_has_record = false;
-    if (check_pos_rules && !LostCheckRecords(block, pindex->pprev, fJustCheck, state, &lost_has_record)) {
+    if (check_pos_rules && !LostCheckRecords(block, pindex->pprev, fJustCheck, state, view, &lost_has_record)) {
         return error("%s: LostCheckRecords: %s", __func__, state.ToString());
     }
     // F10: blocks that carry a record are marked, so the bindings are rebuilt
@@ -4679,7 +4852,6 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         txsdata.push_back(PrecomputedTransactionData(m_params.HashGenesisBlock()));
     }
 
-    std::vector<int> prevheights;
     std::set<uint256> btcpay_blocks; // SEQUENTIA: distinct Bitcoin blocks proven in this block
     int64_t btcpay_micros = 0;
     CAmountMap fee_map;
@@ -4716,77 +4888,16 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
         if (!tx.IsCoinBase())
         {
-            std::vector<CCheck*> vChecks;
-            bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
-            TxValidationState tx_state;
-            if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, fee_map,
-                        setPeginsSpent == NULL ? setPeginsSpentDummy : *setPeginsSpent,
-                        g_parallel_script_checks ? &vChecks : NULL, fCacheResults, fScriptChecks, fedpegscripts)) {
+            std::string reason, debug;
+            if (!CheckTxForBlock(tx, view, pindex, nLockTimeFlags, m_params.GetConsensus(), fedpegscripts, fee_map,
+                                 setPeginsSpent == NULL ? setPeginsSpentDummy : *setPeginsSpent, g_parallel_script_checks,
+                                 /*cache_results=*/fJustCheck, fScriptChecks,
+                                 [&control](std::vector<CCheck*>& checks) { control.Add(checks); },
+                                 &btcpay_blocks, &btcpay_micros, /*lost_anchors=*/nullptr, reason, debug)) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
-                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
-                        tx_state.GetRejectReason(), tx_state.GetDebugMessage());
-                LogPrintf("ERROR: %s: Consensus::CheckTxInputs: %s, %s\n", __func__, tx.GetHash().ToString(), state.ToString());
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, debug);
+                LogPrintf("ERROR: %s: %s, %s\n", __func__, tx.GetHash().ToString(), state.ToString());
                 break;
-            }
-            control.Add(vChecks);
-
-            // SEQUENTIA two-step unbonding (params.h): stake leaves only through
-            // an unbonding output, which unlocks only after the checkpoint depth
-            // of parent-chain blocks has passed since the block that created it.
-            if (g_con_pos && m_params.GetConsensus().PosUnbondingActiveAt(pindex->nHeight)) {
-                const bool by_anchor = g_con_bitcoin_anchor;
-                const int spend_anchor = by_anchor ? (int)pindex->m_anchor_height : pindex->nHeight;
-                const auto anchor_at = [pindex, by_anchor](int h) -> int {
-                    const CBlockIndex* a = (h >= 0 && h <= pindex->nHeight) ? pindex->GetAncestor(h) : nullptr;
-                    if (!a) return -1;
-                    return by_anchor ? (int)a->m_anchor_height : h;
-                };
-                std::string reason;
-                if (!CheckPosUnbondingTx(tx, view, spend_anchor, anchor_at,
-                                         m_params.GetConsensus().pos_unbond_anchor_depth, reason)) {
-                    LogPrintf("ERROR: %s: %s in tx %s\n", __func__, reason, tx.GetHash().ToString());
-                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason);
-                    break;
-                }
-            }
-
-            if (!MoneyRange(fee_map)) {
-                LogPrintf("ERROR: %s: accumulated fee in the block out of range.\n", __func__);
-                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-accumulated-fee-outofrange");
-                break;
-            }
-
-            // Check that transaction is BIP68 final
-            // BIP68 lock checks (as opposed to nLockTime checks) must
-            // be in ConnectBlock because they require the UTXO set
-            prevheights.resize(tx.vin.size());
-            for (size_t j = 0; j < tx.vin.size(); j++) {
-                if (tx.vin[j].m_is_pegin) {
-                    prevheights[j] = -1;
-                } else {
-                    prevheights[j] = view.AccessCoin(tx.vin[j].prevout).nHeight;
-                }
-            }
-
-            if (!SequenceLocks(tx, nLockTimeFlags, prevheights, *pindex)) {
-                LogPrintf("ERROR: %s: contains a non-BIP68-final transaction\n", __func__);
-                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal");
-                break;
-            }
-
-            // SEQUENTIA: the proof of a bitcoin payment and the anchor floor.
-            if (m_params.GetConsensus().BtcPaymentActiveAt(pindex->nHeight)) {
-                std::string reason;
-                const int64_t t_btcpay = GetTimeMicros();
-                const BtcPayVerdict v = CheckTxBtcPaymentRecords(tx, view, pindex, /*in_block=*/true,
-                                                                 pindex->m_anchor_height, pindex->m_anchor_hash,
-                                                                 &btcpay_blocks, reason);
-                btcpay_micros += GetTimeMicros() - t_btcpay;
-                if (v != BtcPayVerdict::OK) {
-                    LogPrintf("ERROR: %s: %s in tx %s\n", __func__, reason, tx.GetHash().ToString());
-                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason);
-                    break;
-                }
             }
         }
 

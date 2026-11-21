@@ -5,6 +5,8 @@
 #include <pos_lost.h>
 
 #include <anchor.h>
+#include <arith_uint256.h>
+#include <btc_work.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <confidential_validation.h>
@@ -19,6 +21,8 @@
 #include <node/blockstorage.h>
 #include <pos.h>
 #include <rpc/protocol.h>
+#include <script/btcpayment.h>
+#include <script/interpreter.h>
 #include <streams.h>
 #include <sync.h>
 #include <txmempool.h>
@@ -71,6 +75,12 @@ struct LostBlk {
     //! Which loss this block belongs to: blocks disconnected together share it,
     //! and an earlier loss is carried before a later one.
     uint64_t epoch{0};
+    //! The Bitcoin headers from the best chain to this block's stale anchor,
+    //! parents first: what a record or a peer needs to check its work.
+    std::vector<std::vector<unsigned char>> btc;
+    //! Its anchor may seed its child's committee: on the chain, or a header
+    //! meeting Bitcoin's real difficulty there.
+    bool seed_ok{true};
     // Computed by each maintenance pass.
     AnchorState anchor_state{AnchorState::UNKNOWN};
     bool prot{false};
@@ -86,6 +96,7 @@ struct LostSpend {
     uint256 fork_hash;
     int fork_height;
     int height; //!< the lost block's height
+    uint256 leaf{}; //!< LostProofLeaf of the input, null when it never yields
 };
 
 Mutex g_lost_mutex;
@@ -191,10 +202,10 @@ void WriteFile() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
     if (!f) return;
     CAutoFile file(f, SER_DISK, PROTOCOL_VERSION);
     try {
-        file << (uint32_t)4 << (uint64_t)g_blocks.size() << g_epoch;
+        file << (uint32_t)5 << (uint64_t)g_blocks.size() << g_epoch;
         for (const auto& [h, b] : g_blocks) {
             file << *b.block << b.height << b.certified << b.own << b.epoch
-                 << b.prot << b.fork_hash << b.fork_height << (uint8_t)b.anchor_state;
+                 << b.prot << b.fork_hash << b.fork_height << (uint8_t)b.anchor_state << b.btc << b.seed_ok;
         }
         if (!FileCommit(file.Get())) return;
         file.fclose();
@@ -216,7 +227,7 @@ bool AppendJournal(const LostBlk& b) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
     if (!f) return false;
     CAutoFile file(f, SER_DISK, PROTOCOL_VERSION);
     try {
-        file << (uint32_t)4 << *b.block << b.height << b.certified << b.own << b.epoch;
+        file << (uint32_t)5 << *b.block << b.height << b.certified << b.own << b.epoch;
         return FileCommit(file.Get());
     } catch (const std::exception& e) {
         LogPrintf("Lost blocks: cannot append to %s: %s\n", fs::PathToString(JournalPath()), e.what());
@@ -254,7 +265,7 @@ bool Binds(const LostSpend& s, uint32_t anchor_h, const CBlockIndex* prev)
     return LostStillBinds(s.height, s.anchor_h, prev->nHeight + 1, anchor_h, prev);
 }
 
-std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockIndex* prev) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockIndex* prev, const CCoinsViewCache& view) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
 {
     if (g_spends.empty()) return std::nullopt;
     std::set<uint256> lost_txids;
@@ -265,13 +276,15 @@ std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockInde
         // A lost transaction is carried, not judged as a respend: which of two
         // conflicting lost transactions stands is the replay's order.
         if (lost_txids.count(txid)) continue;
-        for (const CTxIn& in : tx.vin) {
+        for (size_t n = 0; n < tx.vin.size(); ++n) {
+            const CTxIn& in = tx.vin[n];
             if (in.m_is_pegin) continue;
             auto it = g_spends.find(in.prevout);
             if (it == g_spends.end()) continue;
             for (const LostSpend& s : it->second) {
                 if (s.txid == txid) continue;
                 if (!Binds(s, block.m_anchor_height, prev)) continue;
+                if (LostBindingYields(s.leaf, tx, n, view, prev)) continue;
                 return strprintf("tx %s spends %s:%u, which tx %s of lost block %s (anchor %u, fork %d) spends",
                                  txid.ToString(), in.prevout.hash.ToString(), in.prevout.n, s.txid.ToString(),
                                  s.block.ToString(), s.anchor_h, s.fork_height);
@@ -302,6 +315,54 @@ std::optional<std::string> SignedViolationLocked(const CBlock& block, const CBlo
 }
 
 } // namespace
+
+uint256 LostProofLeaf(const CTransaction& tx, size_t n)
+{
+    if (n >= tx.vin.size() || tx.vin[n].m_is_pegin || tx.witness.vtxinwit.size() <= n) return uint256();
+    const CTxInWitness& wit = tx.witness.vtxinwit[n];
+    // A payment proof and no floor: records are 0x01 then 0x02, each at most once.
+    const auto& slot = wit.m_pegin_witness.stack;
+    if (slot.size() != 1 || slot[0].empty() || slot[0][0] != BtcPayment::RECORD_PAYMENT) return uint256();
+    const auto& st = wit.scriptWitness.stack;
+    size_t size = st.size();
+    if (size >= 2 && !st.back().empty() && st.back()[0] == ANNEX_TAG) --size;
+    if (size < 2) return uint256();
+    const std::vector<unsigned char>& control = st[size - 1];
+    const std::vector<unsigned char>& script = st[size - 2];
+    if (control.size() < TAPROOT_CONTROL_BASE_SIZE || control.size() > TAPROOT_CONTROL_MAX_SIZE ||
+        (control.size() - TAPROOT_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE != 0 ||
+        (control[0] & TAPROOT_LEAF_MASK) != TAPROOT_LEAF_TAPSCRIPT) {
+        return uint256();
+    }
+    // Consensus allows a proof no opcode reads; such a leaf never yields.
+    const CScript leaf(script.begin(), script.end());
+    CScript::const_iterator pc = leaf.begin();
+    opcodetype op;
+    bool reads = false;
+    while (pc < leaf.end()) {
+        if (!leaf.GetOp(pc, op)) return uint256();
+        if (op == OP_INSPECTBTCPAYMENT) reads = true;
+    }
+    if (!reads) return uint256();
+    CHashWriter h(SER_GETHASH, 0);
+    h << script << control;
+    return h.GetHash();
+}
+
+bool LostBindingYields(const uint256& bound_leaf, const CTransaction& tx, size_t n, const CCoinsViewCache& view,
+                       const CBlockIndex* prev)
+{
+    AssertLockHeld(::cs_main);
+    if (bound_leaf.IsNull() || n >= tx.vin.size()) return false;
+    const Coin& coin = view.AccessCoin(tx.vin[n].prevout);
+    int version;
+    std::vector<unsigned char> program;
+    if (coin.IsSpent() || !coin.out.scriptPubKey.IsWitnessProgram(version, program) || version != 1 || program.size() != 32) return false;
+    if (LostProofLeaf(tx, n) != bound_leaf) return false;
+    // Last, as it runs the script: the proof is read by an executed opcode, so
+    // a branch of the leaf that ignores it never passes a binding.
+    return LostInputReadsRecords(tx, n, view, prev);
+}
 
 bool LostActive()
 {
@@ -351,7 +412,7 @@ void LostInit()
         uint32_t version;
         uint64_t n;
         file >> version >> n;
-        if (version != 4) throw std::runtime_error("unknown version");
+        if (version != 5) throw std::runtime_error("unknown version");
         file >> g_epoch;
         for (uint64_t i = 0; i < n && i < POS_LOST_MAX_BLOCKS; ++i) {
             auto block = std::make_shared<CBlock>();
@@ -362,8 +423,12 @@ void LostInit()
             uint256 fork_hash;
             int fork_height;
             uint8_t anchor_state;
-            file >> *block >> height >> certified >> own >> epoch >> prot >> fork_hash >> fork_height >> anchor_state;
+            std::vector<std::vector<unsigned char>> btc;
+            bool seed_ok;
+            file >> *block >> height >> certified >> own >> epoch >> prot >> fork_hash >> fork_height >> anchor_state >> btc >> seed_ok;
             LostBlk b = MakeBlk(block, height);
+            b.btc = std::move(btc);
+            b.seed_ok = seed_ok;
             b.prot = prot;
             b.fork_hash = fork_hash;
             b.fork_height = fork_height;
@@ -375,13 +440,14 @@ void LostInit()
         }
         // The duty holds from the first block this node judges after a
         // restart, before any maintenance pass: the bound spends as written.
+        // Evidence binds only what the next maintenance pass finds valid here.
         for (const auto& [h, b] : g_blocks) {
-            if (!b.prot) continue;
+            if (!b.prot || !b.own) continue;
             for (size_t i = 1; i < b.block->vtx.size(); ++i) {
                 const CTransaction& tx = *b.block->vtx[i];
-                for (const CTxIn& in : tx.vin) {
-                    if (in.m_is_pegin) continue;
-                    g_spends[in.prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height, b.height});
+                for (size_t n = 0; n < tx.vin.size(); ++n) {
+                    if (tx.vin[n].m_is_pegin) continue;
+                    g_spends[tx.vin[n].prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height, b.height, LostProofLeaf(tx, n)});
                 }
             }
         }
@@ -400,7 +466,7 @@ void LostInit()
             while (g_blocks.size() < POS_LOST_MAX_BLOCKS) {
                 uint32_t version;
                 file >> version;
-                if (version != 4) break;
+                if (version != 5) break;
                 auto block = std::make_shared<CBlock>();
                 int height;
                 bool certified, own;
@@ -511,18 +577,18 @@ std::optional<CBlockHeader> DeserHeader(const std::vector<unsigned char>& b)
     }
 }
 
-std::vector<unsigned char> SerTxNoWitness(const CTransaction& tx)
+std::vector<unsigned char> SerTx(const CTransaction& tx)
 {
-    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
     ss << tx;
     const auto sp = MakeUCharSpan(ss);
     return {sp.begin(), sp.end()};
 }
 
-std::optional<CTransactionRef> DeserTxNoWitness(const std::vector<unsigned char>& b)
+std::optional<CTransactionRef> DeserTx(const std::vector<unsigned char>& b)
 {
     try {
-        CDataStream ss(b, SER_NETWORK, PROTOCOL_VERSION | SERIALIZE_TRANSACTION_NO_WITNESS);
+        CDataStream ss(b, SER_NETWORK, PROTOCOL_VERSION);
         CMutableTransaction mtx;
         ss >> mtx;
         if (!ss.empty()) return std::nullopt;
@@ -548,6 +614,7 @@ struct Binding {
     uint256 txid;
     int height{0};          //!< the lost block's height
     uint32_t anchor_h{0};   //!< the lost block's anchor height
+    uint256 leaf;           //!< LostProofLeaf of the recorded input
 };
 
 //! Bindings of the records in blocks of the active chain, by block hash.
@@ -561,11 +628,12 @@ std::vector<Binding> BindingsOf(const LostRecord& r)
     for (const LostRecordEntry& e : r.entries) {
         if (e.k >= r.lost.size()) continue;
         auto h = DeserHeader(r.lost[e.k]);
-        auto tx = DeserTxNoWitness(e.tx);
+        auto tx = DeserTx(e.tx);
         if (!h || !tx) continue;
-        for (const CTxIn& in : (*tx)->vin) {
+        for (size_t n = 0; n < (*tx)->vin.size(); ++n) {
+            const CTxIn& in = (*tx)->vin[n];
             if (in.m_is_pegin) continue;
-            out.push_back(Binding{in.prevout, (*tx)->GetHash(), (int)h->block_height, h->m_anchor_height});
+            out.push_back(Binding{in.prevout, (*tx)->GetHash(), (int)h->block_height, h->m_anchor_height, LostProofLeaf(**tx, n)});
         }
     }
     return out;
@@ -607,9 +675,9 @@ void LoadRecorded(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 }
 
 //! Every binding of `prev`'s chain still in force for its child anchored at `anchor_h`.
-std::map<COutPoint, uint256> ChainBindings(const CBlockIndex* prev, uint32_t anchor_h) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+std::map<COutPoint, LostBoundSpend> ChainBindings(const CBlockIndex* prev, uint32_t anchor_h) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    std::map<COutPoint, uint256> out;
+    std::map<COutPoint, LostBoundSpend> out;
     if (g_recorded.empty() || !prev) return out;
     const int height = prev->nHeight + 1;
     for (const CBlockIndex* p = prev; p && RecordReach(p, prev, height, anchor_h); p = p->pprev) {
@@ -617,10 +685,57 @@ std::map<COutPoint, uint256> ChainBindings(const CBlockIndex* prev, uint32_t anc
         auto it = g_recorded.find(p->GetBlockHash());
         if (it == g_recorded.end()) continue;
         for (const Binding& b : it->second) {
-            if (LostStillBinds(b.height, b.anchor_h, height, anchor_h, prev)) out.emplace(b.o, b.txid);
+            if (LostStillBinds(b.height, b.anchor_h, height, anchor_h, prev)) out.emplace(b.o, LostBoundSpend{b.txid, b.leaf});
         }
     }
     return out;
+}
+
+//! What the daemon says of one Bitcoin header. A header's fields and height
+//! are facts of its hash, so a reading is kept and reused, bounded.
+std::optional<BtcWork::Ancestor> BtcHeaderInfo(const uint256& hash)
+{
+    static Mutex memo_mutex;
+    static std::map<uint256, BtcWork::Ancestor> memo GUARDED_BY(memo_mutex);
+    {
+        LOCK(memo_mutex);
+        auto it = memo.find(hash);
+        if (it != memo.end()) return it->second;
+    }
+    BtcWork::Ancestor a;
+    a.hash = hash;
+    try {
+        UniValue p(UniValue::VARR);
+        p.push_back(hash.GetHex());
+        const UniValue reply = CallMainChainRPC("getblockheader", p);
+        if (!find_value(reply, "error").isNull()) return std::nullopt;
+        const UniValue r = find_value(reply, "result");
+        if (!r.isObject()) return std::nullopt;
+        const UniValue hv = find_value(r.get_obj(), "height");
+        const UniValue tv = find_value(r.get_obj(), "time");
+        const UniValue bv = find_value(r.get_obj(), "bits");
+        if (!hv.isNum() || !tv.isNum() || !bv.isStr()) return std::nullopt;
+        a.height = (uint32_t)hv.get_int64();
+        a.time = (uint32_t)tv.get_int64();
+        a.bits = (uint32_t)std::stoul(bv.get_str(), nullptr, 16);
+        const UniValue prev = find_value(r.get_obj(), "previousblockhash");
+        if (prev.isStr()) a.prev = uint256S(prev.get_str());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    LOCK(memo_mutex);
+    if (memo.size() > 6000) memo.clear();
+    memo[hash] = a;
+    return a;
+}
+
+//! The parent network whose difficulty rule this chain's anchors follow.
+BtcWork::Net ParentNet()
+{
+    const std::string chain = gArgs.GetChainName();
+    if (chain == "sequentia") return BtcWork::Net::MAIN;
+    if (chain == CBaseChainParams::TESTNET) return BtcWork::Net::TESTNET4;
+    return BtcWork::Net::REGTEST;
 }
 
 //! P1: the hashes of `anchor`'s ancestors (and itself) at heights from
@@ -629,41 +744,102 @@ std::map<COutPoint, uint256> ChainBindings(const CBlockIndex* prev, uint32_t anc
 //! daemon does not know `anchor` or does not answer (soft, never a verdict).
 std::optional<std::map<uint32_t, uint256>> AnchorAncestry(const uint256& anchor, uint32_t anchor_h, uint32_t from_h)
 {
-    static Mutex cache_mutex;
-    static std::map<std::pair<uint256, uint32_t>, std::map<uint32_t, uint256>> cache GUARDED_BY(cache_mutex);
     if (from_h > anchor_h) return std::map<uint32_t, uint256>{};
-    {
-        LOCK(cache_mutex);
-        auto it = cache.find({anchor, from_h});
-        if (it != cache.end()) return it->second;
-    }
     std::map<uint32_t, uint256> out;
     uint256 h = anchor;
-    try {
-        for (uint32_t height = anchor_h;; --height) {
-            UniValue p(UniValue::VARR);
-            p.push_back(h.GetHex());
-            const UniValue reply = CallMainChainRPC("getblockheader", p);
-            if (!find_value(reply, "error").isNull()) return std::nullopt;
-            const UniValue r = find_value(reply, "result");
-            if (!r.isObject()) return std::nullopt;
-            const UniValue hv = find_value(r.get_obj(), "height");
-            // A header at another height than its anchor claims is not this
-            // anchor's chain: R3 refuses it; nothing to say here.
-            if (!hv.isNum() || hv.get_int64() != (int64_t)height) return std::nullopt;
-            out[height] = h;
-            if (height == from_h) break;
-            const UniValue prev = find_value(r.get_obj(), "previousblockhash");
-            if (!prev.isStr()) return std::nullopt;
-            h = uint256S(prev.get_str());
-        }
-    } catch (const std::exception&) {
-        return std::nullopt;
+    for (uint32_t height = anchor_h;; --height) {
+        const std::optional<BtcWork::Ancestor> a = BtcHeaderInfo(h);
+        // A header at another height than its anchor claims is not this
+        // anchor's chain: R3 refuses it; nothing to say here.
+        if (!a || a->height != height) return std::nullopt;
+        out[height] = h;
+        if (height == from_h) break;
+        h = a->prev;
     }
-    LOCK(cache_mutex);
-    if (cache.size() > 64) cache.clear();
-    cache[{anchor, from_h}] = out;
     return out;
+}
+
+//! Rule 2 of a record (doc 03, "Records and bindings"): every anchor of the
+//! lost headers up to `top_k` is on `ancestry`, or is a carried Bitcoin header
+//! that links to it and meets Bitcoin's target. `seed_ok[k]` says whether
+//! header k's anchor may seed header k+1's committee. Empty when proven; `soft`
+//! when the daemon could not read an ancestor the rule needs.
+std::string ProveLostAnchors(const std::vector<std::vector<unsigned char>>& carried, const std::vector<CBlockHeader>& lost,
+                             size_t top_k, const std::map<uint32_t, uint256>& ancestry, std::vector<char>& seed_ok, bool& soft)
+{
+    if (carried.size() > 2 * (size_t)g_window) return "btc-too-many-headers";
+    std::map<uint256, uint32_t> on_chain;
+    for (const auto& [h, x] : ancestry) on_chain[x] = h;
+    std::map<uint256, BtcWork::Ancestor> shown;
+    std::map<uint256, bool> real;
+    const BtcWork::Lookup lookup = [&](const uint256& hash) -> std::optional<BtcWork::Ancestor> {
+        auto it = shown.find(hash);
+        if (it != shown.end()) return it->second;
+        return BtcHeaderInfo(hash);
+    };
+    for (const auto& bytes : carried) {
+        if (bytes.size() != 80) return "btc-header-size";
+        Sidechain::Bitcoin::CBlockHeader hdr;
+        try {
+            CDataStream hs(bytes, SER_NETWORK, PROTOCOL_VERSION);
+            hs >> hdr;
+        } catch (const std::exception&) {
+            return "btc-header-decode";
+        }
+        uint32_t parent_h;
+        if (auto c = shown.find(hdr.hashPrevBlock); c != shown.end()) {
+            parent_h = c->second.height;
+        } else if (auto o = on_chain.find(hdr.hashPrevBlock); o != on_chain.end()) {
+            parent_h = o->second;
+        } else {
+            return "btc-header-unlinked";
+        }
+        const BtcWork::Verdict v = BtcWork::Judge(ParentNet(), hdr, parent_h + 1, lookup);
+        if (v.state == BtcWork::State::UNANSWERED) { soft = true; return "bitcoin-unanswered"; }
+        if (v.state != BtcWork::State::OK) return v.why;
+        const uint256 hash = hdr.GetHash();
+        shown[hash] = BtcWork::Ancestor{hash, hdr.hashPrevBlock, parent_h + 1, hdr.nTime, hdr.nBits};
+        real[hash] = v.real;
+    }
+    seed_ok.assign(lost.size(), 0);
+    for (size_t i = 0; i <= top_k && i < lost.size(); ++i) {
+        const uint256& a = lost[i].m_anchor_hash;
+        if (auto o = on_chain.find(a); o != on_chain.end() && o->second == lost[i].m_anchor_height) {
+            seed_ok[i] = 1;
+        } else if (auto c = shown.find(a); c != shown.end() && c->second.height == lost[i].m_anchor_height) {
+            seed_ok[i] = real[a] ? 1 : 0;
+        } else {
+            return "lost-anchor-unproven";
+        }
+    }
+    return "";
+}
+
+//! A certificate's seats under the registry at `fork_hash`, for a parent with
+//! this anchor: verified once. The key is the header's whole bytes, the parent's
+//! height and anchor, and the fork point that fixes the registry, so a verdict
+//! is never reused for another header, registry or parent.
+int CertSeatsCached(const CBlockHeader& h, const CBlockIndex* parent, const uint256& fork_hash, const StakeRegistry& reg,
+                    std::string& reason)
+{
+    static Mutex cert_mutex;
+    static std::map<uint256, std::pair<int, std::string>> certs GUARDED_BY(cert_mutex);
+    CHashWriter key(SER_GETHASH, 0);
+    key << SerHeader(h) << parent->nHeight << parent->m_anchor_height << parent->m_anchor_hash << fork_hash;
+    const uint256 id = key.GetHash();
+    {
+        LOCK(cert_mutex);
+        auto it = certs.find(id);
+        if (it != certs.end()) {
+            reason = it->second.second;
+            return it->second.first;
+        }
+    }
+    const int seats = PosVerifyBitfieldCertificate(h, parent, reg, reason);
+    LOCK(cert_mutex);
+    if (certs.size() >= 4096) certs.clear();
+    certs[id] = {seats, reason};
+    return seats;
 }
 
 //! The stake registry as it stood at `fork`, the registry the committee of
@@ -704,13 +880,15 @@ std::shared_ptr<const StakeRegistry> RegistryAt(const CBlockIndex* fork, const C
 //! change inside the lost branch is not in it, so a header after one does not
 //! verify and its entries fall back to the holders). Header 0's committee is
 //! seeded from the fork point's anchor (on the chain), each later one's from
-//! its verified predecessor's anchor, so no committee is seeded by a value an
-//! author chooses, and none counts a key registered after its seed was
-//! public. `top` is the block the live registry mirrors. Returns how many
-//! headers, from the first, carry such a certificate; `why` says why the next
-//! does not, and `soft` is set when the registry could not be rebuilt.
-size_t CertifiedPrefix(const std::vector<CBlockHeader>& lost, const CBlockIndex* fork, const CBlockIndex* top, std::string& why,
-                       bool& soft) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+//! its verified predecessor's anchor, and only when that anchor may seed
+//! (`seed_ok`: on the judged block's ancestry, or a carried header meeting the
+//! real difficulty), so no committee is seeded by a value an author chooses
+//! without a Bitcoin block's work, and none counts a key registered after its
+//! seed was public. `top` is the block the live registry mirrors. Returns how
+//! many headers, from the first, carry such a certificate; `why` says why the
+//! next does not, and `soft` is set when the registry could not be rebuilt.
+size_t CertifiedPrefix(const std::vector<CBlockHeader>& lost, const std::vector<char>& seed_ok, const CBlockIndex* fork,
+                       const CBlockIndex* top, std::string& why, bool& soft) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     const std::shared_ptr<const StakeRegistry> at_fork = RegistryAt(fork, top);
     if (!at_fork) {
@@ -723,13 +901,17 @@ size_t CertifiedPrefix(const std::vector<CBlockHeader>& lost, const CBlockIndex*
         CBlockIndex parent_view;
         const CBlockIndex* parent = fork;
         if (k > 0) {
+            if (!seed_ok[k - 1]) {
+                why = strprintf("lost header %u is seeded by an anchor below Bitcoin's real difficulty", (unsigned)k);
+                return k;
+            }
             parent_view.nHeight = fork->nHeight + (int)k;
             parent_view.m_anchor_height = lost[k - 1].m_anchor_height;
             parent_view.m_anchor_hash = lost[k - 1].m_anchor_hash;
             parent = &parent_view;
         }
         std::string reason;
-        const int seats = PosVerifyBitfieldCertificate(lost[k], parent, reg, reason);
+        const int seats = CertSeatsCached(lost[k], parent, fork->GetBlockHash(), reg, reason);
         if (seats < 0 || seats < PosSlotQuorumAt(reg, fork->nHeight + 1 + (int)k)) {
             why = strprintf("certificate of lost header %u %s", (unsigned)k, reason.empty() ? "below the quorum" : reason);
             return k;
@@ -740,12 +922,15 @@ size_t CertifiedPrefix(const std::vector<CBlockHeader>& lost, const CBlockIndex*
 
 //! Judge one record for a block at `prev`'s child anchored at `anchor_h` /
 //! `anchor`. Empty when valid; `soft` when the Bitcoin daemon could not say
-//! what `anchor`'s ancestry is (the block is left aside and retried).
+//! what `anchor`'s ancestry is (the block is left aside and retried). `view`
+//! holds the coins at `prev` and whatever earlier records of the block spent;
+//! `bound` is the chain's bindings in force for this block.
 std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const uint256& anchor, const CBlockIndex* prev, bool& soft,
-                        std::vector<Binding>& bindings) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                        std::vector<Binding>& bindings, CCoinsViewCache& view,
+                        const std::map<COutPoint, LostBoundSpend>& bound) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     soft = false;
-    if (r.version != 2) return "version";
+    if (r.version != 3) return "version";
     if (r.lost.empty() || r.entries.empty()) return "empty";
     if (r.lost.size() > (size_t)LOST_MAX_BRANCH) return "branch-too-long";
     std::vector<CBlockHeader> lost;
@@ -780,46 +965,55 @@ std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const uint256& a
         if (e.pos == 0) return "entry-coinbase";
         // F7: the position names a leaf of a tree of exactly this depth.
         if (e.branch.size() > 31 || (uint64_t)e.pos >= ((uint64_t)1 << e.branch.size())) return "entry-position";
-        auto tx = DeserTxNoWitness(e.tx);
+        auto tx = DeserTx(e.tx);
         if (!tx) return "entry-tx-decode";
         if (MerkleFromBranch((*tx)->GetHash(), e.branch, e.pos) != lost[e.k].hashMerkleRoot) return "entry-merkle";
         if (!LostStillBinds((int)lost[e.k].block_height, lost[e.k].m_anchor_height, prev->nHeight + 1, anchor_h, prev)) return "past-window";
         top_k = std::max(top_k, e.k);
         txs.push_back(*tx);
     }
+    // Rule 2: every lost anchor up to the highest entry is on B's anchor
+    // ancestry, or is a carried Bitcoin header with the work Bitcoin requires.
+    const uint32_t from_h = fork->m_anchor_height;
+    const std::optional<std::map<uint32_t, uint256>> ancestry = AnchorAncestry(anchor, anchor_h, from_h);
+    if (!ancestry) { soft = true; return "bitcoin-unanswered"; }
+    std::vector<char> seed_ok;
+    const std::string unproven = ProveLostAnchors(r.btc, lost, top_k, *ancestry, seed_ok, soft);
+    if (!unproven.empty()) return unproven;
     // Certificates (2b-i): every header up to the highest entry, in order.
     std::string why;
-    if (CertifiedPrefix(std::vector<CBlockHeader>(lost.begin(), lost.begin() + top_k + 1), fork, prev, why, soft) <= top_k) return why;
+    if (CertifiedPrefix(std::vector<CBlockHeader>(lost.begin(), lost.begin() + top_k + 1), seed_ok, fork, prev, why, soft) <= top_k) return why;
     // P1: a header at or below each entry whose anchor is at most B's anchor
-    // height and is not B's anchor's ancestor there. Heights from F's anchor.
-    const uint32_t from_h = fork->m_anchor_height;
-    std::optional<std::map<uint32_t, uint256>> ancestry;
-    bool asked = false;
-    const auto off = [&](size_t i) -> std::optional<bool> {
-        const uint32_t ah = lost[i].m_anchor_height;
-        if (ah > anchor_h) return false; // above B's anchor: not shown off its chain
-        if (!asked) { ancestry = AnchorAncestry(anchor, anchor_h, from_h); asked = true; }
-        if (!ancestry) return std::nullopt;
-        auto it = ancestry->find(ah);
-        if (it == ancestry->end()) return std::nullopt;
-        return it->second != lost[i].m_anchor_hash;
-    };
-    std::vector<int> first_off(lost.size(), -1);
+    // height and is not B's anchor's ancestor there.
+    std::vector<int> first_off(top_k + 1, -1);
     int seen = -1;
-    for (size_t i = 0; i < lost.size(); ++i) {
-        if (seen < 0) {
-            auto v = off(i);
-            if (!v) { soft = true; return "bitcoin-unanswered"; }
-            if (*v) seen = (int)i;
+    for (size_t i = 0; i <= top_k; ++i) {
+        if (seen < 0 && lost[i].m_anchor_height <= anchor_h) {
+            auto it = ancestry->find(lost[i].m_anchor_height);
+            if (it == ancestry->end()) { soft = true; return "bitcoin-unanswered"; }
+            if (it->second != lost[i].m_anchor_hash) seen = (int)i;
         }
         first_off[i] = seen;
     }
+    for (const LostRecordEntry& e : r.entries) {
+        if (first_off[e.k] < 0) return "not-lost";
+    }
+    // Rule 1: each entry is valid in this block, in order, by the block's own
+    // transaction checks, with one exception: its payment proof may link to a
+    // proven anchor of this branch. `view` then holds what it spent and made,
+    // for the record after it.
+    std::set<std::pair<uint32_t, uint256>> lost_anchors;
+    for (size_t i = 0; i <= top_k; ++i) lost_anchors.insert({lost[i].m_anchor_height, lost[i].m_anchor_hash});
+    const std::vector<std::string> verdicts = LostJudgeTxsInBlock(txs, view, prev, anchor_h, anchor, lost_anchors, bound);
+    for (size_t j = 0; j < txs.size(); ++j) {
+        if (!verdicts[j].empty()) return "entry-not-valid-here: " + verdicts[j];
+    }
     for (size_t j = 0; j < r.entries.size(); ++j) {
         const LostRecordEntry& e = r.entries[j];
-        if (first_off[e.k] < 0) return "not-lost";
-        for (const CTxIn& in : txs[j]->vin) {
+        for (size_t n = 0; n < txs[j]->vin.size(); ++n) {
+            const CTxIn& in = txs[j]->vin[n];
             if (in.m_is_pegin) continue;
-            bindings.push_back(Binding{in.prevout, txs[j]->GetHash(), (int)lost[e.k].block_height, lost[e.k].m_anchor_height});
+            bindings.push_back(Binding{in.prevout, txs[j]->GetHash(), (int)lost[e.k].block_height, lost[e.k].m_anchor_height, LostProofLeaf(*txs[j], n)});
         }
     }
     return "";
@@ -851,7 +1045,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     }
     if (blocks.empty()) return plan;
     std::sort(blocks.begin(), blocks.end(), [](const LostBlk* a, const LostBlk* b) {
-        return std::tie(a->epoch, a->height) < std::tie(b->epoch, b->height);
+        return std::tie(a->epoch, a->height, a->hash) < std::tie(b->epoch, b->height, b->hash);
     });
     std::vector<CTransactionRef> txs;
     std::vector<std::pair<const LostBlk*, uint32_t>> where;
@@ -869,7 +1063,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     const auto bound = ChainBindings(prev, anchor_h);
     const auto classes = LostClassifyTxs(txs, view, prev, consensus, &sigops, &bound);
     std::set<uint256> bound_txids;
-    for (const auto& [o, t] : bound) bound_txids.insert(t);
+    for (const auto& [o, t] : bound) bound_txids.insert(t.txid);
     // The branch of a store block from its fork point's child, or empty.
     const auto branch_of = [&](const LostBlk* top) {
         std::vector<const LostBlk*> path;
@@ -883,6 +1077,19 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
         if (path.empty() || path.front()->prev != top->fork_hash) path.clear();
         return path;
     };
+    // An entry's bytes, made once per transaction.
+    std::map<std::pair<const LostBlk*, uint32_t>, LostRecordEntry> made;
+    const auto entry_of = [&](const LostBlk* b, uint32_t pos) -> const LostRecordEntry& {
+        auto it = made.find({b, pos});
+        if (it != made.end()) return it->second;
+        std::vector<uint256> leaves;
+        for (const auto& tx : b->block->vtx) leaves.push_back(tx->GetHash());
+        LostRecordEntry e;
+        e.pos = pos;
+        e.branch = MerkleBranch(leaves, pos);
+        e.tx = SerTx(*b->block->vtx[pos]);
+        return made.emplace(std::make_pair(b, pos), std::move(e)).first->second;
+    };
     // The records, one per lost branch, of the given entries.
     const auto build_records = [&](const std::vector<std::pair<const LostBlk*, uint32_t>>& entries) {
         std::map<uint256, std::vector<std::pair<const LostBlk*, uint32_t>>> by_fork;
@@ -893,18 +1100,20 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
             const LostBlk* t = items.front().first;
             for (const auto& [b, pos] : items) if (b->height > t->height) t = b;
             std::map<const LostBlk*, uint32_t> index;
+            // The stale Bitcoin headers of the branch, parents first.
+            std::map<std::pair<uint32_t, uint256>, std::vector<unsigned char>> stale;
             for (const LostBlk* w : branch_of(t)) {
                 index[w] = rec.lost.size();
                 rec.lost.push_back(SerHeader(w->block->GetBlockHeader()));
+                for (size_t i = 0; i < w->btc.size(); ++i) {
+                    const uint32_t h = w->anchor_h - (uint32_t)(w->btc.size() - 1 - i);
+                    stale.emplace(std::make_pair(h, Hash(w->btc[i])), w->btc[i]);
+                }
             }
+            for (auto& [key, bytes] : stale) rec.btc.push_back(bytes);
             for (const auto& [b, pos] : items) {
-                std::vector<uint256> leaves;
-                for (const auto& tx : b->block->vtx) leaves.push_back(tx->GetHash());
-                LostRecordEntry e;
+                LostRecordEntry e = entry_of(b, pos);
                 e.k = index[b];
-                e.pos = pos;
-                e.branch = MerkleBranch(leaves, pos);
-                e.tx = SerTxNoWitness(*b->block->vtx[pos]);
                 rec.entries.push_back(std::move(e));
             }
             out.push_back(std::move(rec));
@@ -936,7 +1145,8 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
             if (recs.size() != 1 || recs[0].lost.empty()) break;
             bool soft = false;
             std::vector<Binding> ignored;
-            const std::string why = JudgeRecord(recs[0], anchor_h, anchor, prev, soft, ignored);
+            CCoinsViewCache scratch(&view);
+            const std::string why = JudgeRecord(recs[0], anchor_h, anchor, prev, soft, ignored, scratch, bound);
             if (!why.empty()) {
                 LogPrint(BCLog::VALIDATION, "Lost blocks: %s cannot be recorded in a block anchored at %u on %s: %s\n",
                          txs[i]->GetHash().ToString(), anchor_h, prev->GetBlockHash().ToString(), why);
@@ -961,20 +1171,35 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     // the recordable transactions whose records fit the block's record bytes.
     // The rest is owed by the next block.
     std::vector<std::pair<const LostBlk*, uint32_t>> chosen;
-    for (const auto& e : recordable) {
-        chosen.push_back(e);
-        if (bytes_of(chosen) > LOST_RECORD_MAX_BYTES) {
-            chosen.pop_back();
-            break;
+    {
+        // Two entries that spend one coin cannot both be valid in one block:
+        // the first in lost order stands.
+        std::set<COutPoint> taken;
+        for (const auto& e : recordable) {
+            const CTransaction& t = *e.first->block->vtx[e.second];
+            bool clash = false;
+            for (const CTxIn& in : t.vin) clash = clash || taken.count(in.prevout);
+            if (clash) continue;
+            for (const CTxIn& in : t.vin) taken.insert(in.prevout);
+            chosen.push_back(e);
         }
+        // The size grows with the run, so the longest that fits is a search.
+        size_t lo = 0, hi = chosen.size();
+        while (lo < hi) {
+            const size_t mid = lo + (hi - lo + 1) / 2;
+            const std::vector<std::pair<const LostBlk*, uint32_t>> run(chosen.begin(), chosen.begin() + mid);
+            if (bytes_of(run) <= LOST_RECORD_MAX_BYTES) lo = mid; else hi = mid - 1;
+        }
+        chosen.resize(lo);
     }
     // The whole set, judged as the block will be: if it would not be valid,
     // owe nothing rather than demand an invalid block.
     if (!chosen.empty()) {
         std::vector<Binding> ignored;
+        CCoinsViewCache scratch(&view);
         for (const LostRecord& r : build_records(chosen)) {
             bool soft = false;
-            const std::string why = JudgeRecord(r, anchor_h, anchor, prev, soft, ignored);
+            const std::string why = JudgeRecord(r, anchor_h, anchor, prev, soft, ignored, scratch, bound);
             if (!why.empty()) {
                 LogPrintf("Lost blocks: the records owed on %s would not be valid (%s); none is owed\n", prev->GetBlockHash().ToString(), why);
                 chosen.clear();
@@ -1089,7 +1314,7 @@ bool LostIsRefusal(const std::string& reason)
 }
 
 bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool just_check, BlockValidationState& state,
-                      bool* has_record)
+                      CCoinsViewCache& view, bool* has_record)
 {
     AssertLockHeld(::cs_main);
     if (has_record) *has_record = false;
@@ -1100,28 +1325,35 @@ bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool j
     LoadRecorded(pindexPrev);
     std::vector<Binding> mine;
     size_t bytes = 0;
+    // The bindings already in force, and the coins as this block's records
+    // leave them, so each record's entries are judged after the ones before.
+    std::map<COutPoint, LostBoundSpend> bound = ChainBindings(pindexPrev, block.m_anchor_height);
+    CCoinsViewCache records_view(&view);
     for (const auto& r : LostParseRecords(block)) {
         if (!r) return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-lost-record", "malformed");
         bytes += GetSerializeSize(*r, PROTOCOL_VERSION);
         if (bytes > LOST_RECORD_MAX_BYTES) return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-lost-record", "too large");
         bool soft = false;
-        const std::string why = JudgeRecord(*r, block.m_anchor_height, block.m_anchor_hash, pindexPrev, soft, mine);
+        const std::string why = JudgeRecord(*r, block.m_anchor_height, block.m_anchor_hash, pindexPrev, soft, mine, records_view, bound);
         if (!why.empty()) {
             LogPrintf("Lost blocks: block %s carries a record that is not valid: %s\n", block.GetHash().ToString(), why);
             if (soft) return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "lost-record-unverifiable", why);
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-lost-record", why);
         }
     }
-    std::map<COutPoint, uint256> bound = ChainBindings(pindexPrev, block.m_anchor_height);
-    for (const Binding& b : mine) bound.emplace(b.o, b.txid);
+    for (const Binding& b : mine) bound.emplace(b.o, LostBoundSpend{b.txid, b.leaf});
     if (!bound.empty()) {
+        // Coins this block's own transactions created cannot be bound yet, so
+        // every bound input it spends is in the parent's view.
         for (size_t i = 1; i < block.vtx.size(); ++i) {
             const CTransaction& tx = *block.vtx[i];
-            for (const CTxIn& in : tx.vin) {
+            for (size_t n = 0; n < tx.vin.size(); ++n) {
+                const CTxIn& in = tx.vin[n];
                 auto it = bound.find(in.prevout);
-                if (it == bound.end() || it->second == tx.GetHash()) continue;
+                if (it == bound.end() || it->second.txid == tx.GetHash()) continue;
+                if (LostBindingYields(it->second.leaf, tx, n, view, pindexPrev)) continue;
                 const std::string why = strprintf("tx %s spends %s:%u, which recorded tx %s spends", tx.GetHash().ToString(),
-                                                  in.prevout.hash.ToString(), in.prevout.n, it->second.ToString());
+                                                  in.prevout.hash.ToString(), in.prevout.n, it->second.txid.ToString());
                 LogPrintf("Lost blocks: block %s breaks a record: %s\n", block.GetHash().ToString(), why);
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-recorded-respend", why);
             }
@@ -1162,7 +1394,7 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
     LOCK(g_lost_mutex);
     std::optional<std::string> why;
     std::string reason;
-    if ((why = ViolationLocked(block, pindexPrev))) {
+    if ((why = ViolationLocked(block, pindexPrev, view))) {
         reason = "bad-txns-lost-respend";
     } else if ((why = SignedViolationLocked(block, pindexPrev))) {
         reason = "bad-txns-signed-respend";
@@ -1180,11 +1412,13 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
             why = strprintf("carries other transactions while due lost transactions did not fit (%s)", plan.summary);
             reason = "bad-lost-replay";
         } else if (!plan.to_record.empty()) {
+            // A block that mines the transaction itself owes no record of it.
             std::set<uint256> carried;
+            for (const auto& t : block.vtx) carried.insert(t->GetHash());
             for (const auto& r : LostParseRecords(block)) {
                 if (!r) continue;
                 for (const auto& e : r->entries) {
-                    if (auto tx = DeserTxNoWitness(e.tx)) carried.insert((*tx)->GetHash());
+                    if (auto tx = DeserTx(e.tx)) carried.insert((*tx)->GetHash());
                 }
             }
             for (const uint256& t : plan.to_record) {
@@ -1207,16 +1441,46 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
     return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, reason, *why);
 }
 
-std::optional<uint256> LostConflict(const CTransaction& tx, const CBlockIndex* tip)
+std::optional<uint256> LostRecordedConflict(const CTransaction& tx, const CBlockIndex* tip, uint32_t anchor_h,
+                                            const CCoinsViewCache& view)
+{
+    AssertLockHeld(::cs_main);
+    if (!tip || !LostActiveAt(tip->nHeight + 1)) return std::nullopt;
+    LoadRecorded(tip);
+    if (g_recorded.empty()) return std::nullopt;
+    // One walk of the chain per tip and anchor, however many transactions ask.
+    static uint256 memo_tip;
+    static uint32_t memo_anchor{0};
+    static size_t memo_records{0};
+    static std::map<COutPoint, LostBoundSpend> memo;
+    if (memo_tip != tip->GetBlockHash() || memo_anchor != anchor_h || memo_records != g_recorded.size()) {
+        memo = ChainBindings(tip, anchor_h);
+        memo_tip = tip->GetBlockHash();
+        memo_anchor = anchor_h;
+        memo_records = g_recorded.size();
+    }
+    const uint256 txid = tx.GetHash();
+    for (size_t n = 0; n < tx.vin.size(); ++n) {
+        auto it = memo.find(tx.vin[n].prevout);
+        if (it == memo.end() || it->second.txid == txid) continue;
+        if (LostBindingYields(it->second.leaf, tx, n, view, tip)) continue;
+        return it->second.txid;
+    }
+    return std::nullopt;
+}
+
+std::optional<uint256> LostConflict(const CTransaction& tx, const CBlockIndex* tip, const CCoinsViewCache& view)
 {
     if (!tip || !LostActiveAt(tip->nHeight + 1)) return std::nullopt;
     LOCK(g_lost_mutex);
     const uint256 txid = tx.GetHash();
-    for (const CTxIn& in : tx.vin) {
+    for (size_t n = 0; n < tx.vin.size(); ++n) {
+        const CTxIn& in = tx.vin[n];
         auto it = g_spends.find(in.prevout);
         if (it == g_spends.end()) continue;
         for (const LostSpend& s : it->second) {
-            if (s.txid != txid && Binds(s, tip->m_anchor_height, tip)) return s.txid;
+            if (s.txid == txid || !Binds(s, tip->m_anchor_height, tip)) continue;
+            if (!LostBindingYields(s.leaf, tx, n, view, tip)) return s.txid;
         }
         if (!g_bind_signed) continue;
         auto st = g_signed_spends.find(in.prevout);
@@ -1246,6 +1510,81 @@ void LostQueueEvidence(int64_t peer, LostEvidenceMsg msg)
     mine += bytes;
     g_inbox_total += bytes;
     g_inbox.emplace_back(peer, std::move(msg));
+}
+
+//! Evidence's stale anchor: the carried headers lead from a block of Bitcoin's
+//! best chain to `block`'s anchor, each with the work Bitcoin requires. The
+//! receiver's daemon need not have seen any of them. Empty when proven, else
+//! why not; `seed_ok` says whether the anchor meets the real difficulty.
+static std::string ProveEvidenceAnchor(const CBlock& block, const std::vector<std::vector<unsigned char>>& carried, bool& seed_ok)
+{
+    if (carried.empty()) return "anchor-unproven";
+    if (carried.size() > 2 * (size_t)g_window) return "anchor-proof-too-long";
+    std::map<uint256, BtcWork::Ancestor> shown;
+    const BtcWork::Lookup lookup = [&](const uint256& hash) -> std::optional<BtcWork::Ancestor> {
+        auto it = shown.find(hash);
+        if (it != shown.end()) return it->second;
+        return BtcHeaderInfo(hash);
+    };
+    uint256 prev;
+    uint32_t height = block.m_anchor_height - (uint32_t)(carried.size() - 1);
+    bool real = false;
+    for (size_t i = 0; i < carried.size(); ++i, ++height) {
+        if (carried[i].size() != 80) return "anchor-proof-size";
+        Sidechain::Bitcoin::CBlockHeader hdr;
+        try {
+            CDataStream hs(carried[i], SER_NETWORK, PROTOCOL_VERSION);
+            hs >> hdr;
+        } catch (const std::exception&) {
+            return "anchor-proof-decode";
+        }
+        if (i == 0) {
+            if (BestChainVerdict(height - 1, hdr.hashPrevBlock) != AnchorState::OK) return "anchor-proof-unlinked";
+        } else if (hdr.hashPrevBlock != prev) {
+            return "anchor-proof-unlinked";
+        }
+        const BtcWork::Verdict v = BtcWork::Judge(ParentNet(), hdr, height, lookup);
+        if (v.state == BtcWork::State::UNANSWERED) return "anchor-unknown";
+        if (v.state != BtcWork::State::OK) return "anchor-proof: " + v.why;
+        prev = hdr.GetHash();
+        real = v.real;
+        shown[prev] = BtcWork::Ancestor{prev, hdr.hashPrevBlock, height, hdr.nTime, hdr.nBits};
+    }
+    if (prev != block.m_anchor_hash) return "anchor-unproven";
+    seed_ok = real;
+    return "";
+}
+
+//! The headers from Bitcoin's best chain to `anchor`, parents first, as this
+//! node's daemon has them. Empty when it does not.
+static std::vector<std::vector<unsigned char>> ReadStaleHeaders(const uint256& anchor, uint32_t anchor_h)
+{
+    std::vector<std::vector<unsigned char>> out;
+    uint256 at = anchor;
+    uint32_t h = anchor_h;
+    try {
+        for (uint32_t steps = 0; steps <= 2 * g_window; ++steps, --h) {
+            if (BestChainVerdict(h, at) == AnchorState::OK) {
+                std::reverse(out.begin(), out.end());
+                return out;
+            }
+            UniValue p(UniValue::VARR);
+            p.push_back(at.GetHex());
+            p.push_back(false);
+            const UniValue reply = CallMainChainRPC("getblockheader", p);
+            const UniValue res = find_value(reply, "result");
+            if (!find_value(reply, "error").isNull() || !res.isStr()) return {};
+            std::vector<unsigned char> raw = ParseHex(res.get_str());
+            if (raw.size() != 80) return {};
+            CDataStream hs(raw, SER_NETWORK, PROTOCOL_VERSION);
+            Sidechain::Bitcoin::CBlockHeader hdr;
+            hs >> hdr;
+            out.push_back(std::move(raw));
+            at = hdr.hashPrevBlock;
+        }
+    } catch (const std::exception&) {
+    }
+    return {};
 }
 
 std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMsg& msg)
@@ -1307,7 +1646,9 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
         parent_anchor_h = it->second.anchor_h;
         parent_anchor = it->second.anchor;
         parent_in_store = true;
-        rooted = it->second.certified;
+        // Its anchor seeds this block's committee: a header below Bitcoin's
+        // real difficulty is a value its author could grind.
+        rooted = it->second.certified && it->second.seed_ok;
     }
     if (g_con_blockheightinheader && (uint32_t)height != block.block_height) return "bad-height";
     if (block.m_anchor_height < parent_anchor_h) return "bad-anchor-not-monotonic";
@@ -1322,6 +1663,13 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     AnchorState verdict = BestChainVerdict(block.m_anchor_height, block.m_anchor_hash);
     if (verdict == AnchorState::UNKNOWN) return "anchor-unknown";
     if (verdict == AnchorState::OK && !parent_in_store) return "anchor-on-best-chain";
+    // A stale anchor is proven by the headers the message carries, whatever
+    // this node's own daemon saw: an invented block binds nothing.
+    bool seed_ok = true;
+    if (verdict == AnchorState::STALE) {
+        const std::string unproven = ProveEvidenceAnchor(block, msg.btc, seed_ok);
+        if (!unproven.empty()) return unproven;
+    }
     // The certificate, with the registry at the branch's fork point, as the
     // record check reads it (doc 03, "Records and bindings"): no key
     // registered after the seed of the branch's first committee was public
@@ -1339,13 +1687,15 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     if (!at_fork) return "registry-unavailable";
     const StakeRegistry& reg = *at_fork;
     std::string reason;
-    const int signers = PosVerifyBitfieldCertificate(block, &parent_idx, reg, reason);
+    const int signers = CertSeatsCached(block.GetBlockHeader(), &parent_idx, fork_hash, reg, reason);
     if (signers < 0) return "bad-certificate: " + reason;
     const bool certified = rooted && signers >= PosSlotQuorumAt(reg, height);
     if (!certified && !parent_in_store && verdict == AnchorState::OK) return "not-certified";
     LostBlk b = MakeBlk(std::make_shared<const CBlock>(block), height);
     b.certified = certified;
     b.anchor_state = verdict;
+    b.btc = msg.btc;
+    b.seed_ok = seed_ok;
     LOCK(g_lost_mutex);
     if (!certified) {
         // F8: blocks that are not (yet) certified in order are few and bounded.
@@ -1379,7 +1729,7 @@ std::vector<LostEvidenceMsg> LostToSend(int64_t peer)
     for (const LostBlk* b : todo) {
         if (out.size() >= 8) break;
         sent.insert(b->hash);
-        out.push_back(LostEvidenceMsg{*b->block});
+        out.push_back(LostEvidenceMsg{*b->block, b->btc});
     }
     return out;
 }
@@ -1431,8 +1781,31 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         LOCK(g_lost_mutex);
         for (const auto& [h, b] : g_blocks) anchors.push_back({h, {b.anchor_h, b.anchor}});
     }
+    // One question per distinct anchor, however many blocks name it.
+    std::map<std::pair<uint32_t, uint256>, AnchorState> by_anchor;
     std::map<uint256, AnchorState> verdicts;
-    for (const auto& [h, a] : anchors) verdicts[h] = BestChainVerdict(a.first, a.second);
+    for (const auto& [h, a] : anchors) {
+        auto it = by_anchor.find(a);
+        if (it == by_anchor.end()) it = by_anchor.emplace(a, BestChainVerdict(a.first, a.second)).first;
+        verdicts[h] = it->second;
+    }
+    // The stale headers of blocks this node connected, read once while its
+    // daemon has them: a record or a peer needs them to check the work.
+    std::map<uint256, std::vector<std::vector<unsigned char>>> stale_headers;
+    {
+        std::vector<std::pair<uint256, std::pair<uint32_t, uint256>>> need;
+        {
+            LOCK(g_lost_mutex);
+            for (const auto& [h, b] : g_blocks) {
+                auto v = verdicts.find(h);
+                if (b.btc.empty() && v != verdicts.end() && v->second == AnchorState::STALE) need.push_back({h, {b.anchor_h, b.anchor}});
+            }
+        }
+        for (const auto& [h, a] : need) {
+            auto got = ReadStaleHeaders(a.second, a.first);
+            if (!got.empty()) stale_headers[h] = std::move(got);
+        }
+    }
     // The lapse is the active chain's (P4). Bitcoin's height only bounds how
     // long a block whose fork point left the active chain is kept (a resource
     // bound, not a rule).
@@ -1448,6 +1821,10 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             LostBlk& b = it->second;
             auto v = verdicts.find(it->first);
             if (v != verdicts.end() && v->second != AnchorState::UNKNOWN) b.anchor_state = v->second;
+            if (auto sh = stale_headers.find(it->first); sh != stale_headers.end() && b.btc.empty()) {
+                b.btc = sh->second;
+                g_dirty_file = true;
+            }
             const CBlockIndex* self = chainman.m_blockman.LookupBlockIndex(b.hash);
             const bool active = self && chainman.ActiveChain().Contains(self);
             const CBlockIndex* f = (tip && b.fork_height >= 0) ? tip->GetAncestor(b.fork_height) : nullptr;
@@ -1490,6 +1867,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             branch_stale[h] = stale && b.fork_height >= 0;
         }
         // Protected: a certified block of a stale branch, and its ancestors in the store.
+        std::set<uint256> evidence_valid;
         std::set<uint256> prot;
         for (const auto& [h, b] : g_blocks) {
             if (!b.certified || !branch_stale[h]) continue;
@@ -1502,6 +1880,48 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 walk = p == g_blocks.end() ? nullptr : &p->second;
             }
         }
+        // Evidence binds only what is valid here but for a payment proof that
+        // links to a lost anchor: an invented or not-yet-valid transaction
+        // binds nothing. Judged once per tip and store, never at every pass.
+        {
+            static uint256 memo_key;
+            static std::set<uint256> memo_valid;
+            CHashWriter key(SER_GETHASH, 0);
+            key << (tip ? tip->GetBlockHash() : uint256());
+            std::vector<const LostBlk*> order;
+            bool any_evidence = false;
+            for (const auto& [h, b] : g_blocks) {
+                if (!prot.count(h)) continue;
+                key << h;
+                order.push_back(&b);
+                any_evidence = any_evidence || !b.own;
+            }
+            const uint256 id = key.GetHash();
+            if (!any_evidence || !tip) {
+                memo_valid.clear();
+                memo_key = id;
+            } else if (id != memo_key) {
+                std::sort(order.begin(), order.end(), [](const LostBlk* a, const LostBlk* b) {
+                    return std::tie(a->epoch, a->height, a->hash) < std::tie(b->epoch, b->height, b->hash);
+                });
+                std::vector<CTransactionRef> all;
+                std::set<std::pair<uint32_t, uint256>> lost_anchors;
+                for (const LostBlk* b : order) {
+                    lost_anchors.insert({b->anchor_h, b->anchor});
+                    all.insert(all.end(), b->block->vtx.begin() + 1, b->block->vtx.end());
+                }
+                LoadRecorded(tip);
+                const auto bound_now = ChainBindings(tip, tip->m_anchor_height);
+                CCoinsViewCache here(&chainman.ActiveChainstate().CoinsTip());
+                const std::vector<std::string> verdicts = LostJudgeTxsInBlock(all, here, tip, tip->m_anchor_height, tip->m_anchor_hash, lost_anchors, bound_now);
+                memo_valid.clear();
+                for (size_t i = 0; i < all.size(); ++i) {
+                    if (verdicts[i].empty()) memo_valid.insert(all[i]->GetHash());
+                }
+                memo_key = id;
+            }
+            evidence_valid = memo_valid;
+        }
         std::map<COutPoint, std::vector<LostSpend>> spends;
         for (auto& [h, b] : g_blocks) {
             const bool was = b.prot;
@@ -1513,9 +1933,10 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             if (!b.prot) continue;
             for (size_t i = 1; i < b.block->vtx.size(); ++i) {
                 const CTransaction& tx = *b.block->vtx[i];
-                for (const CTxIn& in : tx.vin) {
-                    if (in.m_is_pegin) continue;
-                    spends[in.prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height, b.height});
+                if (!b.own && !evidence_valid.count(tx.GetHash())) continue;
+                for (size_t n = 0; n < tx.vin.size(); ++n) {
+                    if (tx.vin[n].m_is_pegin) continue;
+                    spends[tx.vin[n].prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height, b.height, LostProofLeaf(tx, n)});
                 }
             }
         }
@@ -1583,6 +2004,12 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         gen = g_gen;
         any = !g_spends.empty() || !g_signed_spends.empty() || !g_refused.empty() || !g_refused_scanned;
     }
+    bool any_recorded;
+    {
+        LOCK(cs_main);
+        any_recorded = !g_recorded.empty();
+    }
+    any = any || any_recorded;
     if (!any) return;
     // 5) The mempool: drop what conflicts, put lost transactions back, first in
     //    line for the next block whatever their fee.
@@ -1602,7 +2029,16 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         for (const auto& tx : lost_txs) {
             for (const CTxIn& in : tx->vin) {
                 const CTransaction* c = mempool->GetConflictTx(in.prevout);
-                if (c && c->GetHash() != tx->GetHash() && LostConflict(*c, tip)) {
+                if (c && c->GetHash() != tx->GetHash() && LostConflict(*c, tip, chainman.ActiveChainstate().CoinsTip())) {
+                    conflicting.push_back(mempool->get(c->GetHash()));
+                }
+            }
+        }
+        // What entered before a record of this chain bound its input.
+        if (tip) {
+            for (const auto& [o, spend] : ChainBindings(tip, tip->m_anchor_height)) {
+                const CTransaction* c = mempool->GetConflictTx(o);
+                if (c && LostRecordedConflict(*c, tip, tip->m_anchor_height, chainman.ActiveChainstate().CoinsTip())) {
                     conflicting.push_back(mempool->get(c->GetHash()));
                 }
             }
@@ -1714,5 +2150,5 @@ std::optional<LostEvidenceMsg> LostGetEvidence(const uint256& hash)
     LOCK(g_lost_mutex);
     auto it = g_blocks.find(hash);
     if (it == g_blocks.end()) return std::nullopt;
-    return LostEvidenceMsg{*it->second.block};
+    return LostEvidenceMsg{*it->second.block, it->second.btc};
 }
