@@ -8070,6 +8070,11 @@ bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& 
             *all_duplicate = true;
         }
         bool duplicate = false;
+        // SEQUENTIA lost blocks: a header refused under the rule does not end the
+        // message. The ones after it count toward following a quorum that has
+        // certified past this holder, in whatever order they were relayed.
+        std::optional<BlockValidationState> lost_refusal;
+        bool any_accepted = false;
         for (const CBlockHeader& header : headers) {
             CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
             bool accepted{AcceptBlockHeader(header, state, chainparams, &pindex, &duplicate)};
@@ -8079,11 +8084,23 @@ bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& 
                 (*all_duplicate) &= duplicate;  // False if any are false
             }
             if (!accepted) {
+                const std::string reason = state.GetRejectReason();
+                if (reason == "duplicate-lost-respend" || reason == "bad-prevblk-lost-respend" ||
+                    (reason == "prev-blk-not-found" && LostWaiverKept(header.GetHash()))) {
+                    lost_refusal = state;
+                    state = BlockValidationState();
+                    continue;
+                }
                 return false;
             }
+            any_accepted = true;
             if (ppindex) {
                 *ppindex = pindex;
             }
+        }
+        if (lost_refusal && !any_accepted) {
+            state = *lost_refusal;
+            return false;
         }
     }
     if (NotifyHeaderTip(ActiveChainstate())) {
