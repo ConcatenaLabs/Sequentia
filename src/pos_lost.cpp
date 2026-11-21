@@ -1188,6 +1188,70 @@ struct Plan {
     int64_t micros{0};
 };
 
+//! What the classification of a list of lost transactions found. It reads the
+//! parent, the transactions with their witnesses and the chain's bindings, and
+//! nothing about the candidate's anchor, so proposals on one parent that carry
+//! different anchors share it.
+struct ClassMemo {
+    uint256 key;
+    std::vector<std::pair<LostTxCat, std::string>> classes;
+    std::vector<int64_t> sigops;
+};
+constexpr size_t LOST_CLASS_MEMOS = 4;
+std::deque<std::shared_ptr<const ClassMemo>> g_class_memos GUARDED_BY(g_lost_mutex);
+
+//! The txids of the blocks above `from_height` on `prev`'s chain, read once per
+//! block. Only the current walk is kept, so its size follows the distance to
+//! the fork point. A block that cannot be read gives an empty answer, which
+//! only costs the classification its shortcut.
+std::map<uint256, std::shared_ptr<const std::vector<uint256>>> g_block_txids GUARDED_BY(::cs_main);
+
+std::set<uint256> MinedSince(const CBlockIndex* prev, int from_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    std::set<uint256> out;
+    std::map<uint256, std::shared_ptr<const std::vector<uint256>>> walked;
+    for (const CBlockIndex* p = prev; p && p->nHeight > from_height; p = p->pprev) {
+        auto it = g_block_txids.find(p->GetBlockHash());
+        std::shared_ptr<const std::vector<uint256>> ids;
+        if (it != g_block_txids.end()) {
+            ids = it->second;
+        } else {
+            CBlock blk;
+            if (!ReadBlockFromDisk(blk, p, Params().GetConsensus())) return {};
+            auto fresh = std::make_shared<std::vector<uint256>>();
+            fresh->reserve(blk.vtx.size());
+            for (const auto& tx : blk.vtx) fresh->push_back(tx->GetHash());
+            ids = std::move(fresh);
+        }
+        out.insert(ids->begin(), ids->end());
+        walked.emplace(p->GetBlockHash(), std::move(ids));
+    }
+    g_block_txids = std::move(walked);
+    return out;
+}
+
+std::shared_ptr<const ClassMemo> ClassifyMemoized(const std::vector<CTransactionRef>& txs, CCoinsViewCache& view, const CBlockIndex* prev,
+                                                  const Consensus::Params& consensus, const std::map<COutPoint, LostBoundSpend>& bound,
+                                                  int lowest_fork)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_lost_mutex)
+{
+    CHashWriter hw(SER_GETHASH, 0);
+    hw << prev->GetBlockHash();
+    for (const CTransactionRef& tx : txs) hw << tx->GetWitnessHash();
+    for (const auto& [o, t] : bound) hw << o << t.txid << t.leaf;
+    const uint256 key = hw.GetHash();
+    for (const auto& m : g_class_memos) {
+        if (m->key == key) return m;
+    }
+    auto memo = std::make_shared<ClassMemo>();
+    memo->key = key;
+    const std::set<uint256> replayed = MinedSince(prev, lowest_fork);
+    memo->classes = LostClassifyTxs(txs, view, prev, consensus, &memo->sigops, &bound, &replayed);
+    g_class_memos.push_front(memo);
+    if (g_class_memos.size() > LOST_CLASS_MEMOS) g_class_memos.pop_back();
+    return memo;
+}
+
 Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anchor, CCoinsViewCache& view, bool build)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_lost_mutex)
 {
@@ -1217,11 +1281,14 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     }
     const Consensus::Params& consensus = Params().GetConsensus();
     const int64_t t0 = GetTimeMicros();
-    std::vector<int64_t> sigops;
     // P5: the chain's bindings go into the classification, so a lost
     // transaction that a record of this chain forbids is never due.
     const auto bound = ChainBindings(prev, anchor_h);
-    const auto classes = LostClassifyTxs(txs, view, prev, consensus, &sigops, &bound);
+    int lowest_fork = prev->nHeight;
+    for (const LostBlk* b : blocks) lowest_fork = std::min(lowest_fork, b->fork_height);
+    const std::shared_ptr<const ClassMemo> classified = ClassifyMemoized(txs, view, prev, consensus, bound, lowest_fork);
+    const auto& classes = classified->classes;
+    const auto& sigops = classified->sigops;
     std::set<uint256> bound_txids;
     for (const auto& [o, t] : bound) bound_txids.insert(t.txid);
     // The branch of a store block from its fork point's child, or empty.

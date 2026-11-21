@@ -212,7 +212,12 @@ bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache&
  *  given, is the chain's record bindings: a transaction spending an outpoint
  *  bound to another transaction is LATER (it may return when the binding lapses),
  *  unless the binding yields to it, so the duty never asks for what validity
- *  forbids. An anchor floor not yet reached is LATER. */
+ *  forbids. An anchor floor not yet reached is LATER. `replayed`, when given, is
+ *  the transactions already mined on this chain above the fork point, which are
+ *  GONE without looking their spent coins up. `warm` fills the caches on the
+ *  block check queue first; a caller already holding that queue passes false.
+ *  `judged`, when given, is the block whose own anchor the transactions are
+ *  judged at, instead of its parent's. */
 enum class LostTxCat { DUE, LATER, FAILS, GONE };
 //! One input a record binds: only `txid` may spend it, or a spend through the
 //! tapscript leaf `leaf` that carries a payment proof and no anchor floor (null
@@ -225,7 +230,9 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
                                                                CCoinsViewCache& base, const CBlockIndex* prev,
                                                                const Consensus::Params& params,
                                                                std::vector<int64_t>* sigops = nullptr,
-                                                               const std::map<COutPoint, LostBoundSpend>* bound = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+                                                               const std::map<COutPoint, LostBoundSpend>* bound = nullptr,
+                                                               const std::set<uint256>* replayed = nullptr, bool warm = true,
+                                                               const CBlockIndex* judged = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 /** A record's entries, or the transactions of a block shown as evidence, judged
  *  in order as a block on `prev` anchored at `anchor_h` / `anchor` would judge

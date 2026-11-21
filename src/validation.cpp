@@ -78,6 +78,8 @@
 #include <limits>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <deque>
 #include <numeric>
 #include <optional>
 #include <string>
@@ -3779,11 +3781,62 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
     return CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/false, /*cacheFullScriptStore=*/false, txdata);
 }
 
+//! The proofs and scripts of lost transactions, checked on the block check
+//! queue's threads so that the classification below, which judges one
+//! transaction at a time, finds them in the caches. This only fills caches: a
+//! check that fails stores nothing, so no verdict can depend on it. Chunked,
+//! because the queue stops at its first failure and one bad transaction should
+//! cost only its chunk the head start.
+static void LostWarmCaches(const std::vector<CTransactionRef>& txs, CCoinsViewCache& base, int height, unsigned int flags,
+                           const std::vector<std::pair<CScript, CScript>>& fedpegscripts, const Consensus::Params& params,
+                           const std::set<uint256>* replayed) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    static constexpr size_t LOST_WARM_MIN_TXS{16};
+    static constexpr size_t LOST_WARM_CHUNK{128};
+    if (!g_parallel_script_checks || txs.size() < LOST_WARM_MIN_TXS) return;
+    CCoinsViewCache view(&base);
+    for (size_t start = 0; start < txs.size(); start += LOST_WARM_CHUNK) {
+        // The checks point into these until the queue has run them, so these
+        // outlive the control.
+        std::deque<PrecomputedTransactionData> txdata;
+        CCheckQueueControl<CCheck> control(&scriptcheckqueue);
+        for (size_t i = start; i < std::min(txs.size(), start + LOST_WARM_CHUNK); ++i) {
+            const CTransaction& tx = *txs[i];
+            if (tx.IsCoinBase() || (replayed && replayed->count(tx.GetHash()))) continue;
+            bool usable = true;
+            for (const CTxIn& in : tx.vin) usable = usable && !in.m_is_pegin && view.HaveCoin(in.prevout);
+            if (!usable) continue;
+            TxValidationState tx_state;
+            CAmountMap fee_map;
+            std::set<std::pair<uint256, COutPoint>> pegins_spent;
+            std::vector<CCheck*> checks;
+            if (!Consensus::CheckTxInputs(tx, tx_state, view, height, fee_map, pegins_spent, &checks, /*cacheStore=*/true,
+                                          /*fScriptChecks=*/true, fedpegscripts)) {
+                for (CCheck* c : checks) delete c;
+                continue;
+            }
+            control.Add(checks);
+            checks.clear();
+            txdata.emplace_back(params.hashGenesisBlock);
+            if (!CheckInputScripts(tx, tx_state, view, flags, /*cacheSigStore=*/true, /*cacheFullScriptStore=*/true, txdata.back(), &checks)) {
+                for (CCheck* c : checks) delete c;
+                continue;
+            }
+            control.Add(checks);
+            CTxUndo undo;
+            UpdateCoins(tx, view, undo, height);
+        }
+        (void)control.Wait();
+    }
+}
+
 std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector<CTransactionRef>& txs,
                                                                CCoinsViewCache& base, const CBlockIndex* prev,
                                                                const Consensus::Params& params,
                                                                std::vector<int64_t>* sigops,
-                                                               const std::map<COutPoint, LostBoundSpend>* bound)
+                                                               const std::map<COutPoint, LostBoundSpend>* bound,
+                                                               const std::set<uint256>* replayed, bool warm,
+                                                               const CBlockIndex* judged)
 {
     AssertLockHeld(cs_main);
     std::vector<std::pair<LostTxCat, std::string>> out;
@@ -3795,14 +3848,15 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
     CBlockIndex next;
     next.pprev = const_cast<CBlockIndex*>(prev);
     next.nHeight = prev->nHeight + 1;
-    next.m_anchor_height = prev->m_anchor_height;
-    next.m_anchor_hash = prev->m_anchor_hash;
+    next.m_anchor_height = judged ? judged->m_anchor_height : prev->m_anchor_height;
+    next.m_anchor_hash = judged ? judged->m_anchor_hash : prev->m_anchor_hash;
     const int height = next.nHeight;
     const int64_t cutoff = prev->GetMedianTimePast();
     int lock_flags = 0;
     if (DeploymentActiveAt(next, params, Consensus::DEPLOYMENT_CSV)) lock_flags |= LOCKTIME_VERIFY_SEQUENCE;
     const unsigned int flags = GetBlockScriptFlags(&next, params);
     const auto& fedpegscripts = GetValidFedpegScripts(prev, params, true);
+    if (warm) LostWarmCaches(txs, view, height, flags, fedpegscripts, params, replayed);
     PosRecordState records;
     std::set<uint256> later, fails;
     int64_t t_inputs = 0, t_scripts = 0, t_rest = 0, t_mark = GetTimeMicros();
@@ -3816,6 +3870,17 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
             if (sigops && sigops->size() < out.size()) sigops->push_back(0);
         };
         if (tx.IsCoinBase()) { put(LostTxCat::GONE, "coinbase"); continue; }
+        // Already mined on this chain: every input is spent, so the walk below
+        // would find it gone, at the price of a coin lookup that misses the
+        // cache. Not when an input is a peg-in or comes from a transaction this
+        // pass holds back, whose verdict the walk would carry over instead.
+        if (replayed && replayed->count(tx.GetHash())) {
+            bool plain = true;
+            for (const CTxIn& in : tx.vin) {
+                if (in.m_is_pegin || fails.count(in.prevout.hash) || later.count(in.prevout.hash)) { plain = false; break; }
+            }
+            if (plain) { put(LostTxCat::GONE, "input spent on this chain"); continue; }
+        }
         // Inputs: present, or created by a lost transaction not yet due, or gone.
         std::optional<LostTxCat> missing;
         bool pegin = false;
@@ -3846,7 +3911,10 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
         TxValidationState tx_state;
         CAmountMap fee_map;
         std::set<std::pair<uint256, COutPoint>> pegins_spent;
-        if (!Consensus::CheckTxInputs(tx, tx_state, view, height, fee_map, pegins_spent, nullptr, false, true, fedpegscripts)) {
+        // The caches are consulted and kept (cacheStore): every height of a
+        // replay judges the same transactions again, and a lookup that erased
+        // its entry would make the next height verify the proofs in full.
+        if (!Consensus::CheckTxInputs(tx, tx_state, view, height, fee_map, pegins_spent, nullptr, /*cacheStore=*/true, true, fedpegscripts)) {
             const std::string r = tx_state.GetRejectReason();
             put(r.find("premature") != std::string::npos ? LostTxCat::LATER : LostTxCat::FAILS, r);
             continue;
@@ -3872,13 +3940,14 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
             // The block's own anchor is at least the parent's: judged at the
             // parent's, a pass holds for the block, a failure may clear later.
             const bool by_anchor = g_con_bitcoin_anchor;
-            const auto anchor_at = [prev, by_anchor](int h) -> int {
+            const auto anchor_at = [prev, judged, height, by_anchor](int h) -> int {
+                if (judged && h == height) return by_anchor ? (int)judged->m_anchor_height : h;
                 const CBlockIndex* a = (h >= 0 && h <= prev->nHeight) ? prev->GetAncestor(h) : nullptr;
                 if (!a) return -1;
                 return by_anchor ? (int)a->m_anchor_height : h;
             };
             std::string reason;
-            if (!CheckPosUnbondingTx(tx, view, by_anchor ? (int)prev->m_anchor_height : height, anchor_at,
+            if (!CheckPosUnbondingTx(tx, view, by_anchor ? (int)next.m_anchor_height : height, anchor_at,
                                      params.pos_unbond_anchor_depth, reason)) {
                 put(LostTxCat::LATER, reason);
                 continue;
@@ -3892,7 +3961,7 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
         }
         lap(t_inputs);
         PrecomputedTransactionData txdata(params.hashGenesisBlock);
-        const bool scripts_ok = CheckInputScripts(tx, tx_state, view, flags, false, false, txdata);
+        const bool scripts_ok = CheckInputScripts(tx, tx_state, view, flags, /*cacheSigStore=*/true, /*cacheFullScriptStore=*/true, txdata);
         lap(t_scripts);
         if (!scripts_ok) { put(LostTxCat::FAILS, tx_state.GetRejectReason()); continue; }
         // As ConnectBlock counts it (legacy, P2SH and witness), before the
