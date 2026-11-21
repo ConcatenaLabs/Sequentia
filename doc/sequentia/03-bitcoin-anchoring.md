@@ -347,6 +347,16 @@ an outpoint to another transaction: the first binding of a coin stands, so a
 record is as good as a spend. Which of two conflicting lost transactions of its
 own chain stands is decided by lost order alone.
 
+**Evidence never weakens this.** A transaction of a block the holder had on its
+own chain stays due and demanded whatever evidence arrives, including a certified
+sibling that spends the same coin differently: the holder cannot tell a sibling
+that half the network really held from one a quorum certified after the fact, so
+any rule that dropped the transaction on evidence, or on failed rounds, could be
+triggered by whoever wants it dropped. A leader never leaves a due transaction of
+its own lost block out, whether or not a round has failed, and a block that does
+is refused at every height, a sub-quorum block of the escaping-stall valve
+included. What a holder yields to is the waiver at its depth, and nothing else.
+
 An evidence-only block creates no duty to carry or record. Its transactions
 bind their coins for the holder's own signature only when they are valid against
 the tip, by the block's own transaction checks with the record's one exception
