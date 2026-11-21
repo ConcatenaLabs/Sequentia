@@ -344,6 +344,7 @@ class LostRecordAttacksTest(LostSwapTest):
         data = self.mk([hdr.header_bytes()], [(0, e[0], e[1], e[2])], btc)
         h, ok, since = self.put(case, data)
         if not ok:
+            self.rejoin()
             return self.blocked(case, "the record is refused")
         lines = self.log_has(1, "bound input", since)
         self.record(case, "node 1", lines[0].split("Lost blocks: ", 1)[-1][:120])
