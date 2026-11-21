@@ -842,6 +842,71 @@ class LostReplayTest(LostBlocksTest):
         self.record("b2o", "child headers first", "node 2 refuses X below the depth and follows at %d certified block(s)" % WAIVER)
         self.mesh(range(N))
 
+    def case_b2r(self):
+        """The headers kept above a refused block survive a restart, so the count toward the depth does not start over."""
+        self.log.info("(b2r) the waiver's kept headers survive a restart")
+        if WAIVER < 2:
+            self.record("b2r", "not applicable", "at depth 1 no header is kept below the depth")
+            return
+        st, x = self.b_setup("b2r", honest_apart=True)
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        chain = [x] + [self.produce(SELLER, ALL_KEYS, leaders=[SELLER]) for _ in range(WAIVER)]
+        raws = [a.getblock(b["hash"], 0) for b in chain]
+        top = chain[-1]["hash"]
+        for i in HONEST:
+            self.disconnect_all(i)
+        n1.submitblock(raws[0])
+        assert not self.in_chain(n1, x["hash"])
+        for raw in raws[1:-1]:
+            n1.submitblock(raw)
+        time.sleep(2)
+        self.record("b2r", "before the restart", "%s header(s) kept above the refused block" % n1.getlostblocks().get("waiverheaders"))
+        self.restart_node(1, extra_args=self.node_args(1))
+        n1.loadwallet("w")
+        self.record("b2r", "after the restart", "%s header(s) kept" % n1.getlostblocks().get("waiverheaders"))
+        assert not self.in_chain(n1, x["hash"]), "followed below the depth after a restart"
+        since = self.log_size(1)
+        n1.submitblock(raws[-1])
+        self.wait_until(lambda: self.log_has(1, "refused block %s has %d certified block(s) above it" % (x["hash"], WAIVER), since), timeout=30)
+        def done():
+            for raw in raws:
+                n1.submitblock(raw)
+            return n1.getbestblockhash() == top
+        self.wait_until(done, timeout=60)
+        self.record("b2r", "outcome", "the last header alone completed the run of %d: node 1 follows" % WAIVER)
+        self.mesh(range(N))
+
+    def case_b2s(self):
+        """A stake registered on the holder's own chain does not hide the real certificates above a block it refused."""
+        self.log.info("(b2s) the waiver reads certificates under the registry at the fork point")
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        w = n1.get_wallet_rpc("w")
+        got = a.sendtoaddress(address=w.getnewaddress(), amount=Decimal("150"), fee_asset_label="bitcoin")
+        self.produce(SELLER, ALL_KEYS, txs_must=[got])
+        self.sync_tips(range(N))
+        st, x = self.b_setup("b2s", honest_apart=True)
+        chain = [x] + [self.produce(SELLER, ALL_KEYS, leaders=[SELLER]) for _ in range(WAIVER)]
+        raws = [a.getblock(b["hash"], 0) for b in chain]
+        for i in HONEST:
+            self.disconnect_all(i)
+        n1.submitblock(raws[0])
+        assert not self.in_chain(n1, x["hash"])
+        before = n1.getstakerinfo()
+        pub = w.getaddressinfo(w.getnewaddress())["pubkey"]
+        reg = w.registerstake(pub, Decimal("100"))
+        assert reg["committee_ready"]
+        h = self.produce(1, ALL_KEYS, txs_must=[reg["txid"]])
+        assert_equal(n1.getblock(h["hash"])["tx"][1], st["t_id"])
+        after = n1.getstakerinfo()
+        assert before != after, "the registration changed nothing"
+        self.record("b2s", "the holder's chain", "block %s at height %d carries T and registers a seventh staker" % (h["hash"][:12], h["height"]))
+        since = self.log_size(1)
+        for raw in raws[1:]:
+            n1.submitblock(raw)
+        self.wait_until(lambda: self.log_has(1, "refused block %s has %d certified block(s) above it" % (x["hash"], WAIVER), since), timeout=30)
+        self.record("b2s", "outcome", "the %d certificate(s) above the refused block verify under the registry at the fork point" % WAIVER)
+        self.mesh(range(N))
+
     # ---------------------------------------------------------------- hc
     def wallet_view(self, w, txid):
         t = w.gettransaction(txid)

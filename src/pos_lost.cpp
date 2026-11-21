@@ -121,8 +121,10 @@ std::set<uint256> g_refused GUARDED_BY(g_lost_mutex);
 //! fails, so junk cannot hold a parent's slots for long.
 constexpr size_t LOST_WAIVER_MAX_HEADERS = 4096;
 constexpr size_t LOST_WAIVER_MAX_CHILDREN = 16;
+constexpr size_t LOST_WAIVER_MAX_BYTES = 8 * 1000 * 1000;
 std::map<uint256, CBlockHeader> g_waiver_headers GUARDED_BY(g_lost_mutex);
 std::map<uint256, size_t> g_waiver_children GUARDED_BY(g_lost_mutex);
+size_t g_waiver_bytes GUARDED_BY(g_lost_mutex){0};
 bool g_waiver_dirty GUARDED_BY(g_lost_mutex){false};
 //! Parents with more certified evidence-only children than LostSiblingCap.
 std::set<uint256> g_sibling_capped GUARDED_BY(g_lost_mutex);
@@ -181,6 +183,17 @@ bool EvidenceComplete(const LostBlk& b)
     return b.anchor_state == AnchorState::OK || !b.btc.empty();
 }
 
+//! Take one header out of the waiver's side store, freeing its parent's slot.
+void DropWaiverHeader(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    auto it = g_waiver_headers.find(hash);
+    if (it == g_waiver_headers.end()) return;
+    auto kept = g_waiver_children.find(it->second.hashPrevBlock);
+    if (kept != g_waiver_children.end() && --kept->second == 0) g_waiver_children.erase(kept);
+    g_waiver_bytes -= std::min(g_waiver_bytes, GetSerializeSize(it->second, PROTOCOL_VERSION));
+    g_waiver_headers.erase(it);
+}
+
 LostBlk MakeBlk(const std::shared_ptr<const CBlock>& block, int height)
 {
     LostBlk b;
@@ -224,12 +237,12 @@ void WriteFile() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
     if (!f) return;
     CAutoFile file(f, SER_DISK, PROTOCOL_VERSION);
     try {
-        file << (uint32_t)5 << (uint64_t)g_blocks.size() << g_epoch;
+        file << (uint32_t)6 << (uint64_t)g_blocks.size() << g_epoch;
         for (const auto& [h, b] : g_blocks) {
             file << *b.block << b.height << b.certified << b.own << b.epoch
                  << b.prot << b.fork_hash << b.fork_height << (uint8_t)b.anchor_state << b.btc << b.seed_ok;
         }
-        file << g_sibling_capped;
+        file << g_sibling_capped << g_waiver_headers;
         if (!FileCommit(file.Get())) return;
         file.fclose();
         if (!RenameOver(tmp, LostPath())) return;
@@ -440,7 +453,7 @@ void LostInit()
         uint32_t version;
         uint64_t n;
         file >> version >> n;
-        if (version != 5) throw std::runtime_error("unknown version");
+        if (version != 5 && version != 6) throw std::runtime_error("unknown version");
         file >> g_epoch;
         for (uint64_t i = 0; i < n && i < POS_LOST_MAX_BLOCKS; ++i) {
             auto block = std::make_shared<CBlock>();
@@ -467,6 +480,14 @@ void LostInit()
             g_blocks.emplace(b.hash, std::move(b));
         }
         file >> g_sibling_capped;
+        if (version >= 6) {
+            file >> g_waiver_headers;
+            for (const auto& [h, hdr] : g_waiver_headers) {
+                ++g_waiver_children[hdr.hashPrevBlock];
+                g_waiver_bytes += GetSerializeSize(hdr, PROTOCOL_VERSION);
+            }
+            g_waiver_dirty = !g_waiver_headers.empty();
+        }
         // The duty holds from the first block this node judges after a
         // restart, before any maintenance pass: the bound spends as written.
         // Evidence binds only what the next maintenance pass finds valid here.
@@ -1660,11 +1681,20 @@ void LostNoteRefusedChild(const CBlockHeader& header, bool only_if_parent_kept)
     if (only_if_parent_kept && !g_waiver_headers.count(header.hashPrevBlock)) return;
     const uint256 hash = header.GetHash();
     if (g_waiver_headers.count(hash) || g_waiver_headers.size() >= LOST_WAIVER_MAX_HEADERS) return;
+    // Only the run a holder counts is kept: the waiver depth above the refused block.
+    int above = 1;
+    for (auto p = g_waiver_headers.find(header.hashPrevBlock); p != g_waiver_headers.end(); p = g_waiver_headers.find(p->second.hashPrevBlock)) {
+        if (++above > g_waiver_depth) return;
+    }
+    const size_t bytes = GetSerializeSize(header, PROTOCOL_VERSION);
+    if (g_waiver_bytes + bytes > LOST_WAIVER_MAX_BYTES) return;
     size_t& kept = g_waiver_children[header.hashPrevBlock];
     if (kept >= LOST_WAIVER_MAX_CHILDREN) return;
     ++kept;
+    g_waiver_bytes += bytes;
     g_waiver_headers.emplace(hash, header);
     g_waiver_dirty = true;
+    g_dirty_file = true;
 }
 
 bool LostWaiverKept(const uint256& hash)
@@ -2291,10 +2321,14 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
     // The waiver: a function of the headers this node has seen, in any order.
     {
         LOCK2(cs_main, g_lost_mutex);
-        if (g_blocks.empty() && g_refused.empty()) {
+        // Before the first scan, g_refused does not yet hold the refusals of the
+        // last run, and the headers kept above them must survive until it does.
+        if (g_refused_scanned && g_blocks.empty() && g_refused.empty()) {
+            if (!g_waiver_headers.empty()) g_dirty_file = true;
             g_waived.clear();
             g_waiver_headers.clear();
             g_waiver_children.clear();
+            g_waiver_bytes = 0;
             g_sibling_capped.clear();
         } else if (g_waiver_dirty && !g_refused.empty()) {
             g_waiver_dirty = false;
@@ -2310,11 +2344,11 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 if (!p->pprev || p->nHeight <= lowest || !(p->nStatus & BLOCK_FAILED_MASK) || p->trimmed()) continue;
                 if (!g_waiver_headers.count(h)) kids[p->pprev->GetBlockHash()].push_back(p->GetBlockHeader());
             }
-            const StakeRegistry& reg = StakeRegistry::GetInstance();
             bool dropped = false;
-            // The longest run of certified headers above `parent`, up to `need`.
-            std::function<int(const uint256&, const CBlockIndex&, const uint256&, int)> run =
-                [&](const uint256& parent, const CBlockIndex& view, const uint256& root, int need) -> int {
+            // The longest run of certified headers above `parent`, up to `need`,
+            // under the registry at the branch's fork point.
+            std::function<int(const uint256&, const CBlockIndex&, const uint256&, const StakeRegistry&, int)> run =
+                [&](const uint256& parent, const CBlockIndex& view, const uint256& fork, const StakeRegistry& reg, int need) -> int {
                 if (need <= 0) return 0;
                 auto it = kids.find(parent);
                 if (it == kids.end()) return 0;
@@ -2322,13 +2356,13 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 for (const CBlockHeader& hdr : it->second) {
                     const uint256 hash = hdr.GetHash();
                     std::string reason;
-                    const int seats = CertSeatsCached(hdr, &view, root, reg, reason);
+                    const int seats = CertSeatsCached(hdr, &view, fork, reg, reason);
                     if (seats < 0 || seats < PosSlotQuorumAt(reg, view.nHeight + 1)) {
                         // Junk does not keep a parent's slot.
-                        if (g_waiver_headers.erase(hash)) {
-                            size_t& kept = g_waiver_children[parent];
-                            kept -= std::min<size_t>(kept, 1);
+                        if (g_waiver_headers.count(hash)) {
+                            DropWaiverHeader(hash);
                             dropped = true;
+                            g_dirty_file = true;
                         }
                         continue;
                     }
@@ -2336,7 +2370,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                     next.nHeight = view.nHeight + 1;
                     next.m_anchor_height = hdr.m_anchor_height;
                     next.m_anchor_hash = hdr.m_anchor_hash;
-                    best = std::max(best, 1 + run(hash, next, root, need - 1));
+                    best = std::max(best, 1 + run(hash, next, fork, reg, need - 1));
                     if (best >= need) break;
                 }
                 return best;
@@ -2349,11 +2383,42 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 view.nHeight = x->nHeight;
                 view.m_anchor_height = x->m_anchor_height;
                 view.m_anchor_hash = x->m_anchor_hash;
-                const int depth = run(root, view, root, g_waiver_depth);
+                // The registry the branch's first committee was drawn from, as
+                // a record reads it: a key registered on the refused branch
+                // counts for nothing here.
+                const CBlockIndex* fork = chainman.ActiveChain().FindFork(x);
+                const std::shared_ptr<const StakeRegistry> at_fork = fork ? RegistryAt(fork, chainman.ActiveChain().Tip()) : nullptr;
+                if (!at_fork) {
+                    g_waiver_dirty = true; // this node's own read failed: next pass
+                    continue;
+                }
+                const int depth = run(root, view, fork->GetBlockHash(), *at_fork, g_waiver_depth);
                 if (depth >= g_waiver_depth) {
                     LogPrintf("Lost blocks: refused block %s has %d certified block(s) above it; following the quorum\n", root.ToString(), depth);
                     g_waived.insert(root);
                     changed = true;
+                }
+            }
+            // A header no refused block roots any more holds nothing. Not before
+            // the first scan: the refusals of the last run are not all back yet.
+            std::set<uint256> rooted;
+            std::vector<uint256> walk(g_refused.begin(), g_refused.end());
+            while (!walk.empty()) {
+                const uint256 at = walk.back();
+                walk.pop_back();
+                auto it = kids.find(at);
+                if (it == kids.end()) continue;
+                for (const CBlockHeader& hdr : it->second) {
+                    const uint256 hash = hdr.GetHash();
+                    if (rooted.insert(hash).second) walk.push_back(hash);
+                }
+            }
+            for (auto it = g_waiver_headers.begin(); g_refused_scanned && it != g_waiver_headers.end();) {
+                const uint256 hash = it->first;
+                ++it;
+                if (!rooted.count(hash)) {
+                    DropWaiverHeader(hash);
+                    g_dirty_file = true;
                 }
             }
             // A slot freed: ask again, in case a real header was turned away.
@@ -2445,6 +2510,7 @@ UniValue LostGetInfo(int next_height)
     UniValue refused(UniValue::VARR);
     for (const uint256& h : g_refused) refused.push_back(h.GetHex());
     out.pushKV("refused", refused);
+    out.pushKV("waiverheaders", (int)g_waiver_headers.size());
     return out;
 }
 

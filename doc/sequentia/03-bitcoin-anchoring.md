@@ -386,8 +386,15 @@ consecutive certified headers above a refused block reaches the waiver depth
 (`DEFAULT_LOST_WAIVER_DEPTH` in `src/pos_lost.h`), it takes that block, and the
 duty is off for every block above it. The holder keeps the headers above a
 refused block aside and reads a headers message past a refused header, so the
-result depends on the set of headers it has seen and not on their order. It
-still does not sign the waived block itself. The holder drops L once its active chain has lapsed for L (or, when
+result depends on the set of headers it has seen and not on their order. Those
+headers are kept in `lostblocks.dat`, so a restart does not start the count over,
+up to the waiver depth above the refused block, 16 children per parent, 4,096
+headers and 8 MB; a header no refused block roots any more is dropped. Their
+certificates are verified under the registry at the refused branch's fork point,
+as a record's are, so a key registered on that branch counts for nothing, and a
+branch whose own stake changes alter a committee above it does not reach the
+depth: its holders then rejoin at the lapse. A holder still does not sign the
+waived block itself. The holder drops L once its active chain has lapsed for L (or, when
 its active chain no longer contains F, once Bitcoin is 2W above a_L: a bound on
 memory, not a rule), and then judges every block it refused by validity
 alone.
