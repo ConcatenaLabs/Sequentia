@@ -173,9 +173,6 @@ private:
     //! whether due lost transactions filled the block.
     std::vector<CTxOut> m_lost_records;
     bool m_lost_cut{false};
-    //! A leader after a failed round: leave out what two certified siblings contest.
-    bool m_lost_leave_contested{false};
-    std::set<uint256> m_lost_left_out;
     //! The parent of the block being built, for the records' bindings.
     const CBlockIndex* m_prev_for_records{nullptr};
     //! SEQUENTIA: the anchor this block carries, chosen before its transactions
@@ -214,8 +211,6 @@ public:
      *  is set to require that key and the block time is advanced to the start of
      *  that staker's slot. */
     std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript& scriptPubKeyIn, std::chrono::seconds min_tx_age = std::chrono::seconds(0), DynaFedParamEntry* = nullptr, const std::vector<CScript>* commit_scripts = nullptr, const CPubKey* pos_proposer = nullptr, const std::vector<unsigned char>* pos_vrf_proof = nullptr, const std::vector<CPubKey>* pos_vrf_committee = nullptr);
-
-    void SetLeaveContested(bool leave) { m_lost_leave_contested = leave; }
 
     inline static std::optional<int64_t> m_last_block_num_txs{};
     inline static std::optional<int64_t> m_last_block_weight{};

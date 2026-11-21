@@ -34,7 +34,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <atomic>
 #include <set>
 #include <string>
 #include <thread>
@@ -375,7 +374,6 @@ private:
     uint256 m_backed_hash;                             //!< hash of the proposal we are signing/collecting for
     int m_signed_round{-1};                            //!< highest round index we have signed for
     int m_proposed_height{0};                          //!< height we have already proposed our own block at
-    std::atomic<int> m_leave_contested_at{0};          //!< height whose collection failed: proposals there leave contested lost transactions out
     int m_propose_at_height{0};                        //!< height m_propose_at_ms is for
     //! The tip this producer last scheduled from, and when it first saw it
     //! (PosProposalStartMs). Producer thread only.
