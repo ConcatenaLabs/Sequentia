@@ -2156,7 +2156,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
     //    line for the next block whatever their fee.
     if (mempool && (changed || now - g_last_replay >= 2)) {
         g_last_replay = now;
-        std::vector<CTransactionRef> lost_txs;
+        std::vector<CTransactionRef> lost_txs, evidence_txs;
         {
             LOCK(g_lost_mutex);
             std::vector<const LostBlk*> order;
@@ -2164,6 +2164,15 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             for (const auto& [h, b] : g_blocks) if (b.prot && b.own) order.push_back(&b);
             std::sort(order.begin(), order.end(), [](const LostBlk* a, const LostBlk* b) { return a->height < b->height; });
             for (const LostBlk* b : order) for (size_t i = 1; i < b->block->vtx.size(); ++i) lost_txs.push_back(b->block->vtx[i]);
+            // What stands of evidence-only blocks: the transactions that bind.
+            std::set<uint256> standing_ids;
+            for (const auto& [o, v] : g_spends) for (const LostSpend& sp : v) if (!sp.own) standing_ids.insert(sp.txid);
+            for (const auto& [h, b] : g_blocks) {
+                if (!b.prot || b.own) continue;
+                for (size_t i = 1; i < b.block->vtx.size(); ++i) {
+                    if (standing_ids.count(b.block->vtx[i]->GetHash())) evidence_txs.push_back(b.block->vtx[i]);
+                }
+            }
         }
         LOCK2(cs_main, mempool->cs);
         const CBlockIndex* tip = chainman.ActiveChain().Tip();
@@ -2196,6 +2205,21 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             if (r.m_result_type == MempoolAcceptResult::ResultType::VALID) {
                 mempool->PrioritiseTransaction(tx->GetHash(), 100 * COIN);
                 LogPrintf("Lost blocks: lost transaction %s is back in the mempool, first in line\n", tx->GetHash().ToString());
+            }
+        }
+        // Evidence-only transactions go back under ordinary fee policy: no
+        // priority and no duty. Each is offered once per tip.
+        static uint256 offered_tip;
+        static std::set<uint256> offered;
+        if (tip && offered_tip != tip->GetBlockHash()) {
+            offered_tip = tip->GetBlockHash();
+            offered.clear();
+        }
+        for (const auto& tx : evidence_txs) {
+            if (mempool->exists(GenTxid::Txid(tx->GetHash())) || !offered.insert(tx->GetHash()).second) continue;
+            const MempoolAcceptResult r = AcceptToMemoryPool(chainman.ActiveChainstate(), tx, GetTime(), /*bypass_limits=*/false, /*test_accept=*/false);
+            if (r.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                LogPrintf("Lost blocks: evidence transaction %s is in the mempool under ordinary fee policy\n", tx->GetHash().ToString());
             }
         }
     }
