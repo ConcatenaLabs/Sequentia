@@ -116,6 +116,14 @@ constexpr size_t LOST_MAX_UNCERTIFIED = 256;
 std::map<int64_t, std::set<uint256>> g_sent GUARDED_BY(g_lost_mutex);
 //! Blocks refused under the rule (BLOCK_FAILED_LOST), judged again on change.
 std::set<uint256> g_refused GUARDED_BY(g_lost_mutex);
+//! Headers above a refused block, by hash, and how many are kept per parent.
+//! Unverified until the maintenance pass, which drops any whose certificate
+//! fails, so junk cannot hold a parent's slots for long.
+constexpr size_t LOST_WAIVER_MAX_HEADERS = 4096;
+constexpr size_t LOST_WAIVER_MAX_CHILDREN = 16;
+std::map<uint256, CBlockHeader> g_waiver_headers GUARDED_BY(g_lost_mutex);
+std::map<uint256, size_t> g_waiver_children GUARDED_BY(g_lost_mutex);
+bool g_waiver_dirty GUARDED_BY(g_lost_mutex){false};
 
 std::vector<std::pair<const CBlockIndex*, std::shared_ptr<const CBlock>>> g_pending GUARDED_BY(::cs_main);
 
@@ -1583,6 +1591,26 @@ void LostNoteRefused(const CBlockIndex* pindex)
 {
     LOCK(g_lost_mutex);
     g_refused.insert(pindex->GetBlockHash());
+    g_waiver_dirty = true;
+}
+
+void LostNoteRefusedChild(const CBlockHeader& header, bool only_if_parent_kept)
+{
+    LOCK(g_lost_mutex);
+    if (only_if_parent_kept && !g_waiver_headers.count(header.hashPrevBlock)) return;
+    const uint256 hash = header.GetHash();
+    if (g_waiver_headers.count(hash) || g_waiver_headers.size() >= LOST_WAIVER_MAX_HEADERS) return;
+    size_t& kept = g_waiver_children[header.hashPrevBlock];
+    if (kept >= LOST_WAIVER_MAX_CHILDREN) return;
+    ++kept;
+    g_waiver_headers.emplace(hash, header);
+    g_waiver_dirty = true;
+}
+
+bool LostWaiverKept(const uint256& hash)
+{
+    LOCK(g_lost_mutex);
+    return g_waiver_headers.count(hash) > 0;
 }
 
 void LostQueueEvidence(int64_t peer, LostEvidenceMsg msg)

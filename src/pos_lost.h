@@ -171,6 +171,13 @@ std::optional<uint256> LostConflict(const CTransaction& tx, const CBlockIndex* t
 
 //! ConnectTip refused `pindex` under the rule and marked it failed. cs_main held.
 void LostNoteRefused(const CBlockIndex* pindex);
+//! A header above a refused block, which the block index will not take: kept
+//! aside so that what a holder follows depends on the headers it has seen and
+//! not on the order they came in. With `only_if_parent_kept`, a header whose
+//! parent the index does not know is kept only when that parent was kept here.
+void LostNoteRefusedChild(const CBlockHeader& header, bool only_if_parent_kept = false);
+//! Whether that side store holds this header.
+bool LostWaiverKept(const uint256& hash);
 
 //! Evidence received from a peer, judged on the maintenance pass.
 void LostQueueEvidence(int64_t peer, LostEvidenceMsg msg);
