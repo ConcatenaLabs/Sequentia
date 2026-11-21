@@ -150,7 +150,16 @@ bool g_waiver_dirty GUARDED_BY(g_lost_mutex){false};
 //! Parents with more certified evidence-only children than LostSiblingCap.
 std::set<uint256> g_sibling_capped GUARDED_BY(g_lost_mutex);
 //! Refused blocks with enough certified blocks above them: this holder follows.
-std::set<uint256> g_waived GUARDED_BY(g_lost_mutex);
+//! A refused block a quorum certified past. Accepted as they are: that block and
+//! the blocks counted above it. Which losses it covers, and what covering means,
+//! is `CoveredLosses` and the plan's `undemanded`.
+struct LostWaived {
+    uint64_t epoch{0};            //!< the last loss when it was waived
+    int height{0};
+    std::set<uint256> accepted;
+    SERIALIZE_METHODS(LostWaived, obj) { READWRITE(obj.epoch, obj.height, obj.accepted); }
+};
+std::map<uint256, LostWaived> g_waived GUARDED_BY(g_lost_mutex);
 int g_waiver_depth{DEFAULT_LOST_WAIVER_DEPTH};
 
 std::vector<std::pair<const CBlockIndex*, std::shared_ptr<const CBlock>>> g_pending GUARDED_BY(::cs_main);
@@ -259,12 +268,12 @@ void WriteFile() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
     if (!f) return;
     CAutoFile file(f, SER_DISK, PROTOCOL_VERSION);
     try {
-        file << (uint32_t)6 << (uint64_t)g_blocks.size() << g_epoch;
+        file << (uint32_t)7 << (uint64_t)g_blocks.size() << g_epoch;
         for (const auto& [h, b] : g_blocks) {
             file << *b.block << b.height << b.certified << b.own << b.epoch
                  << b.prot << b.fork_hash << b.fork_height << (uint8_t)b.anchor_state << b.btc << b.seed_ok;
         }
-        file << g_sibling_capped << g_waiver_headers;
+        file << g_sibling_capped << g_waiver_headers << g_waived;
         if (!FileCommit(file.Get())) return;
         file.fclose();
         if (!RenameOver(tmp, LostPath())) return;
@@ -323,7 +332,7 @@ bool Binds(const LostSpend& s, uint32_t anchor_h, const CBlockIndex* prev)
     return LostStillBinds(s.height, s.anchor_h, prev->nHeight + 1, anchor_h, prev);
 }
 
-std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockIndex* prev, const CCoinsViewCache& view) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockIndex* prev, const CCoinsViewCache& view, const std::set<uint256>& settled) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
 {
     if (g_spends.empty()) return std::nullopt;
     std::set<uint256> lost_txids;
@@ -340,7 +349,7 @@ std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockInde
             auto it = g_spends.find(in.prevout);
             if (it == g_spends.end()) continue;
             for (const LostSpend& s : it->second) {
-                if (s.txid == txid) continue;
+                if (s.txid == txid || settled.count(s.txid)) continue;
                 if (!Binds(s, block.m_anchor_height, prev)) continue;
                 if (LostBindingYields(s.leaf, tx, n, view, prev)) continue;
                 return strprintf("tx %s spends %s:%u, which tx %s of lost block %s (anchor %u, fork %d) spends",
@@ -475,7 +484,7 @@ void LostInit()
         uint32_t version;
         uint64_t n;
         file >> version >> n;
-        if (version != 5 && version != 6) throw std::runtime_error("unknown version");
+        if (version < 5 || version > 7) throw std::runtime_error("unknown version");
         file >> g_epoch;
         for (uint64_t i = 0; i < n && i < POS_LOST_MAX_BLOCKS; ++i) {
             auto block = std::make_shared<CBlock>();
@@ -510,6 +519,7 @@ void LostInit()
             }
             g_waiver_dirty = !g_waiver_headers.empty();
         }
+        if (version >= 7) file >> g_waived;
         // The duty holds from the first block this node judges after a
         // restart, before any maintenance pass: the bound spends as written.
         // Evidence binds only what the next maintenance pass finds valid here.
@@ -1132,7 +1142,7 @@ std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const uint256& a
 //! coin stands, so a record naming another transaction would take the coin from
 //! a transaction this node had on its own chain as surely as mining the respend
 //! would, even before the duty names that transaction.
-std::optional<std::string> RecordViolationLocked(const CBlock& block, const CBlockIndex* prev) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+std::optional<std::string> RecordViolationLocked(const CBlock& block, const CBlockIndex* prev, const std::set<uint256>& settled) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
 {
     for (const auto& r : LostParseRecords(block)) {
         if (!r) continue;
@@ -1145,7 +1155,7 @@ std::optional<std::string> RecordViolationLocked(const CBlock& block, const CBlo
                 auto it = g_spends.find(in.prevout);
                 if (it == g_spends.end()) continue;
                 for (const LostSpend& s : it->second) {
-                    if (!s.own || s.txid == txid || !Binds(s, block.m_anchor_height, prev)) continue;
+                    if (!s.own || s.txid == txid || settled.count(s.txid) || !Binds(s, block.m_anchor_height, prev)) continue;
                     return strprintf("a record binds %s:%u to tx %s, which tx %s of lost block %s (anchor %u, fork %d) spends",
                                      in.prevout.hash.ToString(), in.prevout.n, txid.ToString(), s.txid.ToString(),
                                      s.block.ToString(), s.anchor_h, s.fork_height);
@@ -1207,12 +1217,45 @@ Standing StandingOf(const std::set<uint256>& prot) EXCLUSIVE_LOCKS_REQUIRED(g_lo
     return st;
 }
 
+//! The lost blocks of this node's own chain that a waived block on `prev`'s chain
+//! covers: the chain holds that block, the lost block's fork point is below it,
+//! and the lost block was lost no later than the waiver. Every other loss, and
+//! every later one, keeps the whole duty.
+std::set<uint256> CoveredLosses(const CBlockIndex* prev) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    std::set<uint256> out;
+    if (g_waived.empty() || !prev) return out;
+    std::vector<const LostWaived*> on_chain;
+    for (const auto& [h, w] : g_waived) {
+        const CBlockIndex* at = w.height <= prev->nHeight ? prev->GetAncestor(w.height) : nullptr;
+        if (at && at->GetBlockHash() == h) on_chain.push_back(&w);
+    }
+    if (on_chain.empty()) return out;
+    for (const auto& [h, b] : g_blocks) {
+        if (!b.own || b.fork_height < 0) continue;
+        for (const LostWaived* w : on_chain) {
+            if (b.fork_height < w->height && b.epoch <= w->epoch) {
+                out.insert(h);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
 //! The holders' plan for a block on `prev` anchored at `anchor_h`.
 struct Plan {
     std::vector<CTransactionRef> prefix;
     bool cut{false};
     std::set<uint256> to_record;
     std::vector<LostRecord> records;
+    //! Of a loss a waiver covers: what the accepted blocks left out, with its
+    //! descendants. Offered first by this node's leaders and not demanded of a block.
+    std::set<uint256> undemanded;
+    //! The coins those transactions still hold: any other spend stays refused.
+    std::map<COutPoint, uint256> held;
+    //! Those whose coin the chain has spent: settled, holding nothing more.
+    std::set<uint256> settled;
     std::string summary;
     int64_t micros{0};
 };
@@ -1251,6 +1294,29 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     // transaction that a record of this chain forbids is never due.
     const auto bound = ChainBindings(prev, anchor_h);
     const auto classes = LostClassifyTxs(txs, view, prev, consensus, &sigops, &bound);
+    const std::set<uint256> covered = CoveredLosses(prev);
+    if (!covered.empty()) {
+        std::set<uint256> elsewhere, live, gone;
+        for (size_t i = 0; i < txs.size(); ++i) {
+            if (!covered.count(where[i].first->hash)) elsewhere.insert(txs[i]->GetHash());
+        }
+        for (size_t i = 0; i < txs.size(); ++i) {
+            const uint256 id = txs[i]->GetHash();
+            bool left = covered.count(where[i].first->hash) && !elsewhere.count(id);
+            for (const CTxIn& in : txs[i]->vin) left = left || plan.undemanded.count(in.prevout.hash);
+            if (!left) continue;
+            plan.undemanded.insert(id);
+            if (classes[i].first == LostTxCat::GONE) {
+                gone.insert(id);
+                continue;
+            }
+            live.insert(id);
+            for (const CTxIn& in : txs[i]->vin) {
+                if (!in.m_is_pegin) plan.held.emplace(in.prevout, id);
+            }
+        }
+        for (const uint256& id : gone) if (!live.count(id)) plan.settled.insert(id);
+    }
     std::set<uint256> bound_txids;
     for (const auto& [o, t] : bound) bound_txids.insert(t.txid);
     // The branch of a store block from its fork point's child, or empty.
@@ -1456,6 +1522,8 @@ uint256 StoreFingerprint() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
         if (!b.own) continue;
         hw << h << b.prot << b.certified << (uint8_t)b.anchor_state << b.fork_height << b.epoch;
     }
+    // What the plan reads of the waivers.
+    for (const auto& [h, w] : g_waived) hw << h << w.epoch << w.height;
     return hw.GetHash();
 }
 
@@ -1578,42 +1646,69 @@ LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor
 }
 
 bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
-                    const std::function<bool()>& certified_descendant, CCoinsViewCache& view,
+                    const std::function<std::vector<uint256>()>& certified_descendant, CCoinsViewCache& view,
                     BlockValidationState& state, bool just_check)
 {
     AssertLockHeld(::cs_main);
     if (!pindexPrev || ibd || !LostActiveAt(pindexPrev->nHeight + 1)) return true;
     LOCK(g_lost_mutex);
-    if (!g_waived.empty()) {
-        // A quorum has certified past this holder: it takes that block, and the
-        // duty is off above it, or it would be refused again one block later. It
-        // still does not sign the waived block itself.
-        bool waived = !just_check && g_waived.count(block.GetHash()) > 0;
-        const CBlockIndex* w = pindexPrev;
-        for (int i = 0; !waived && w && i <= LOST_MAX_BRANCH; ++i, w = w->pprev) waived = g_waived.count(w->GetBlockHash()) > 0;
-        if (waived) {
-            LogPrintf("Lost blocks: block %s at height %d is at or above a block a quorum certified past this holder; the duty does not bear on it\n",
-                      block.GetHash().ToString(), pindexPrev->nHeight + 1);
+    // A quorum has certified past this holder: it takes that block and the blocks
+    // counted above it, as they are. It still does not sign them itself.
+    if (!just_check) {
+        const uint256 hash = block.GetHash();
+        for (const auto& [root, w] : g_waived) {
+            if (!w.accepted.count(hash)) continue;
+            LogPrintf("Lost blocks: block %s at height %d is one a quorum certified past this holder (above %s); accepted as it is\n",
+                      hash.ToString(), pindexPrev->nHeight + 1, root.ToString());
             return true;
         }
     }
     std::optional<std::string> why;
     std::string reason;
-    if ((why = ViolationLocked(block, pindexPrev, view)) || (why = RecordViolationLocked(block, pindexPrev))) {
+    // Under a waiver the plan says which transactions are settled, so it comes first.
+    std::optional<Plan> planned;
+    if (!g_spends.empty() && !g_waived.empty()) {
+        planned = PlanLocked(pindexPrev, block.m_anchor_height, block.m_anchor_hash, view, /*build=*/false);
+    }
+    static const std::set<uint256> none;
+    const std::set<uint256>& settled = planned ? planned->settled : none;
+    if ((why = ViolationLocked(block, pindexPrev, view, settled)) || (why = RecordViolationLocked(block, pindexPrev, settled))) {
         reason = "bad-txns-lost-respend";
     } else if ((why = SignedViolationLocked(block, pindexPrev))) {
         reason = "bad-txns-signed-respend";
     } else if (!g_spends.empty()) {
-        // The duty: the due lost transactions first, and the records owed.
-        Plan plan = PlanLocked(pindexPrev, block.m_anchor_height, block.m_anchor_hash, view, /*build=*/false);
-        size_t i = 0;
-        for (; i < plan.prefix.size(); ++i) {
-            if (i + 1 >= block.vtx.size() || block.vtx[i + 1]->GetHash() != plan.prefix[i]->GetHash()) break;
+        // The duty: the due lost transactions first, and the records owed. What
+        // a waiver covers may be left out, and its coins stay held.
+        if (!planned) planned = PlanLocked(pindexPrev, block.m_anchor_height, block.m_anchor_hash, view, /*build=*/false);
+        const Plan& plan = *planned;
+        size_t pos = 1, in_place = 0;
+        bool missing = false;
+        for (const CTransactionRef& due : plan.prefix) {
+            if (pos < block.vtx.size() && block.vtx[pos]->GetHash() == due->GetHash()) {
+                ++pos;
+                ++in_place;
+            } else if (!plan.undemanded.count(due->GetHash())) {
+                missing = true;
+                break;
+            }
         }
-        if (i < plan.prefix.size()) {
-            why = strprintf("does not begin with the due lost transactions (%d of %d in place; %s)", (int)i, (int)plan.prefix.size(), plan.summary);
+        for (size_t t = 1; !why && t < block.vtx.size(); ++t) {
+            const uint256 id = block.vtx[t]->GetHash();
+            for (const CTxIn& in : block.vtx[t]->vin) {
+                auto it = plan.held.find(in.prevout);
+                if (it == plan.held.end() || it->second == id) continue;
+                why = strprintf("tx %s spends %s:%u, which tx %s of a lost block a waiver covers still holds",
+                                id.ToString(), in.prevout.hash.ToString(), in.prevout.n, it->second.ToString());
+                reason = "bad-txns-lost-respend";
+                break;
+            }
+        }
+        if (why) {
+            // Refused above.
+        } else if (missing) {
+            why = strprintf("does not begin with the due lost transactions (%d of %d in place; %s)", (int)in_place, (int)plan.prefix.size(), plan.summary);
             reason = "bad-lost-replay";
-        } else if (plan.cut && block.vtx.size() != 1 + plan.prefix.size()) {
+        } else if (plan.cut && pos != block.vtx.size()) {
             why = strprintf("carries other transactions while due lost transactions did not fit (%s)", plan.summary);
             reason = "bad-lost-replay";
         } else if (!plan.to_record.empty()) {
@@ -1627,7 +1722,7 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
                 }
             }
             for (const uint256& t : plan.to_record) {
-                if (!carried.count(t)) {
+                if (!carried.count(t) && !plan.undemanded.count(t)) {
                     why = strprintf("does not record lost tx %s (%s)", t.ToString(), plan.summary);
                     reason = "bad-lost-unrecorded";
                     break;
@@ -1636,9 +1731,18 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
         }
     }
     if (!why) return true;
-    if (certified_descendant()) {
-        LogPrintf("Lost blocks: block %s at height %d breaks the duty but has a certified descendant; the evidence does not bear on it: %s\n",
-                  block.GetHash().ToString(), pindexPrev->nHeight + 1, *why);
+    const std::vector<uint256> above = certified_descendant();
+    if (!above.empty()) {
+        LogPrintf("Lost blocks: block %s at height %d breaks the duty but %d certified block(s) stand above it; accepted: %s\n",
+                  block.GetHash().ToString(), pindexPrev->nHeight + 1, (int)above.size(), *why);
+        LostWaived& w = g_waived[block.GetHash()];
+        if (w.accepted.empty()) {
+            w.epoch = g_epoch;
+            w.height = pindexPrev->nHeight + 1;
+            w.accepted.insert(block.GetHash());
+        }
+        w.accepted.insert(above.begin(), above.end());
+        g_dirty_file = true;
         return true;
     }
     LogPrintf("Lost blocks: refusing block %s at height %d: %s: %s\n", block.GetHash().ToString(),
@@ -2434,8 +2538,8 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             bool dropped = false;
             // The longest run of certified headers above `parent`, up to `need`,
             // under the registry at the branch's fork point.
-            std::function<int(const uint256&, const CBlockIndex&, const uint256&, const StakeRegistry&, int)> run =
-                [&](const uint256& parent, const CBlockIndex& view, const uint256& fork, const StakeRegistry& reg, int need) -> int {
+            std::function<int(const uint256&, const CBlockIndex&, const uint256&, const StakeRegistry&, int, std::vector<uint256>&)> run =
+                [&](const uint256& parent, const CBlockIndex& view, const uint256& fork, const StakeRegistry& reg, int need, std::vector<uint256>& path) -> int {
                 if (need <= 0) return 0;
                 auto it = kids.find(parent);
                 if (it == kids.end()) return 0;
@@ -2461,7 +2565,13 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                     next.nHeight = view.nHeight + 1;
                     next.m_anchor_height = hdr.m_anchor_height;
                     next.m_anchor_hash = hdr.m_anchor_hash;
-                    best = std::max(best, 1 + run(hash, next, fork, reg, need - 1));
+                    std::vector<uint256> above;
+                    const int got = 1 + run(hash, next, fork, reg, need - 1, above);
+                    if (got > best) {
+                        best = got;
+                        path.assign(1, hash);
+                        path.insert(path.end(), above.begin(), above.end());
+                    }
                     if (best >= need) break;
                 }
                 return best;
@@ -2483,10 +2593,17 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                     g_waiver_dirty = true; // this node's own read failed: next pass
                     continue;
                 }
-                const int depth = run(root, view, fork->GetBlockHash(), *at_fork, g_waiver_depth);
+                std::vector<uint256> counted;
+                const int depth = run(root, view, fork->GetBlockHash(), *at_fork, g_waiver_depth, counted);
                 if (depth >= g_waiver_depth) {
                     LogPrintf("Lost blocks: refused block %s has %d certified block(s) above it; following the quorum\n", root.ToString(), depth);
-                    g_waived.insert(root);
+                    LostWaived w;
+                    w.epoch = g_epoch;
+                    w.height = x->nHeight;
+                    w.accepted.insert(root);
+                    w.accepted.insert(counted.begin(), counted.end());
+                    g_waived.emplace(root, std::move(w));
+                    g_dirty_file = true;
                     changed = true;
                 }
             }

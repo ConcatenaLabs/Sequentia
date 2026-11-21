@@ -182,11 +182,14 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
 
 //! The rule, for `block` built on `pindexPrev`, the active tip. Off-chain
 //! evidence is not applied during initial block download, nor to a block that
-//! `certified_descendant` says has a certified descendant, nor to a block at or
-//! above one a quorum has certified past this holder (`just_check`, a block this
+//! `certified_descendant` names the certified blocks above (the waiver's depth of
+//! them), nor to a block a quorum has certified past this holder or one of those
+//! counted above it, which are accepted as they are. A waiver covers only the
+//! losses before it below that block: what the accepted blocks left out is no
+//! longer demanded, and any other spend of its coins stays refused (`just_check`, a block this
 //! node is asked to sign, is not excused by being that block itself). cs_main held.
 bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
-                    const std::function<bool()>& certified_descendant, CCoinsViewCache& view,
+                    const std::function<std::vector<uint256>()>& certified_descendant, CCoinsViewCache& view,
                     BlockValidationState& state, bool just_check = false);
 
 //! A lost transaction `tx` conflicts with, for the mempool, while a child of

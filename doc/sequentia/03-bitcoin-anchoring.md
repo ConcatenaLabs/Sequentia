@@ -400,8 +400,8 @@ The refusal is soft. No peer is punished, no mark that a restart keeps is
 written, and the refused block is judged again whenever the holder's evidence
 changes. A holder follows a quorum that certifies past it: once a run of
 consecutive certified headers above a refused block reaches the waiver depth
-(`DEFAULT_LOST_WAIVER_DEPTH` in `src/pos_lost.h`), it takes that block, and the
-duty is off for every block above it. The holder keeps the headers above a
+(`DEFAULT_LOST_WAIVER_DEPTH` in `src/pos_lost.h`), it takes that block and the
+certified blocks it counted above it, as they are. The holder keeps the headers above a
 refused block aside and reads a headers message past a refused header, so the
 result depends on the set of headers it has seen and not on their order. A
 header enters that store only once its certificate verifies under the registry at
@@ -420,6 +420,21 @@ waived block itself. The holder drops L once its active chain has lapsed for L (
 its active chain no longer contains F, once Bitcoin is 2W above a_L: a bound on
 memory, not a rule), and then judges every block it refused by validity
 alone.
+
+**A waiver accepts blocks; it does not release the duty.** It covers a lost block
+only when the chain holds the waived block, the lost block's fork point is below
+it, and the lost block was lost no later than the waiver. Every other loss, and
+every later one, keeps the whole duty. For a covered loss the holder stops
+demanding the transactions the accepted blocks left out, so it is not refused
+again one block after the waiver, and it still refuses any other spend of their
+coins: a respend of one of them is a duty-breaking block again and costs another
+waiver. A transaction whose coin the accepted blocks spent is settled and holds
+nothing more. The holder's own leaders still offer the left-out transactions
+first. The waived blocks are kept in `lostblocks.dat` with the loss they were
+waived at, so a restart or a reindex changes none of this. This is no downgrade
+by evidence: evidence and failed rounds change nothing for a holder, and only a
+waiver, which costs a quorum at the refused height and at each of the next *d*,
+does this.
 
 A producer that holds L builds exactly what the duty asks. The due
 transactions go first, whatever its own fee list and floor say, and the

@@ -4609,38 +4609,46 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // active tip and has no certified descendant, and never during initial
     // block download: it can stop this node accepting a block, never undo one,
     // and never judge history.
-    const auto lost_certified_descendant = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
-        if (fJustCheck) return false;
+    const auto lost_certified_descendant = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) -> std::vector<uint256> {
+        if (fJustCheck) return {};
+        const int depth = LostWaiverDepth();
         for (const auto& entry : m_blockman.m_block_index) {
             const CBlockIndex* p = entry.second;
-            if (p->nHeight < pindex->nHeight + LostWaiverDepth() || !p->PosCarriesQuorum()) continue;
-            if (p->GetAncestor(pindex->nHeight) != pindex || !p->pprev) continue;
-            {
-                // Every block between carries a quorum too.
-                bool all = true;
-                for (const CBlockIndex* w = p->pprev; w != pindex; w = w->pprev) all = all && w->PosCarriesQuorum();
-                if (!all) continue;
-            }
+            if (p->nHeight != pindex->nHeight + depth || !p->PosCarriesQuorum()) continue;
+            if (p->GetAncestor(pindex->nHeight) != pindex) continue;
             // "Certified" means a certificate that verifies, never the flag a
             // header stored before its body was checked (doc 03, "The duty of a
             // holder"): the aggregate under the committee its parent's anchor
-            // seeds, with this node's registry, reaching the seat quorum.
-            CBlockHeader hdr;
-            if (p->trimmed()) {
-                CBlock blk;
-                if (!(p->nStatus & BLOCK_HAVE_DATA) || !node::ReadBlockFromDisk(blk, p, m_params.GetConsensus())) continue;
-                hdr = blk.GetBlockHeader();
-            } else {
-                hdr = p->GetBlockHeader();
+            // seeds, with this node's registry, reaching the seat quorum. Each
+            // of the blocks counted, from the block above this one to `p`.
+            std::vector<uint256> counted;
+            bool all = true;
+            for (const CBlockIndex* w = p; all && w != pindex; w = w->pprev) {
+                CBlockHeader hdr;
+                if (w->trimmed()) {
+                    CBlock blk;
+                    if (!(w->nStatus & BLOCK_HAVE_DATA) || !node::ReadBlockFromDisk(blk, w, m_params.GetConsensus())) {
+                        all = false;
+                        break;
+                    }
+                    hdr = blk.GetBlockHeader();
+                } else {
+                    hdr = w->GetBlockHeader();
+                }
+                std::string reason;
+                const StakeRegistry& reg = StakeRegistry::GetInstance();
+                const int seats = PosVerifyBitfieldCertificate(hdr, w->pprev, reg, reason);
+                if (seats < 0 || seats < PosSlotQuorumAt(reg, w->nHeight)) {
+                    LogPrintf("Lost blocks: descendant %s of %s looks certified but its certificate does not verify (%s); not an exception\n",
+                              w->GetBlockHash().ToString(), pindex->GetBlockHash().ToString(), reason.empty() ? "below the quorum" : reason);
+                    all = false;
+                    break;
+                }
+                counted.push_back(w->GetBlockHash());
             }
-            std::string reason;
-            const StakeRegistry& reg = StakeRegistry::GetInstance();
-            const int seats = PosVerifyBitfieldCertificate(hdr, p->pprev, reg, reason);
-            if (seats >= 0 && seats >= PosSlotQuorumAt(reg, p->nHeight)) return true;
-            LogPrintf("Lost blocks: descendant %s of %s looks certified but its certificate does not verify (%s); not an exception\n",
-                      p->GetBlockHash().ToString(), pindex->GetBlockHash().ToString(), reason.empty() ? "below the quorum" : reason);
+            if (all) return counted;
         }
-        return false;
+        return {};
     };
     bool lost_has_record = false;
     if (check_pos_rules && !LostCheckRecords(block, pindex->pprev, fJustCheck, state, view, &lost_has_record)) {
