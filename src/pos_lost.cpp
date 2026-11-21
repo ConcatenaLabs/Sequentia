@@ -173,6 +173,14 @@ void WriteSignedFile() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
     }
 }
 
+//! Whether this node can hand the block on whole: an anchor on Bitcoin's best
+//! chain needs no proof, and any other needs the headers that link it there. A
+//! receiver answers `anchor-unproven` to a stale-anchored block without them.
+bool EvidenceComplete(const LostBlk& b)
+{
+    return b.anchor_state == AnchorState::OK || !b.btc.empty();
+}
+
 LostBlk MakeBlk(const std::shared_ptr<const CBlock>& block, int height)
 {
     LostBlk b;
@@ -1888,8 +1896,16 @@ std::vector<LostEvidenceMsg> LostToSend(int64_t peer)
         if (b.prot && !sent.count(h)) todo.push_back(&b);
     }
     std::sort(todo.begin(), todo.end(), [](const LostBlk* a, const LostBlk* b) { return a->height < b->height; });
+    // A block is marked sent only when it went out whole. One whose headers are
+    // not read yet waits, and so do its children: a receiver turns a child down
+    // while it lacks the parent.
+    std::set<uint256> waiting;
     for (const LostBlk* b : todo) {
         if (out.size() >= 8) break;
+        if (!EvidenceComplete(*b) || waiting.count(b->prev)) {
+            waiting.insert(b->hash);
+            continue;
+        }
         sent.insert(b->hash);
         out.push_back(LostEvidenceMsg{*b->block, b->btc});
     }
@@ -1986,6 +2002,8 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             if (auto sh = stale_headers.find(it->first); sh != stale_headers.end() && b.btc.empty()) {
                 b.btc = sh->second;
                 g_dirty_file = true;
+                // Sent before Bitcoin took its anchor, it went without them.
+                for (auto& [peer, sent] : g_sent) sent.erase(it->first);
             }
             const CBlockIndex* self = chainman.m_blockman.LookupBlockIndex(b.hash);
             const bool active = self && chainman.ActiveChain().Contains(self);
@@ -2409,10 +2427,15 @@ UniValue LostGetInfo(int next_height)
     return out;
 }
 
-std::optional<LostEvidenceMsg> LostGetEvidence(const uint256& hash)
+std::optional<LostEvidenceMsg> LostGetEvidence(const uint256& hash, bool& incomplete)
 {
+    incomplete = false;
     LOCK(g_lost_mutex);
     auto it = g_blocks.find(hash);
     if (it == g_blocks.end()) return std::nullopt;
+    if (!EvidenceComplete(it->second)) {
+        incomplete = true;
+        return std::nullopt;
+    }
     return LostEvidenceMsg{*it->second.block, it->second.btc};
 }
