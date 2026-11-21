@@ -219,6 +219,8 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool);
 //! getlostblocks. "active" is whether the rule applies to the block at
 //! `next_height` (the tip's child), as getdeploymentinfo reports it.
 UniValue LostGetInfo(int next_height);
-std::optional<LostEvidenceMsg> LostGetEvidence(const uint256& hash);
+//! One block's evidence, only when it is whole: `incomplete` says the block is
+//! held but the Bitcoin headers of its stale anchor are not read yet.
+std::optional<LostEvidenceMsg> LostGetEvidence(const uint256& hash, bool& incomplete);
 
 #endif // BITCOIN_POS_LOST_H

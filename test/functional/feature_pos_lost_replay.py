@@ -30,11 +30,11 @@ import shutil
 import time
 from decimal import Decimal
 
-from feature_pos_lost_blocks import WAIVER, LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W
+from feature_pos_lost_blocks import BitcoinGate, WAIVER, LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W
 from test_framework.authproxy import JSONRPCException
 from test_framework.messages import tx_from_hex, CTxInWitness
 from test_framework.script import CScript, OP_0, OP_1, OP_IF, OP_ENDIF, OP_DROP, OP_CHECKMULTISIG
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, rpc_port
 
 CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6,b2").split(",")
 ABUSE_TXS = int(os.environ.get("LOST_ABUSE_TXS", "340"))
@@ -211,7 +211,8 @@ class LostReplayTest(LostBlocksTest):
         # Bitcoin moves to a third branch: X is lost too (on the seller's node, which shows it).
         self.bitcoin_reorg(1)
         self.wait_until(lambda: x["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=60)
-        ev = a.getlostblock(x["hash"])
+        ev = self.whole_evidence(a, x["hash"])
+        assert ev["btc"], "a stale-anchored block is served only with its Bitcoin headers"
         r = self.nodes[2].submitlostblock(ev["block"], ev["btc"])
         self.wait_until(lambda: x["hash"] in self.lost(2), timeout=60)
         self.record("r3", "two lost branches on node 2", "L (T, lost first) and X (R, lost second, shown by submitlostblock: %r)" % r)
@@ -584,7 +585,7 @@ class LostReplayTest(LostBlocksTest):
         a.reconsiderblock(top)
         self.wait_until(lambda: a.getbestblockhash() == n1.getbestblockhash(), timeout=60)
         self.wait_until(lambda: fab["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=30)
-        ev = a.getlostblock(fab["hash"])
+        ev = self.whole_evidence(a, fab["hash"])
         # A syncing node: node 5 wiped and started with no peer, shown L' first.
         self.stop_node(LATE)
         shutil.rmtree(os.path.join(self.nodes[LATE].datadir, "elementsregtest", "blocks"))
@@ -893,6 +894,47 @@ class LostReplayTest(LostBlocksTest):
         self.realign()
 
     # ---------------------------------------------------------------- run
+    def case_rh(self):
+        """A block whose stale headers are not read yet is neither served nor sent, and goes out whole once they are."""
+        self.log.info("(rh) evidence waits for its Bitcoin headers")
+        gate = BitcoinGate(rpc_port(N + 3), self.btc_port)
+        try:
+            gate.withhold = True
+            self.restart_node(1, extra_args=self.node_args(1) + ["-mainchainrpcport=%d" % gate.port])
+            self.nodes[1].loadwallet("w")
+            for j in range(N):
+                if j not in (1, LATE):
+                    self.connect_nodes(1, j)
+            self.disconnect_all(LATE)
+            online = [i for i in range(N) if i != LATE]
+            st = self.gap("rh", online=online)
+            node, late = self.nodes[1], self.nodes[LATE]
+            try:
+                got = node.getlostblock(st["L"])
+                raise AssertionError("served without its headers: btc=%r" % got["btc"])
+            except JSONRPCException as e:
+                assert "not read yet" in e.error["message"], e.error
+                self.record("rh", "while its headers are withheld, getlostblock answers", e.error["message"])
+            since = self.log_size(LATE)
+            self.connect_nodes(LATE, 1)
+            self.wait_until(lambda: late.getblockcount() >= st["L_h"] - 1, timeout=60)
+            time.sleep(5)
+            assert st["L"] not in [b["hash"] for b in late.getlostblocks()["blocks"]]
+            assert not self.log_has(LATE, "anchor-unproven", since)
+            self.record("rh", "while withheld", "the peer holds no copy of L and logged no anchor-unproven")
+            gate.withhold = False
+            self.wait_until(lambda: st["L"] in [b["hash"] for b in late.getlostblocks()["blocks"]], timeout=60)
+            ev = self.whole_evidence(node, st["L"])
+            assert ev["btc"], "served without its headers"
+            assert self.log_has(LATE, "took evidence %s" % st["L"], since)
+            self.record("rh", "outcome", "once the headers were read, L went to the peer whole (%d Bitcoin header(s))" % len(ev["btc"]))
+        finally:
+            gate.withhold = False
+            self.restart_node(1, extra_args=self.node_args(1))
+            gate.close()
+        self.nodes[1].loadwallet("w")
+        self.mesh(range(N))
+
     def run_test(self):
         try:
             for c in CASES:

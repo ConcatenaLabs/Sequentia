@@ -285,7 +285,9 @@ The rule has two layers.
   block at that height. The daemon need not have seen the stale block:
   evidence carries the Bitcoin headers from the best chain to L's anchor, and
   the holder checks their work itself. Evidence whose stale anchor is not
-  proven this way is not taken, so an invented block binds nothing.
+  proven this way is not taken, so an invented block binds nothing. A node
+  neither serves nor sends a stale-anchored block until it holds those headers,
+  and counts a block as sent to a peer only when it went out with them.
 
 #### The duty of a holder
 

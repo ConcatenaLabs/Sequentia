@@ -16,10 +16,13 @@ so it builds what honest nodes refuse), nodes 1-4 are honest full nodes, node
 -par=1; each refusal is asserted by the node's own reason.
 """
 
+import http.client
+import http.server
 import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 import urllib.parse
 from decimal import Decimal
@@ -54,7 +57,75 @@ def make_key():
     return byte_to_base58(k.get_bytes() + b'\x01', 239), k.get_pubkey().get_bytes().hex()
 
 
+class BitcoinGate:
+    """A forwarder in front of the Bitcoin daemon's RPC that can withhold the raw
+    header reads, so that a test can hold a node between losing a block and
+    reading the block's stale Bitcoin headers."""
+
+    def __init__(self, port, target_port):
+        gate = self
+        self.withhold = False
+        self.target_port = target_port
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                reply = gate.refused(body)
+                status = 200
+                if reply is None:
+                    c = http.client.HTTPConnection("127.0.0.1", gate.target_port, timeout=60)
+                    c.request("POST", self.path, body, {"Authorization": self.headers.get("Authorization", ""),
+                                                        "Content-Type": "application/json"})
+                    r = c.getresponse()
+                    status, reply = r.status, r.read()
+                    c.close()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.port = port
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def refused(self, body):
+        if not self.withhold:
+            return None
+        try:
+            req = json.loads(body)
+        except ValueError:
+            return None
+        params = req.get("params") if isinstance(req, dict) else None
+        if isinstance(req, dict) and req.get("method") == "getblockheader" and isinstance(params, list) and len(params) > 1 and params[1] is False:
+            return json.dumps({"result": None, "error": {"code": -8, "message": "withheld"}, "id": req.get("id")}).encode()
+        return None
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=10)
+
+
 class LostBlocksTest(BitcoinTestFramework):
+    def whole_evidence(self, node, block_hash):
+        """The block's evidence, once the node serves it: never without the
+        Bitcoin headers of a stale anchor."""
+        got = {}
+        def served():
+            try:
+                got.update(node.getlostblock(block_hash))
+                return True
+            except JSONRPCException as e:
+                assert "not read yet" in e.error["message"], e.error
+                return False
+        self.wait_until(served, timeout=60)
+        return got
+
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = N
@@ -587,7 +658,7 @@ class LostBlocksTest(BitcoinTestFramework):
         self.btc_mine(2)
         self.wait_until(lambda: a.getbestblockhash() != s["hash"], timeout=60)
         self.wait_until(lambda: s["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=30)
-        ev = a.getlostblock(s["hash"])
+        ev = self.whole_evidence(a, s["hash"])
         self.record("f", "S", "%s at height %d anchored %d (stale), certified, spends the merchant's coin and coin2 to the seller; %d Bitcoin header(s) carried" %
                     (s["hash"][:16], s["height"], q + 1, 0))
         # The honest chain goes on: certified blocks above H1.
@@ -685,7 +756,7 @@ class LostBlocksTest(BitcoinTestFramework):
         self.btc().invalidateblock(a_hash)
         self.btc_mine(2)
         self.wait_until(lambda: one["hash"] in [b["hash"] for b in a.getlostblocks()["blocks"]], timeout=30)
-        ev = a.getlostblock(one["hash"])
+        ev = self.whole_evidence(a, one["hash"])
         self.record("g", "one signer on a stale anchor", self.sub(n, ev["block"], ev["btc"]) +
                     "; lost: %s" % (one["hash"] in self.lost(1)))
         # g4: a mutated block (the certificate's block hash changes).

@@ -1903,7 +1903,9 @@ static RPCHelpMan getlostblock()
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
         RPCExamples{HelpExampleCli("getlostblock", "\"<hash>\"")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
-            std::optional<LostEvidenceMsg> ev = LostGetEvidence(ParseHashV(request.params[0], "blockhash"));
+            bool incomplete = false;
+            std::optional<LostEvidenceMsg> ev = LostGetEvidence(ParseHashV(request.params[0], "blockhash"), incomplete);
+            if (incomplete) throw JSONRPCError(RPC_MISC_ERROR, "the Bitcoin headers of this block's stale anchor are not read yet");
             if (!ev) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "no such lost block");
             CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
             ss << ev->block;
