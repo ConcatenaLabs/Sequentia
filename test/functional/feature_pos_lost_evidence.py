@@ -26,6 +26,10 @@ the network of feature_pos_lost_blocks.py. Cases (LOST_CASES):
   afterwaiver  the holders have followed a quorum past one lost block. A later,
            unrelated block L2 is lost above it: the waiver of the first loss says
            nothing about L2, so a sub-quorum block carrying L2's respend is refused.
+  evlapse  three of six seats and no quorum at any height, no sibling. The honest
+           seats mine T in sub-quorum blocks; the coalition keeps its own
+           sub-quorum branch from the fork point carrying R, one block longer,
+           and shows it once the honest tip has passed the lapse. T must stay.
 """
 
 import time
@@ -215,6 +219,50 @@ class LostEvidenceTest(LostAutonomousTest, LostRecordAttacksTest):
             raise AssertionError("ATTACK SUCCEEDED (afterwaiver): holders %s took the respend of a later lost block" % took)
         self.assert_refused(case, HONEST, y["hash"], since)
         self.record(case, "blocked", "the waiver of the first loss does not bear on the second")
+
+    def case_evlapse(self):
+        case = "evlapse"
+        self.log.info("(evlapse) a blocking share's own branch, shown after the lapse, waiver depth %d" % WAIVER)
+        st = self.gap(case)
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        hdr = n1.getblockheader(st["L"])
+        fork = hdr["height"] - 1
+        self.isolate()
+        since = [self.log_size(i) for i in range(len(self.nodes))]
+        t0 = time.time()
+        self.start_producers(HOLDERS)
+        lapse = None
+        for step in range(9):
+            height = n1.getblockcount() + 1
+            self.wait_until(lambda: n1.getblockcount() >= height or self.restarted(since, height), timeout=420)
+            if n1.getblockcount() < height:
+                self.btc_mine(3)
+            self.wait_until(lambda: n1.getblockcount() >= height, timeout=600)
+            x = self.produce(SELLER, COALITION, leaders=[SELLER], txs_must=[st["r_id"]] if a.getblockcount() == fork else ())
+            tip = n1.getblockheader(n1.getbestblockhash())
+            if n1.getblockcount() >= hdr["height"]:
+                at_lost = n1.getblockheader(n1.getblockhash(hdr["height"]))["anchorheight"]
+                lapse = max(hdr["anchorheight"], at_lost) + W
+            self.record(case, "step %d" % step, dict(at_s=round(time.time() - t0), honest_height=tip["height"], honest_anchor=tip["anchorheight"],
+                        coalition_height=x["height"], lapse=lapse, T_on_honest=self.chain_has(n1, st["t_id"], fork + 1)))
+            if lapse is not None and tip["anchorheight"] > lapse:
+                break
+        assert self.chain_has(n1, st["t_id"], fork + 1) is not None, "T was not mined on the honest branch"
+        assert lapse is not None and n1.getblockheader(n1.getbestblockhash())["anchorheight"] > lapse, "the honest tip did not pass the lapse"
+        while a.getblockcount() <= n1.getblockcount():
+            x = self.produce(SELLER, COALITION, leaders=[SELLER])
+        self.record(case, "shown", "coalition branch to height %d (3 seats a block, none certified), honest tip %d" % (a.getblockcount(), n1.getblockcount()))
+        a.setnetworkactive(True)
+        for j in range(1, len(self.nodes)):
+            self.connect_nodes(j, SELLER)
+        end = time.time() + 45
+        while time.time() < end and self.chain_has(n1, st["r_id"], fork + 1) is None:
+            time.sleep(1)
+        t_at, r_at = self.chain_has(n1, st["t_id"], fork + 1), self.chain_has(n1, st["r_id"], fork + 1)
+        self.record(case, "outcome", "on an honest holder: T at height %s, the seller's R at height %s" % (t_at, r_at))
+        if r_at is not None:
+            raise AssertionError("ATTACK SUCCEEDED (evlapse): a holder left T's chain for the seller's R, with no quorum at any height")
+        self.record(case, "blocked", "T stays and R is not mined")
 
     def case_evstall(self):
         case = "evstall"
