@@ -4034,6 +4034,8 @@ static void LostCrossCheck(const CBlock& block, const CBlockIndex* pindex, CCoin
                   block.GetHash().ToString(), pindex->nHeight, (unsigned)due);
         std::abort();
     }
+    LogPrint(BCLog::VALIDATION, "Lost blocks: cross-check agreed on block %s at height %d: %u of %u transactions due, %s\n",
+             block.GetHash().ToString(), pindex->nHeight, (unsigned)due, (unsigned)verdicts.size(), refused ? "refused" : "connected");
 }
 
 bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,

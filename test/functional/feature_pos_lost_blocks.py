@@ -841,6 +841,11 @@ class LostBlocksTest(BitcoinTestFramework):
         try:
             for c in each_case(self, CASES, SWITCHES):
                 getattr(self, "case_" + c)()
+            # The cross-check speaks only when it fails, so show that it ran.
+            if "a" in CASES and os.environ.get("SEQUENTIA_LOST_CROSSCHECK", "1") == "1":
+                agreed = sum(len(self.log_has(i, "Lost blocks: cross-check agreed")) for i in range(N))
+                assert agreed > 0, "the cross-check never ran"
+                self.record("crosscheck", "blocks compared with the classification, all nodes", agreed)
         finally:
             if RESULTS:
                 with open(RESULTS, "w") as f:

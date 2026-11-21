@@ -221,6 +221,9 @@ class TestNode():
 
         # add environment variable LIBC_FATAL_STDERR_=1 so that libc errors are written to stderr and not the terminal
         subp_env = dict(os.environ, LIBC_FATAL_STDERR_="1")
+        # Every block judged under the lost-block rule is also classified, and a
+        # difference from block validation stops the node. A timing run sets it to 0.
+        subp_env.setdefault("SEQUENTIA_LOST_CROSSCHECK", "1")
 
         self.process = subprocess.Popen(self.args + extra_args, env=subp_env, stdout=stdout, stderr=stderr, cwd=cwd, **kwargs)
 

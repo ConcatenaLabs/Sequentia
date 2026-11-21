@@ -61,6 +61,8 @@ from test_framework.messages import tx_from_hex
 from test_framework.script import CScript
 from test_framework.test_node import get_rpc_proxy
 
+# This suite measures time, and the cross-check classifies every block again.
+os.environ.setdefault("SEQUENTIA_LOST_CROSSCHECK", "0")
 DEPTH = int(os.environ.get("SCALE_DEPTH", "3"))
 PER_BTC = int(os.environ.get("SCALE_PER_BTC", "10"))
 TXS = int(os.environ.get("SCALE_TXS", "480"))
