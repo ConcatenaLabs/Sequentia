@@ -6148,7 +6148,7 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
     UpdateTip(pindexDelete->pprev);
 
     // SEQUENTIA: the lost-block pass judges whether it left for Bitcoin's sake.
-    LostNoteDisconnected(pindexDelete, pblock);
+    LostNoteDisconnected(pindexDelete, pblock, /*by_watcher=*/m_chainman.m_anchor_invalidating != nullptr);
 
     // SEQUENTIA PoS: exact inverse of the ConnectTip stake mirroring. A
     // missed update would silently desync the consensus-feeding registry

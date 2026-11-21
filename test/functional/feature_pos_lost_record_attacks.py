@@ -1490,6 +1490,79 @@ class LostRecordAttacksTest(LostSwapTest):
         self.record("rbf", "claim", "txid unchanged: %s; no signature redone: %s" %
                     (c2.rehash() == c.rehash(), c2.wit.vtxinwit[0].scriptWitness.stack[-3] == c.wit.vtxinwit[0].scriptWitness.stack[-3]))
 
+    def case_ownmark(self):
+        """Two certified siblings connected in turn: the one on the chain when Bitcoin took the anchor is the node's own."""
+        self.log.info("(ownmark) own means on the chain when Bitcoin took it")
+        n = self.nodes[1]
+        coin = self.fund()
+        t_hex = self.spend(coin, n.getnewaddress(), Decimal("0.0001"))
+        u_hex = self.spend(coin, n.getnewaddress(), Decimal("0.001"))
+        t_id, u_id = tx_from_hex(t_hex).rehash(), tx_from_hex(u_hex).rehash()
+        self.disconnect_all(1)
+        self.btc_mine(1)
+        n.sendrawtransaction(t_hex)
+        s = self.produce(1, ALL_KEYS, txs_must=[t_id])
+        # A certified block leaves a chain while Bitcoin keeps its anchor only by
+        # an operator's hand or by reconciliation: fork choice never replaces it.
+        n.invalidateblock(s["hash"])
+        n.sendrawtransaction(u_hex)
+        l = self.produce(1, ALL_KEYS, txs_must=[u_id])
+        assert_equal(l["height"], s["height"])
+        assert_equal(l["block"]["anchorheight"], s["block"]["anchorheight"])
+        self.record("ownmark", "siblings", "S %s (T) left the chain with its anchor on Bitcoin; L %s (U) on the chain" % (s["hash"][:12], l["hash"][:12]))
+        self.bitcoin_reorg(1)
+        self.wait_until(lambda: all(h in self.lost(1) for h in (s["hash"], l["hash"])), timeout=60)
+        marks = {h: self.lost(1)[h]["own"] for h in (s["hash"], l["hash"])}
+        self.record("ownmark", "own marks", {"S": marks[s["hash"]], "L": marks[l["hash"]]})
+        b = self.produce(1, ALL_KEYS)
+        txs = n.getblock(b["hash"])["tx"]
+        self.record("ownmark", "outcome", "next block carries %s first" % ("U, the transaction of the block on the chain" if txs[1] == u_id else "T, of the block that had left" if txs[1] == t_id else txs[1:]))
+        assert_equal(marks[l["hash"]], True)
+        assert_equal(marks[s["hash"]], False)
+        assert_equal(txs[1], u_id)
+        assert t_id not in txs
+
+    def case_ownflip(self):
+        """A block held as evidence that returns to the chain and is then taken by Bitcoin is the node's own, across a restart."""
+        self.log.info("(ownflip) evidence that was on the chain when Bitcoin took it")
+        n = self.nodes[1]
+        coin = self.fund()
+        t_hex = self.spend(coin, n.getnewaddress(), Decimal("0.0001"))
+        u_hex = self.spend(coin, n.getnewaddress(), Decimal("0.001"))
+        t_id, u_id = tx_from_hex(t_hex).rehash(), tx_from_hex(u_hex).rehash()
+        self.disconnect_all(1)
+        # A slow watcher, so the store still holds the block when it reconnects.
+        self.restart_node(1, extra_args=self.node_args(1) + ["-anchorpollinterval=30"])
+        n.loadwallet("w")
+        self.btc_mine(1)
+        self.wait_until(lambda: n.getbestblockhash() is not None, timeout=10)
+        n.sendrawtransaction(t_hex)
+        s = self.produce(1, ALL_KEYS, txs_must=[t_id])
+        n.invalidateblock(s["hash"])
+        n.sendrawtransaction(u_hex)
+        l = self.produce(1, ALL_KEYS, txs_must=[u_id])
+        n.invalidateblock(l["hash"])
+        n.reconsiderblock(s["hash"])
+        assert_equal(n.getbestblockhash(), s["hash"])
+        since = self.log_size(1)
+        self.bitcoin_reorg(1)
+        self.wait_until(lambda: all(h in self.lost(1) for h in (s["hash"], l["hash"])), timeout=90)
+        assert self.log_has(1, "%s, held as evidence, was on this chain" % s["hash"], since), "the store had dropped S before Bitcoin moved: rerun"
+        marks = {h: self.lost(1)[h]["own"] for h in (s["hash"], l["hash"])}
+        self.record("ownflip", "own marks", {"S (on the chain)": marks[s["hash"]], "L (left it)": marks[l["hash"]]})
+        assert_equal(marks[s["hash"]], True)
+        assert_equal(marks[l["hash"]], False)
+        self.restart_node(1, extra_args=self.node_args(1))
+        n.loadwallet("w")
+        self.wait_until(lambda: all(h in self.lost(1) for h in (s["hash"], l["hash"])), timeout=60)
+        after = {h: self.lost(1)[h]["own"] for h in (s["hash"], l["hash"])}
+        self.record("ownflip", "own marks after a restart", {"S": after[s["hash"]], "L": after[l["hash"]]})
+        assert_equal(after, marks)
+        b = self.produce(1, ALL_KEYS)
+        txs = n.getblock(b["hash"])["tx"]
+        self.record("ownflip", "outcome", "next block carries %s first" % ("T" if txs[1] == t_id else "U" if txs[1] == u_id else txs[1:]))
+        assert_equal(txs[1], t_id)
+
     def run_test(self):
         try:
             for c in CASES:

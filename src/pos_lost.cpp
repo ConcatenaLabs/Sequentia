@@ -506,7 +506,17 @@ void LostInit()
                 b.own = own;
                 b.epoch = epoch;
                 g_epoch = std::max(g_epoch, epoch);
-                if (g_blocks.emplace(b.hash, std::move(b)).second) ++n;
+                // A block held as evidence that this node then had on its chain.
+                if (auto known = g_blocks.find(b.hash); known != g_blocks.end()) {
+                    if (b.own && !known->second.own) {
+                        known->second.own = true;
+                        known->second.epoch = b.epoch;
+                        ++n;
+                    }
+                } else {
+                    g_blocks.emplace(b.hash, std::move(b));
+                    ++n;
+                }
             }
         } catch (const std::exception&) {
             // The end of the journal, or a torn last entry from an unclean stop.
@@ -535,18 +545,28 @@ void LostNoteSigned(const CBlock& block, int height)
     WriteSignedFile();
 }
 
-void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block)
+void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block, bool by_watcher)
 {
     AssertLockHeld(::cs_main);
     if (!g_con_pos || !g_con_bitcoin_anchor || !g_validate_anchor || !pindex || !block) return;
+    // Its own chain means on this node's chain when Bitcoin took it. The watcher
+    // disconnects only such blocks. Any other disconnect (fork choice, an
+    // operator) counts only if Bitcoin had already left the anchor; a daemon
+    // that does not answer counts as having left it, so that a block this node
+    // did have on its chain is never demoted to evidence by an outage.
+    const bool taken = by_watcher || CheckMainchainAnchor(block->m_anchor_height, block->m_anchor_hash) != AnchorCheckResult::OK;
     // Held durably before cs_main is released, so before this node signs
     // anything after the disconnect: an unclean stop cannot lose it.
     LOCK(g_lost_mutex);
     const uint256 h = pindex->GetBlockHash();
-    if (g_blocks.count(h)) return;
-    LostBlk b = MakeBlk(block, pindex->nHeight);
-    b.certified = pindex->PosCarriesQuorum();
-    b.own = true;
+    auto known = g_blocks.find(h);
+    if (known != g_blocks.end() && (known->second.own || !taken)) return;
+    if (known != g_blocks.end()) {
+        LogPrintf("Lost blocks: %s, held as evidence, was on this chain when Bitcoin took it: now this node's own\n", h.ToString());
+    }
+    LostBlk b = known != g_blocks.end() ? known->second : MakeBlk(block, pindex->nHeight);
+    b.certified = b.certified || pindex->PosCarriesQuorum();
+    b.own = taken;
     // DisconnectTip goes down from the tip: a block whose child was the last
     // one noted belongs to the same loss.
     if (g_last_noted_prev != h) ++g_epoch;
@@ -554,7 +574,8 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
     b.epoch = g_epoch;
     // F9: appended and synced, O(block); before cs_main is released.
     if (!AppendJournal(b)) WriteFile();
-    g_blocks.emplace(h, std::move(b));
+    g_blocks[h] = std::move(b);
+    ++g_gen;
     g_dirty_file = true;
 }
 
@@ -2126,8 +2147,8 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             }
         }
         auto key = [](const std::map<COutPoint, std::vector<LostSpend>>& m) {
-            std::vector<std::tuple<COutPoint, uint256, uint256, int>> k;
-            for (const auto& [o, v] : m) for (const auto& s : v) k.emplace_back(o, s.txid, s.fork_hash, s.fork_height);
+            std::vector<std::tuple<COutPoint, uint256, uint256, int, bool>> k;
+            for (const auto& [o, v] : m) for (const auto& s : v) k.emplace_back(o, s.txid, s.fork_hash, s.fork_height, s.own);
             return k;
         };
         if (key(spends) != key(g_spends)) {
