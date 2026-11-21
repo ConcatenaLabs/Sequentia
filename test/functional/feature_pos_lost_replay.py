@@ -40,7 +40,8 @@ from test_framework.p2p import MESSAGEMAP, P2PInterface
 from test_framework.script import CScript, OP_0, OP_1, OP_IF, OP_ENDIF, OP_DROP, OP_CHECKMULTISIG
 from test_framework.util import assert_equal, rpc_port
 
-CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6,b2,b2r,b2s,b2j").split(",")
+# b2s comes last: the large stake it registers moves every other staker's slot hours away.
+CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6,b2,b2r,b2j,b2s").split(",")
 ABUSE_TXS = int(os.environ.get("LOST_ABUSE_TXS", "340"))
 
 
@@ -433,6 +434,10 @@ class LostReplayTest(LostBlocksTest):
         self.produce(SELLER, ALL_KEYS, txs_must=[ftx])
         self.sync_tips(range(N))
         fdec = a.getrawtransaction(ftx, 1)
+        # Before the heavy transactions exist, or this block would carry some of them.
+        coin2 = self.fund()
+        o_hex = self.spend(coin2, n1.getnewaddress(), Decimal("0.0001"))
+        o_id = tx_from_hex(o_hex).rehash()
         heavy = []
         for i, s in enumerate(scripts):
             vout = [o["n"] for o in fdec["vout"] if o["scriptPubKey"].get("address") == addrs[i]][0]
@@ -444,9 +449,6 @@ class LostReplayTest(LostBlocksTest):
             hx = tx.serialize().hex()
             heavy.append(n1.sendrawtransaction(hx))
         # An ordinary transaction, made now, sent once the replay starts.
-        coin2 = self.fund()
-        o_hex = self.spend(coin2, n1.getnewaddress(), Decimal("0.0001"))
-        o_id = tx_from_hex(o_hex).rehash()
         self.btc_mine(1)
         Ls = []
         while any(t in n1.getrawmempool() for t in heavy):

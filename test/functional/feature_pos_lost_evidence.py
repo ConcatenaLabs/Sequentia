@@ -26,6 +26,12 @@ the network of feature_pos_lost_blocks.py. Cases (LOST_CASES):
   afterwaiver  the holders have followed a quorum past one lost block. A later,
            unrelated block L2 is lost above it: the waiver of the first loss says
            nothing about L2, so a sub-quorum block carrying L2's respend is refused.
+           afterwaiverrestart and afterwaiverreindex do the same with a holder
+           restarted, or reindexed, between the waiver and the later loss.
+  coverleft  a lost block holds T1 and T2. A quorum carries R1 past the holders,
+           leaving T2 out. The holders stop demanding T2 and stay on the chain,
+           refuse R2 through a quorum block without the depth and through the
+           valve, and the first honest leader mines T2.
   evlapse  three of six seats and no quorum at any height, no sibling. The honest
            seats mine T in sub-quorum blocks; the coalition keeps its own
            sub-quorum branch from the fork point carrying R, one block longer,
@@ -160,7 +166,7 @@ class LostEvidenceTest(LostAutonomousTest, LostRecordAttacksTest):
         assert_equal(x_anchor, self.btc().getblockcount())
         since = [self.log_size(i) for i in range(len(self.nodes))]
         self.bitcoin_reorg(1)
-        self.wait_until(lambda: all(self.nodes[i].getblockcount() < x["height"] for i in HONEST), timeout=60)
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() < x["height"] for i in range(len(self.nodes))), timeout=60)
         self.wait_lost(x["hash"], HONEST)
         marks = {i: (self.lost(i)[st["L"]]["own"], self.lost(i)[x["hash"]]["own"]) for i in HONEST}
         self.record(case, "(L own, X own) on each holder", marks)
@@ -181,8 +187,68 @@ class LostEvidenceTest(LostAutonomousTest, LostRecordAttacksTest):
             raise AssertionError("ATTACK SUCCEEDED (twolost): T at %s, R at %s" % (t_at, r_at))
         self.record(case, "blocked", "T comes first by lost order and is mined; R is not")
 
-    def case_afterwaiver(self):
-        case = "afterwaiver"
+    def case_afterwaiverrestart(self):
+        self.case_afterwaiver("restart")
+
+    def case_afterwaiverreindex(self):
+        self.case_afterwaiver("reindex")
+
+    def case_coverleft(self):
+        case = "coverleft"
+        self.log.info("(coverleft) a waiver over one transaction of a lost block, waiver depth %d" % WAIVER)
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        coins = [self.fund(), self.fund()]
+        ts = [self.spend(c, n1.getnewaddress(), Decimal("0.0001")) for c in coins]
+        rs = [self.spend(c, a.getnewaddress(), Decimal("0.001")) for c in coins]
+        t1, t2 = [tx_from_hex(h).rehash() for h in ts]
+        r1, r2 = [tx_from_hex(h).rehash() for h in rs]
+        self.btc_mine(1)
+        anchor = self.btc().getblockcount()
+        for h in ts:
+            n1.sendrawtransaction(h)
+        L = self.produce(1, ALL_KEYS, txs_must=[t1, t2])
+        assert_equal(L["block"]["anchorheight"], anchor)
+        self.produce(1, ALL_KEYS)
+        self.sync_tips(range(len(self.nodes)))
+        self.bitcoin_reorg(1)
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() < L["height"] for i in range(len(self.nodes))), timeout=60)
+        self.wait_lost(L["hash"], HONEST)
+        a.prioritisetransaction(txid=t2, fee_delta=-10**12)
+        a.sendrawtransaction(rs[0])
+        self.btc_mine(3)
+        time.sleep(2)
+        x = self.produce(SELLER, ALL_KEYS, leaders=[SELLER], txs_must=[r1])
+        assert t2 not in x["block"]["tx"]
+        top = x
+        for _ in range(WAIVER):
+            top = self.produce(SELLER, ALL_KEYS, leaders=[SELLER])
+        self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == top["hash"] for i in HONEST), timeout=120)
+        self.record(case, "followed", "the holders follow X (R1, without T2) under %d certified block(s)" % WAIVER)
+        a.sendrawtransaction(rs[1])
+        for label, signers in (("a quorum block without the depth", ALL_KEYS), ("a valve block", COALITION)):
+            since = [self.log_size(i) for i in range(len(self.nodes))]
+            y = self.produce(SELLER, signers, leaders=[SELLER], txs_must=[r2])
+            self.assert_refused(case, HONEST, y["hash"], since)
+            line = self.log_has(1, "Lost blocks: refusing block %s" % y["hash"], since[1])[0]
+            assert "bad-txns-lost-respend" in line, line
+            self.record(case, "R2 through %s" % label, "refused by every holder: bad-txns-lost-respend")
+            a.invalidateblock(y["hash"])
+            self.wait_until(lambda: r2 in a.getrawmempool(), timeout=30)
+        a.prioritisetransaction(txid=r2, fee_delta=-10**12)
+        z = self.produce(SELLER, ALL_KEYS, leaders=[SELLER])
+        assert t2 not in z["block"]["tx"] and r2 not in z["block"]["tx"]
+        self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == z["hash"] for i in HONEST), timeout=60)
+        self.record(case, "a later block that leaves T2 out", "taken by every holder: they stay on the chain")
+        h = self.produce(1, [1, 2, 3, 4], leaders=[1, 2, 3, 4])
+        txs = h["block"]["tx"]
+        self.record(case, "outcome", "first honest block at height %d: first transaction is T2: %s; R2 mined: %s" % (
+            h["height"], txs[1] == t2 if len(txs) > 1 else False, self.block_of(r2, n1) is not None))
+        if len(txs) < 2 or txs[1] != t2 or self.block_of(r2, n1) is not None:
+            raise AssertionError("ATTACK SUCCEEDED (coverleft): T2 was not mined first, or R2 was mined")
+        self.record(case, "blocked", "T2 is mined by the first honest leader, and R2 is not")
+
+    def case_afterwaiver(self, mode=""):
+        case = "afterwaiver" + mode
         self.log.info("(afterwaiver) a later loss above a block the holders followed, waiver depth %d" % WAIVER)
         st = self.gap(case)
         a, n1 = self.nodes[SELLER], self.nodes[1]
@@ -193,6 +259,12 @@ class LostEvidenceTest(LostAutonomousTest, LostRecordAttacksTest):
             top = self.produce(SELLER, ALL_KEYS, leaders=[SELLER])
         self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == top["hash"] for i in HONEST), timeout=120)
         self.record(case, "first loss", "the holders followed the quorum past L at depth %d" % WAIVER)
+        if mode:
+            self.restart_node(1, extra_args=self.node_args(1) + (["-reindex"] if mode == "reindex" else []))
+            n1.loadwallet("w")
+            self.mesh(range(len(self.nodes)))
+            self.wait_until(lambda: n1.getbestblockhash() == top["hash"], timeout=180)
+            self.record(case, mode, "holder 1 is back on the followed chain at height %d" % n1.getblockcount())
         coin = self.fund()
         t_hex = self.spend(coin, n1.getnewaddress(), Decimal("0.0001"))
         r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
@@ -206,7 +278,7 @@ class LostEvidenceTest(LostAutonomousTest, LostRecordAttacksTest):
         self.sync_tips(range(len(self.nodes)))
         since = [self.log_size(i) for i in range(len(self.nodes))]
         self.bitcoin_reorg(1)
-        self.wait_until(lambda: all(self.nodes[i].getblockcount() < l2["height"] for i in HONEST), timeout=60)
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() < l2["height"] for i in range(len(self.nodes))), timeout=60)
         self.wait_lost(l2["hash"], HONEST)
         if r_id not in a.getrawmempool():
             a.sendrawtransaction(r_hex)
