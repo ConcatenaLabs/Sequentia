@@ -273,9 +273,13 @@ The rule has two layers.
   B's chain alone. A transaction that is not yet valid (an `nLockTime`, a
   relative lock, a maturity) is valid again by H_L at the latest, so it is
   never left unprotected before it can return, however fast Bitcoin moves.
-- A node *holds* L when it connected L and saw it leave (*its own chain*), or
-  when it was shown L (P2P `poslost`, or `submitlostblock`) and judged it lost
-  and certified (*evidence only*). The mark is kept with the block in
+- A node *holds* L when L was on its active chain when Bitcoin took L's anchor
+  (*its own chain*), or when it was shown L (P2P `poslost`, or
+  `submitlostblock`), or left L by fork choice while Bitcoin still had the
+  anchor, and judged it lost and certified (*evidence only*). So of two siblings
+  a node connected in turn, the one on its chain at that moment is its own. A
+  daemon that does not answer at the disconnect counts as having left the
+  anchor. The mark is kept with the block in
   `lostblocks.dat` and survives a restart. A node appends a block of its own
   chain to `lostblocks.journal` and syncs it before the disconnect releases
   the chain lock, so before it signs anything afterwards; the maintenance pass

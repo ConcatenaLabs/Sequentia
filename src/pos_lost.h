@@ -175,8 +175,10 @@ void LostShutdown();
 //! `block` at `height`; held on disk before it does.
 void LostNoteSigned(const CBlock& block, int height);
 
-//! DisconnectTip took `pindex` off the active chain. cs_main held.
-void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block);
+//! DisconnectTip took `pindex` off the active chain; `by_watcher` when the anchor
+//! watcher did, because Bitcoin left its anchor. A block counts as this node's
+//! own only if it was on this chain when Bitcoin took it. cs_main held.
+void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block, bool by_watcher);
 
 //! The rule, for `block` built on `pindexPrev`, the active tip. Off-chain
 //! evidence is not applied during initial block download, nor to a block that
