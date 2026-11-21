@@ -97,6 +97,7 @@ struct LostSpend {
     int fork_height;
     int height; //!< the lost block's height
     uint256 leaf{}; //!< LostProofLeaf of the input, null when it never yields
+    bool own{false}; //!< of a block this node had on its own chain
 };
 
 Mutex g_lost_mutex;
@@ -447,7 +448,7 @@ void LostInit()
                 const CTransaction& tx = *b.block->vtx[i];
                 for (size_t n = 0; n < tx.vin.size(); ++n) {
                     if (tx.vin[n].m_is_pegin) continue;
-                    g_spends[tx.vin[n].prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height, b.height, LostProofLeaf(tx, n)});
+                    g_spends[tx.vin[n].prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height, b.height, LostProofLeaf(tx, n), /*own=*/true});
                 }
             }
         }
@@ -1028,6 +1029,54 @@ std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const uint256& a
     return "";
 }
 
+//! What a holder's duty stands on, of the blocks in `prot`. Every block it had
+//! on its own chain stands. An evidence-only sibling of one, and that sibling's
+//! descendants, do not. An evidence-only transaction that conflicts with one of
+//! the holder's own does not; two evidence-only transactions that conflict with
+//! each other, where the holder had neither, both stand aside. A certificate
+//! shows that a quorum signed a block, never which of two came first, and what
+//! this node itself saw on its chain is the one order a late sibling cannot
+//! rewrite.
+struct Standing {
+    std::set<uint256> blocks_out;
+    std::set<uint256> txs_out;
+};
+Standing StandingOf(const std::set<uint256>& prot) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    Standing st;
+    std::set<std::pair<uint256, int>> own_at;
+    std::vector<const LostBlk*> order;
+    for (const uint256& h : prot) {
+        auto it = g_blocks.find(h);
+        if (it == g_blocks.end() || it->second.fork_height < 0) continue;
+        order.push_back(&it->second);
+        if (it->second.own) own_at.insert({it->second.fork_hash, it->second.height});
+    }
+    std::sort(order.begin(), order.end(), [](const LostBlk* a, const LostBlk* b) { return a->height < b->height; });
+    for (const LostBlk* b : order) {
+        if (!b->own && (own_at.count({b->fork_hash, b->height}) || st.blocks_out.count(b->prev))) st.blocks_out.insert(b->hash);
+    }
+    std::map<COutPoint, std::set<uint256>> own_spend, evidence_spend;
+    for (const LostBlk* b : order) {
+        if (st.blocks_out.count(b->hash)) continue;
+        for (size_t i = 1; i < b->block->vtx.size(); ++i) {
+            const CTransaction& tx = *b->block->vtx[i];
+            for (const CTxIn& in : tx.vin) {
+                if (!in.m_is_pegin) (b->own ? own_spend : evidence_spend)[in.prevout].insert(tx.GetHash());
+            }
+        }
+    }
+    for (const auto& [o, ids] : evidence_spend) {
+        auto mine = own_spend.find(o);
+        if (mine != own_spend.end()) {
+            for (const uint256& id : ids) if (!mine->second.count(id)) st.txs_out.insert(id);
+        } else if (ids.size() > 1) {
+            st.txs_out.insert(ids.begin(), ids.end());
+        }
+    }
+    return st;
+}
+
 //! The holders' plan for a block on `prev` anchored at `anchor_h`.
 struct Plan {
     std::vector<CTransactionRef> prefix;
@@ -1042,11 +1091,12 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_lost_mutex)
 {
     Plan plan;
-    // The pending lost transactions of every lost branch of this chain, by
-    // loss, then height, then position.
+    // The pending lost transactions of every lost branch of this chain that
+    // this node had on its own chain, by loss, then height, then position.
+    // Evidence-only blocks bind what stands of them and owe nothing.
     std::vector<const LostBlk*> blocks;
     for (const auto& [h, b] : g_blocks) {
-        if (!b.prot || b.fork_height < 0) continue;
+        if (!b.prot || !b.own || b.fork_height < 0) continue;
         const CBlockIndex* f = prev->GetAncestor(b.fork_height);
         if (!f || f->GetBlockHash() != b.fork_hash) continue;
         if (!LostStillBinds(b.height, b.anchor_h, prev->nHeight + 1, anchor_h, prev)) continue;
@@ -1889,9 +1939,11 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 walk = p == g_blocks.end() ? nullptr : &p->second;
             }
         }
-        // Evidence binds only what is valid here but for a payment proof that
-        // links to a lost anchor: an invented or not-yet-valid transaction
-        // binds nothing. Judged once per tip and store, never at every pass.
+        // Evidence binds only what stands and is valid here but for a payment
+        // proof that links to a lost anchor: an invented or not-yet-valid
+        // transaction binds nothing. Judged once per tip and store, never at
+        // every pass.
+        const Standing standing = StandingOf(prot);
         {
             static uint256 memo_key;
             static std::set<uint256> memo_valid;
@@ -1902,8 +1954,8 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             for (const auto& [h, b] : g_blocks) {
                 if (!prot.count(h)) continue;
                 key << h;
-                order.push_back(&b);
                 any_evidence = any_evidence || !b.own;
+                if (!standing.blocks_out.count(h)) order.push_back(&b);
             }
             const uint256 id = key.GetHash();
             if (!any_evidence || !tip) {
@@ -1911,13 +1963,16 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 memo_key = id;
             } else if (id != memo_key) {
                 std::sort(order.begin(), order.end(), [](const LostBlk* a, const LostBlk* b) {
+                    if (a->own != b->own) return a->own;
                     return std::tie(a->epoch, a->height, a->hash) < std::tie(b->epoch, b->height, b->hash);
                 });
                 std::vector<CTransactionRef> all;
                 std::set<std::pair<uint32_t, uint256>> lost_anchors;
                 for (const LostBlk* b : order) {
                     lost_anchors.insert({b->anchor_h, b->anchor});
-                    all.insert(all.end(), b->block->vtx.begin() + 1, b->block->vtx.end());
+                    for (size_t i = 1; i < b->block->vtx.size(); ++i) {
+                        if (!standing.txs_out.count(b->block->vtx[i]->GetHash())) all.push_back(b->block->vtx[i]);
+                    }
                 }
                 LoadRecorded(tip);
                 const auto bound_now = ChainBindings(tip, tip->m_anchor_height);
@@ -1939,13 +1994,13 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 LogPrintf("Lost blocks: %s at height %d (anchor %u, fork %d) is lost; its spends are bound until anchor %u\n",
                           h.ToString(), b.height, b.anchor_h, b.fork_height, b.anchor_h + g_window);
             }
-            if (!b.prot) continue;
+            if (!b.prot || standing.blocks_out.count(h)) continue;
             for (size_t i = 1; i < b.block->vtx.size(); ++i) {
                 const CTransaction& tx = *b.block->vtx[i];
-                if (!b.own && !evidence_valid.count(tx.GetHash())) continue;
+                if (!b.own && (standing.txs_out.count(tx.GetHash()) || !evidence_valid.count(tx.GetHash()))) continue;
                 for (size_t n = 0; n < tx.vin.size(); ++n) {
                     if (tx.vin[n].m_is_pegin) continue;
-                    spends[tx.vin[n].prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height, b.height, LostProofLeaf(tx, n)});
+                    spends[tx.vin[n].prevout].push_back(LostSpend{tx.GetHash(), h, b.anchor_h, b.fork_hash, b.fork_height, b.height, LostProofLeaf(tx, n), b.own});
                 }
             }
         }
@@ -2028,7 +2083,8 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         {
             LOCK(g_lost_mutex);
             std::vector<const LostBlk*> order;
-            for (const auto& [h, b] : g_blocks) if (b.prot) order.push_back(&b);
+            // Only what this node carries goes back first in line.
+            for (const auto& [h, b] : g_blocks) if (b.prot && b.own) order.push_back(&b);
             std::sort(order.begin(), order.end(), [](const LostBlk* a, const LostBlk* b) { return a->height < b->height; });
             for (const LostBlk* b : order) for (size_t i = 1; i < b->block->vtx.size(); ++i) lost_txs.push_back(b->block->vtx[i]);
         }

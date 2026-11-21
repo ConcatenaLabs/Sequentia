@@ -54,11 +54,7 @@ GRACE = int(os.environ.get("LOST_GRACE", "0"))
 RECORD_VERSION = int(os.environ.get("LOST_RECORD_VERSION", "3"))
 V3 = RECORD_VERSION >= 3
 YIELD = V3
-OPEN = {
-    "flood": "sibling blocks of valid transactions are all carried: forced space per height is not bounded yet",
-    "siblingbranch": "a certified sibling's respend can come before the honest lost transaction in the carry",
-    "siblingbefore": "a certified sibling's respend can come before the honest lost transaction in the carry",
-}
+OPEN = {}
 
 
 def sha(b):
@@ -880,18 +876,12 @@ class LostRecordAttacksTest(LostSwapTest):
             self.show_evidence(ev, btc=[s_raw])
             self.wait_until(lambda: all(ev.hash in self.lost(i) for i in HONEST), timeout=30)
             self.record("keyless", "evidence", "the same forged claim is also held as lost by every honest node")
-        if YIELD:
-            # The forged claim is valid here but for its proof, so an honest
-            # producer holding the evidence records it itself.
-            made = self.produce(1, [1, 2, 3, 4, 5], leaders=[1, 2, 3, 4, 5])
-            h = made["hash"]
-            assert self.records_in(n1, h), "no honest record of the forged claim"
-            self.record("keyless", "record", "written by an honest producer at height %d" % made["height"])
-        else:
-            data = self.mk([hdr.header_bytes()], [(0, e[0], e[1], e[2])], [])
-            h, ok, since = self.put("keyless", data)
-            if not ok:
-                return self.blocked("keyless", "the record is refused")
+        # Evidence creates no duty to record, so the coalition writes it itself:
+        # the forged claim is valid here but for its proof.
+        data = self.mk([hdr.header_bytes()], [(0, e[0], e[1], e[2])], [s_raw] if V3 else [])
+        h, ok, since = self.put("keyless", data)
+        if not ok:
+            return self.blocked("keyless", "the record is refused")
         self.rejoin()
         self.sync_tips(range(N))
         self.record("keyless", "record", "binds the lock to the coalition's claim on stale block %s (%d seats at one height)" % (s[:12], seats))
@@ -1236,8 +1226,8 @@ class LostRecordAttacksTest(LostSwapTest):
         ev.rehash()
         self.show_evidence(ev, btc=[s_raw])
         self.wait_until(lambda: all(ev.hash in self.lost(i) for i in HONEST), timeout=30)
-        made = self.produce(1, [1, 2, 3, 4, 5], leaders=[1, 2, 3, 4, 5])
-        assert self.records_in(n1, made["hash"]), "no record of the claim"
+        _, ok, _ = self.put(case, self.mk([hdr.header_bytes()], [(0, e[0], e[1], e[2])], [s_raw]))
+        assert ok, "the record of the claim was refused"
         self.rejoin()
         self.sync_tips(range(N))
         # A real proof for the key branch to carry: the same payment, mined on the best chain.
