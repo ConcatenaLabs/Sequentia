@@ -33,6 +33,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -128,8 +129,13 @@ struct LostTemplateParts {
     std::vector<CTransactionRef> prefix;
     bool cut{false};
     std::vector<CTxOut> records;
+    //! Contested transactions and their descendants, when the leader leaves them out.
+    std::set<uint256> left_out;
 };
-LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, const uint256& anchor_hash, CCoinsViewCache& view);
+//! `leave_contested`: a leader after a failed round at this height leaves out
+//! what two certified siblings contest, so that a block neither side of the
+//! split refuses can certify.
+LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, const uint256& anchor_hash, CCoinsViewCache& view, bool leave_contested = false);
 
 //! How many consecutive certified blocks above a block that breaks the duty make
 //! a holder follow it. One place to change; custom chains can override it for

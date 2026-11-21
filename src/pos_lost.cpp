@@ -1178,12 +1178,46 @@ Standing StandingOf(const std::set<uint256>& prot) EXCLUSIVE_LOCKS_REQUIRED(g_lo
     return st;
 }
 
+//! Transactions of this node's own lost blocks that a certified block at the
+//! same fork point and height spends differently: two quorums signed conflicting
+//! blocks there, and neither can be shown to have come first. Such a transaction
+//! is offered and not demanded, and what conflicts with it stays refused.
+std::set<uint256> ContestedOwn() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    std::set<uint256> out;
+    std::map<std::tuple<uint256, int, COutPoint>, std::set<uint256>> spends_at;
+    std::map<COutPoint, std::set<uint256>> own_spend;
+    for (const auto& [h, b] : g_blocks) {
+        if (!b.prot || !b.certified || b.fork_height < 0) continue;
+        for (size_t i = 1; i < b.block->vtx.size(); ++i) {
+            const CTransaction& tx = *b.block->vtx[i];
+            for (const CTxIn& in : tx.vin) {
+                if (in.m_is_pegin) continue;
+                spends_at[{b.fork_hash, b.height, in.prevout}].insert(tx.GetHash());
+                if (b.own) own_spend[in.prevout].insert(tx.GetHash());
+            }
+        }
+    }
+    for (const auto& [at, ids] : spends_at) {
+        if (ids.size() < 2) continue;
+        auto mine = own_spend.find(std::get<2>(at));
+        if (mine == own_spend.end()) continue;
+        for (const uint256& id : ids) if (mine->second.count(id)) out.insert(id);
+    }
+    return out;
+}
+
 //! The holders' plan for a block on `prev` anchored at `anchor_h`.
 struct Plan {
     std::vector<CTransactionRef> prefix;
     bool cut{false};
     std::set<uint256> to_record;
     std::vector<LostRecord> records;
+    //! Contested transactions and their descendants: not demanded of a block.
+    std::set<uint256> contested;
+    //! The owed records plus those of contested transactions: what a template
+    //! offers unless its leader is leaving the contested ones out.
+    std::vector<LostRecord> offered_records;
     std::string summary;
     int64_t micros{0};
 };
@@ -1222,6 +1256,14 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     // transaction that a record of this chain forbids is never due.
     const auto bound = ChainBindings(prev, anchor_h);
     const auto classes = LostClassifyTxs(txs, view, prev, consensus, &sigops, &bound);
+    const std::set<uint256> contested_own = ContestedOwn();
+    if (!contested_own.empty()) {
+        for (const CTransactionRef& t : txs) {
+            bool held = contested_own.count(t->GetHash()) > 0;
+            for (const CTxIn& in : t->vin) held = held || plan.contested.count(in.prevout.hash) > 0;
+            if (held) plan.contested.insert(t->GetHash());
+        }
+    }
     std::set<uint256> bound_txids;
     for (const auto& [o, t] : bound) bound_txids.insert(t.txid);
     // The branch of a store block from its fork point's child, or empty.
@@ -1289,7 +1331,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     // this chain, that a record in this block would make valid: judged by the
     // record check's own function (P5), so the duty never asks for a record
     // that validity refuses.
-    std::vector<std::pair<const LostBlk*, uint32_t>> recordable;
+    std::vector<std::pair<const LostBlk*, uint32_t>> recordable, contested_recordable;
     int n_due = 0, n_later = 0, n_fails = 0, n_gone = 0, n_never = 0;
     std::string unrecordable;
     for (size_t i = 0; i < txs.size(); ++i) {
@@ -1322,7 +1364,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
                           unrecordable, (unsigned)GetSerializeSize(recs[0], PROTOCOL_VERSION), (unsigned)LOST_RECORD_MAX_BYTES);
                 break;
             }
-            recordable.push_back(where[i]);
+            (plan.contested.count(txs[i]->GetHash()) ? contested_recordable : recordable).push_back(where[i]);
             break;
         }
         }
@@ -1368,6 +1410,33 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
         }
     }
     for (const auto& [b, pos] : chosen) plan.to_record.insert(b->block->vtx[pos]->GetHash());
+    // What a template may add: the contested ones, for as many bytes as are left
+    // and only if the whole set is still valid.
+    std::vector<std::pair<const LostBlk*, uint32_t>> offered = chosen;
+    if (!contested_recordable.empty()) {
+        std::set<COutPoint> taken;
+        for (const auto& e : offered) for (const CTxIn& in : e.first->block->vtx[e.second]->vin) taken.insert(in.prevout);
+        for (const auto& e : contested_recordable) {
+            const CTransaction& t = *e.first->block->vtx[e.second];
+            bool clash = false;
+            for (const CTxIn& in : t.vin) clash = clash || taken.count(in.prevout);
+            if (clash) continue;
+            auto trial = offered;
+            trial.push_back(e);
+            if (bytes_of(trial) > LOST_RECORD_MAX_BYTES) break;
+            offered = std::move(trial);
+            for (const CTxIn& in : t.vin) taken.insert(in.prevout);
+        }
+        std::vector<Binding> ignored;
+        CCoinsViewCache scratch(&view);
+        for (const LostRecord& r : build_records(offered)) {
+            bool soft = false;
+            if (!JudgeRecord(r, anchor_h, anchor, prev, soft, ignored, scratch, bound).empty()) {
+                offered = chosen;
+                break;
+            }
+        }
+    }
     // The prefix: the due transactions in lost order, the longest run of them
     // that fits the consensus limits. The weight left for them is the block's
     // less a fixed reserve for the header, the coinbase and the certificate,
@@ -1383,6 +1452,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     std::set<CAsset> fee_assets;
     for (size_t i = 0; i < txs.size(); ++i) {
         if (classes[i].first != LostTxCat::DUE) continue;
+        if (plan.contested.count(txs[i]->GetHash())) continue;
         int64_t w = GetTransactionWeight(*txs[i]);
         for (const auto& [asset, amount] : GetFeeMap(*txs[i])) {
             if (amount > 0 && !fee_assets.count(asset)) w += LOST_FEE_OUTPUT_WEIGHT;
@@ -1394,11 +1464,14 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
         for (const auto& [asset, amount] : GetFeeMap(*txs[i])) if (amount > 0) fee_assets.insert(asset);
         plan.prefix.push_back(txs[i]);
     }
-    if (build) plan.records = build_records(chosen);
+    if (build) {
+        plan.records = build_records(chosen);
+        plan.offered_records = build_records(offered);
+    }
     plan.micros = GetTimeMicros() - t0;
-    plan.summary = strprintf("%d due (%d in the prefix%s), %d later, %d failing (%d to record of %d recordable, %d never recordable), %d gone; classified in %d us",
+    plan.summary = strprintf("%d due (%d in the prefix%s), %d later, %d failing (%d to record of %d recordable, %d never recordable), %d gone, %d contested; classified in %d us",
                              n_due, (int)plan.prefix.size(), plan.cut ? ", cut" : "", n_later, n_fails,
-                             (int)plan.to_record.size(), (int)recordable.size(), n_never, n_gone, (int)plan.micros);
+                             (int)plan.to_record.size(), (int)recordable.size(), n_never, n_gone, (int)plan.contested.size(), (int)plan.micros);
     return plan;
 }
 
@@ -1427,6 +1500,8 @@ uint256 StoreFingerprint() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
         if (!b.own) continue;
         hw << h << b.prot << b.certified << (uint8_t)b.anchor_state << b.fork_height << b.epoch;
     }
+    // What the plan reads from evidence: which of its transactions are contested.
+    for (const uint256& t : ContestedOwn()) hw << t;
     return hw.GetHash();
 }
 
@@ -1531,7 +1606,7 @@ bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool j
     return true;
 }
 
-LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, const uint256& anchor_hash, CCoinsViewCache& view)
+LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, const uint256& anchor_hash, CCoinsViewCache& view, bool leave_contested)
 {
     AssertLockHeld(::cs_main);
     LostTemplateParts out;
@@ -1541,7 +1616,14 @@ LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor
     Plan plan = PlanLocked(pindexPrev, anchor_height, anchor_hash, view, /*build=*/true);
     out.prefix = std::move(plan.prefix);
     out.cut = plan.cut;
-    for (const LostRecord& r : plan.records) out.records.push_back(RecordOutput(r));
+    for (const LostRecord& r : (leave_contested ? plan.records : plan.offered_records)) out.records.push_back(RecordOutput(r));
+    if (leave_contested) {
+        out.left_out = plan.contested;
+        if (!out.left_out.empty()) {
+            LogPrintf("Lost blocks: after a failed round, the template on %s leaves out %d contested transaction(s)\n",
+                      pindexPrev->GetBlockHash().ToString(), (int)out.left_out.size());
+        }
+    }
     if (!out.prefix.empty() || !out.records.empty()) {
         LogPrintf("Lost blocks: template on %s: %s\n", pindexPrev->GetBlockHash().ToString(), plan.summary);
     }
