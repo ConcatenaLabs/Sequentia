@@ -292,6 +292,16 @@ std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact
     return block;
 }
 
+int PosMaxSuppliedCommitteeKeys(const CChainParams& chainparams)
+{
+    // The wider limit exists for one purpose: generateposblock on a regtest
+    // network signing with a quorum of a 250-seat committee (126 keys). This
+    // function also bounds the autonomous producer, so on the testnet and on
+    // mainnet the cap stays MAX_POS_AGG_COMMITTEE_SIZE. It is not a leftover:
+    // widening it there changes what those nodes produce and sign.
+    return (chainparams.IsMockableChain() && g_pos_public_committee) ? PosMaxCommitteeMembers() : MAX_POS_AGG_COMMITTEE_SIZE;
+}
+
 bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                      const CChainParams& chainparams, const CKey& leader_key,
                      const std::vector<CKey>& committee_keys,
@@ -364,11 +374,7 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
 
         if (g_pos_committee_size > 1) {
             candidates.emplace(pubkey, leader_key);
-            // A test chain may name a whole public committee, so that a regtest
-            // network can certify at the size the real chains run. This path
-            // also serves the autonomous producer, so the limit on the testnet
-            // and on mainnet stays where it is.
-            const int max_committee_keys = (chainparams.IsMockableChain() && g_pos_public_committee) ? PosMaxCommitteeMembers() : MAX_POS_AGG_COMMITTEE_SIZE;
+            const int max_committee_keys = PosMaxSuppliedCommitteeKeys(chainparams);
             if ((int)committee_keys.size() > max_committee_keys) {
                 error = strprintf("At most %d committee keys may be supplied", max_committee_keys);
                 err_kind = PosProduceError::BAD_PARAM;

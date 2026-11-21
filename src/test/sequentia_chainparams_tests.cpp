@@ -4,6 +4,7 @@
 
 #include <chainparams.h>
 #include <pos.h>
+#include <pos_producer.h>
 #include <chainparamsbase.h>
 #include <consensus/params.h>
 #include <util/strencodings.h>
@@ -238,6 +239,30 @@ BOOST_AUTO_TEST_CASE(sequentia_soft_forks_buried_active)
 }
 
 //! The consensus rules of the Sequentia network are PINNED, not configurable.
+//! generateposblock may name a whole public committee on a regtest network. The
+//! same limit bounds the autonomous producer, so on the real chains it must stay.
+BOOST_AUTO_TEST_CASE(pos_supplied_committee_keys_stay_capped_on_real_chains)
+{
+    for (const std::string& chain : {CBaseChainParams::TESTNET, CBaseChainParams::SEQUENTIA}) {
+        ArgsManager args;
+        const auto params = CreateChainParams(args, chain);
+        BOOST_CHECK(!params->IsMockableChain());
+        BOOST_CHECK(g_pos_public_committee);
+        BOOST_CHECK_EQUAL(g_pos_committee_size, 250);
+        BOOST_CHECK_EQUAL(PosMaxSuppliedCommitteeKeys(*params), MAX_POS_AGG_COMMITTEE_SIZE);
+        BOOST_CHECK_EQUAL(MAX_POS_AGG_COMMITTEE_SIZE, 100);
+    }
+    ArgsManager args;
+    args.ForceSetArg("-con_pos", "1");
+    args.ForceSetArg("-posvrf", "1");
+    args.ForceSetArg("-posbls", "1");
+    args.ForceSetArg("-pospubliccommittee", "1");
+    args.ForceSetArg("-poscommitteesize", "250");
+    const auto custom = CreateChainParams(args, "elementsregtest");
+    BOOST_CHECK(custom->IsMockableChain());
+    BOOST_CHECK_EQUAL(PosMaxSuppliedCommitteeKeys(*custom), 250);
+}
+
 //! A node that disagrees about the committee, the quorum, the unbonding delay or
 //! the payout notice forks off silently, so these must not be arg-readable.
 BOOST_AUTO_TEST_CASE(sequentia_pos_consensus_rules_are_pinned)

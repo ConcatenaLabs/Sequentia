@@ -125,6 +125,10 @@ enum class PosProduceError {
     INTERNAL,    //!< an internal error (template assembly, block not accepted)
 };
 
+/** How many committee keys ProducePosBlock takes: a whole public committee on
+ *  a mockable (regtest) chain, MAX_POS_AGG_COMMITTEE_SIZE on every other. */
+int PosMaxSuppliedCommitteeKeys(const CChainParams& chainparams);
+
 /** Assemble, sign, and submit one PoS block extending the active tip, with
  *  `leader_key` as the elected proposer and `committee_keys` as any additional
  *  committee signing keys held locally (empty for leader-only / committee=1).
