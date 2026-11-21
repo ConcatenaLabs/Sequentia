@@ -1029,6 +1029,34 @@ std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const uint256& a
     return "";
 }
 
+//! The holders' side of a record: it counts as a spend. The first binding of a
+//! coin stands, so a record naming another transaction would take the coin from
+//! a transaction this node had on its own chain as surely as mining the respend
+//! would, even before the duty names that transaction.
+std::optional<std::string> RecordViolationLocked(const CBlock& block, const CBlockIndex* prev) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    for (const auto& r : LostParseRecords(block)) {
+        if (!r) continue;
+        for (const LostRecordEntry& e : r->entries) {
+            const auto entry = DeserTx(e.tx);
+            if (!entry) continue;
+            const uint256 txid = (*entry)->GetHash();
+            for (const CTxIn& in : (*entry)->vin) {
+                if (in.m_is_pegin) continue;
+                auto it = g_spends.find(in.prevout);
+                if (it == g_spends.end()) continue;
+                for (const LostSpend& s : it->second) {
+                    if (!s.own || s.txid == txid || !Binds(s, block.m_anchor_height, prev)) continue;
+                    return strprintf("a record binds %s:%u to tx %s, which tx %s of lost block %s (anchor %u, fork %d) spends",
+                                     in.prevout.hash.ToString(), in.prevout.n, txid.ToString(), s.txid.ToString(),
+                                     s.block.ToString(), s.anchor_h, s.fork_height);
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 //! What a holder's duty stands on, of the blocks in `prot`. Every block it had
 //! on its own chain stands. An evidence-only sibling of one, and that sibling's
 //! descendants, do not. An evidence-only transaction that conflicts with one of
@@ -1453,7 +1481,7 @@ bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd
     LOCK(g_lost_mutex);
     std::optional<std::string> why;
     std::string reason;
-    if ((why = ViolationLocked(block, pindexPrev, view))) {
+    if ((why = ViolationLocked(block, pindexPrev, view)) || (why = RecordViolationLocked(block, pindexPrev))) {
         reason = "bad-txns-lost-respend";
     } else if ((why = SignedViolationLocked(block, pindexPrev))) {
         reason = "bad-txns-signed-respend";

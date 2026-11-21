@@ -25,6 +25,8 @@ stale Bitcoin block as the lost anchor instead of an invented hash):
   siblingbranch   the same, against the second block of a two-block lost branch
   siblingbefore   the same, on a real stale anchor, shown before the loss
   branchleaf a key branch of the bound leaf, with a proof no opcode reads, must not pass
+  recordrace a record binds a coin to a sibling's respend before the duty names the
+             honest lost transaction (use @stale)
   rebind     a later record tries to move a bound coin to another transaction (use @stale)
   gracetwo   a refund certified at two heights while no record binds the lock
 
@@ -98,7 +100,7 @@ class LostRecordAttacksTest(LostSwapTest):
 
     def set_test_params(self):
         super().set_test_params()
-        self.extra = {SELLER: ["-validateanchor=0"]} if not set(CASES) & {"carried", "rbf", "sB", "sC", "grace", "gracegone", "disp", "sD", "siblingrespend", "siblingbranch", "siblingbefore", "gracetwo", "branchleaf"} else {}
+        self.extra = {SELLER: ["-validateanchor=0"]} if not set(CASES) & {"carried", "rbf", "sB", "sC", "grace", "gracegone", "disp", "sD", "siblingrespend", "siblingbranch", "siblingbefore", "recordrace", "gracetwo", "branchleaf"} else {}
         if "grind" in CASES:
             for i in range(N):
                 self.extra.setdefault(i, []).append("-poscommitteesize=3")
@@ -1007,6 +1009,54 @@ class LostRecordAttacksTest(LostSwapTest):
         if r_at is not None or t_at is None:
             raise AssertionError("ATTACK SUCCEEDED (siblingrespend): the seller's respend replaced the honest lost transaction")
         self.blocked(case, "the honest lost transaction is mined")
+
+    def case_recordrace(self):
+        """T is not due at the first rebuilt height (its locktime), so no duty names it there. A coalition
+        block at that height records the sibling's respend R: the first binding would then shut T out."""
+        case = "recordrace"
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        coin = self.fund()
+        r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        r = tx_from_hex(r_hex)
+        self.btc_mine(1)
+        time.sleep(1.5)
+        x = self.btc().getblockcount()
+        P = self.produce(1, ALL_KEYS)
+        fork = P["height"] - 1
+        raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"], "sequence": 0xfffffffd}],
+                                     [{n1.getnewaddress(): coin["amount"] - Decimal("0.0001")}, {"fee": Decimal("0.0001")}], fork + 1)
+        t_hex = a.signrawtransactionwithwallet(raw)["hex"]
+        t_id = tx_from_hex(t_hex).rehash()
+        n1.sendrawtransaction(t_hex)
+        L = self.produce(1, ALL_KEYS, txs_must=[t_id])
+        self.produce(1, ALL_KEYS)
+        self.sync_tips(range(N))
+        anchor = n1.getblockheader(L["hash"])["anchorhash"]
+        assert_equal(n1.getblockheader(L["hash"])["anchorheight"], x)
+        self.isolate()
+        a.invalidateblock(P["hash"])
+        hdr, e, _ = self.fab_header(x, int(anchor, 16), [0, 1, 2, 3], tx=r)
+        a.reconsiderblock(P["hash"])
+        self.rejoin()
+        self.sync_tips(range(N))
+        stale = self.stale_after_reorg(anchor)
+        self.wait_until(lambda: all(L["hash"] in self.lost(i) for i in HONEST), timeout=60)
+        self.wait_until(lambda: n1.getblockcount() == fork, timeout=30)
+        _, ok, since = self.put(case, self.mk([hdr.header_bytes()], [(0, e[0], e[1], e[2])], stale))
+        if ok:
+            raise AssertionError("ATTACK SUCCEEDED (recordrace): a record bound the coin to the sibling's respend")
+        line = self.log_has(1, "bad-txns-lost-respend", since)
+        assert line and "a record binds" in line[0], line
+        self.record(case, "refused for", line[0].split("Lost blocks: ", 1)[-1][:150])
+        self.rejoin()
+        self.sync_tips(HONEST)
+        for _ in range(3):
+            if self.block_of(t_id, n1) is not None:
+                break
+            self.produce(1, [1, 2, 3, 4, 5], leaders=[1, 2, 3, 4, 5])
+        t_at, r_at = self.block_of(t_id, n1), self.block_of(r.rehash(), n1)
+        assert t_at is not None and r_at is None, (t_at, r_at)
+        self.blocked(case, "the record is refused; T is mined at height %d" % t_at)
 
     def case_rebind(self):
         """The first binding stands: a second record cannot move the coin to another transaction."""
