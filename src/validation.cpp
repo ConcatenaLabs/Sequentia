@@ -3979,6 +3979,63 @@ std::vector<std::pair<LostTxCat, std::string>> LostClassifyTxs(const std::vector
     return out;
 }
 
+//! The classification is a second reading of what ConnectBlock decides for a
+//! transaction, so a rule added to one and not the other would make holders
+//! demand a transaction no valid block can carry. With
+//! SEQUENTIA_LOST_CROSSCHECK=1 in the environment, on a test chain only, every
+//! block judged under the rule is classified too, at its own anchor, and a
+//! difference stops the node: a block connected with a transaction not DUE, or
+//! one refused for a transaction's sake with every transaction DUE.
+static bool LostCrossCheckOn()
+{
+    static const bool on = [] {
+        const char* v = std::getenv("SEQUENTIA_LOST_CROSSCHECK");
+        if (!v || std::string(v) != "1") return false;
+        const std::string chain = gArgs.GetChainName();
+        for (const std::string& real : {CBaseChainParams::MAIN, CBaseChainParams::SEQUENTIA, CBaseChainParams::TESTNET, CBaseChainParams::SIGNET,
+                                        CBaseChainParams::LIQUID1, CBaseChainParams::LIQUID1TEST, CBaseChainParams::LIQUIDTESTNET}) {
+            if (chain == real) return false;
+        }
+        return true;
+    }();
+    return on;
+}
+
+static void LostCrossCheck(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& tip_coins,
+                           const Consensus::Params& params, bool refused) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!LostCrossCheckOn() || !g_con_pos || block.vtx.size() < 2 || !pindex->pprev) return;
+    if (!params.LostBlocksActiveAt(pindex->nHeight)) return;
+    if (tip_coins.GetBestBlock() != pindex->pprev->GetBlockHash()) return;
+    // A peg-in is never replayed, by design; before CSV a locktime is judged by
+    // the block's own time, which the classification does not read.
+    if (!DeploymentActiveAt(*pindex, params, Consensus::DEPLOYMENT_CSV)) return;
+    for (const CTransactionRef& tx : block.vtx) {
+        for (const CTxIn& in : tx->vin) {
+            if (in.m_is_pegin) return;
+        }
+    }
+    const std::vector<CTransactionRef> txs(block.vtx.begin() + 1, block.vtx.end());
+    CCoinsViewCache parent(&tip_coins);
+    // ConnectBlock holds the check queue here.
+    const auto verdicts = LostClassifyTxs(txs, parent, pindex->pprev, params, nullptr, nullptr, nullptr, /*warm=*/false, pindex);
+    size_t due = 0;
+    for (size_t i = 0; i < verdicts.size(); ++i) {
+        if (verdicts[i].first == LostTxCat::DUE) {
+            ++due;
+        } else if (!refused) {
+            LogPrintf("Lost blocks: CROSS-CHECK FAILED: block %s at height %d connects, and the classification says of tx %s: %d (%s)\n",
+                      block.GetHash().ToString(), pindex->nHeight, txs[i]->GetHash().ToString(), (int)verdicts[i].first, verdicts[i].second);
+            std::abort();
+        }
+    }
+    if (refused && due == verdicts.size()) {
+        LogPrintf("Lost blocks: CROSS-CHECK FAILED: block %s at height %d is refused for a transaction, and the classification says all %u are due\n",
+                  block.GetHash().ToString(), pindex->nHeight, (unsigned)due);
+        std::abort();
+    }
+}
+
 bool PosRecordSpendFailsNextBlock(const CTransaction& tx, const CCoinsViewCache& view,
                                   const CBlockIndex* tip, const Consensus::Params& params)
 {
@@ -4954,6 +5011,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // Used when checking peg-ins
     const auto& fedpegscripts = GetValidFedpegScripts(pindex, m_params.GetConsensus(), false /* nextblock_validation */);
 
+    bool lost_tx_refused = false; // refused for a transaction's own rule
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
         if (!state.IsValid()) break;
@@ -4972,6 +5030,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, debug);
                 LogPrintf("ERROR: %s: %s, %s\n", __func__, tx.GetHash().ToString(), state.ToString());
+                // The accumulated fee is the block's sum, not this transaction's rule.
+                lost_tx_refused = reason != "bad-txns-accumulated-fee-outofrange";
                 break;
             }
         }
@@ -4998,6 +5058,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                               tx_state.GetRejectReason(), tx_state.GetDebugMessage());
                 LogPrintf("ERROR: ConnectBlock(): CheckInputScripts on %s failed with %s\n",
                     tx.GetHash().ToString(), state.ToString());
+                lost_tx_refused = true;
                 break;
             }
             control.Add(vChecks);
@@ -5302,6 +5363,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     if (!control.Wait() && state.IsValid()) {
         LogPrintf("ERROR: %s: CheckQueue failed\n", __func__);
         state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "block-validation-failed");
+        lost_tx_refused = true;
+    }
+    if (check_pos_rules && (lost_tx_refused || state.IsValid())) {
+        LostCrossCheck(block, pindex, CoinsTip(), m_params.GetConsensus(), lost_tx_refused);
     }
     if (!state.IsValid()) {
         return false;
