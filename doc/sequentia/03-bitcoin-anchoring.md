@@ -285,11 +285,18 @@ The rule has two layers.
   the chain lock, so before it signs anything afterwards; the maintenance pass
   folds the journal into `lostblocks.dat`. It reads both back before it
   connects a block or meets a peer. A holder judges whether L's anchor is off
-  Bitcoin's best chain from its own Bitcoin daemon: the best chain has another
-  block at that height. The daemon need not have seen the stale block:
-  evidence carries the Bitcoin headers from the best chain to L's anchor, and
-  the holder checks their work itself. Evidence whose stale anchor is not
-  proven this way is not taken, so an invented block binds nothing. A node
+  Bitcoin's best chain from its own Bitcoin daemon, by the anchor's hash, as the
+  anchor watcher does: the daemon knows the block off its best chain, at any
+  height, which includes a block above the tip of a branch with fewer blocks and
+  more work; or the daemon has reached that height without ever seeing it. A
+  block the watcher disconnected is off the best chain by that verdict. When the
+  daemon has not reached the anchor's height and does not know the block,
+  nothing says whether it is stale or still ahead of the daemon: the anchor stays
+  unknown and evidence for it is not taken from a peer. The daemon need not have
+  seen a stale block below its tip: evidence carries the Bitcoin headers from the
+  best chain to L's anchor, and the holder checks their work itself. Evidence
+  whose stale anchor is not proven this way is not taken, so an invented block
+  binds nothing. A node
   neither serves nor sends a stale-anchored block until it holds those headers,
   and counts a block as sent to a peer only when it went out with them.
 
@@ -328,7 +335,7 @@ The classification uses validity's own checks, the records' bindings
 included, so a block that does what the duty asks is valid.
 
 The holder refuses B (`bad-lost-replay`) unless B begins, right after its
-coinbase, with the due transactions that are not contested (below), in lost order: the longest run of them,
+coinbase, with the due transactions in lost order: the longest run of them,
 from the first, that fits the consensus limits. The weight left for them is
 the block's maximum weight less 8,000 (the header and the coinbase), less the
 certificate's maximum size, less 100,000 when B owes a record, and less 640
@@ -347,14 +354,15 @@ an outpoint to another transaction: the first binding of a coin stands, so a
 record is as good as a spend. Which of two conflicting lost transactions of its
 own chain stands is decided by lost order alone.
 
-When a certified block at the same fork point and height spends a pending
-transaction's coin differently, two quorums signed conflicting blocks there and
-neither can be shown to have come first. That transaction and its descendants
-are *contested*. A block may carry them and is not refused for leaving them out,
-no record of them is owed, and what conflicts with them stays refused. A producer
-offers them by default. Once a collection at a height ends without a certificate,
-its next proposal at that height leaves them out, so a block that neither side of
-the split refuses can certify. Each height tries them again.
+**Evidence never weakens this.** A transaction of a block the holder had on its
+own chain stays due and demanded whatever evidence arrives, including a certified
+sibling that spends the same coin differently: the holder cannot tell a sibling
+that half the network really held from one a quorum certified after the fact, so
+any rule that dropped the transaction on evidence, or on failed rounds, could be
+triggered by whoever wants it dropped. A leader never leaves a due transaction of
+its own lost block out, whether or not a round has failed, and a block that does
+is refused at every height, a sub-quorum block of the escaping-stall valve
+included. What a holder yields to is the waiver at its depth, and nothing else.
 
 An evidence-only block creates no duty to carry or record. Its transactions
 bind their coins for the holder's own signature only when they are valid against
