@@ -40,10 +40,11 @@ from feature_pos_lost_swap import LostSwapTest
 from feature_pos_lost_blocks import SELLER, HONEST, LATE, ALL_KEYS, N, W, BITCOIND, CHAIN
 from test_framework.address import program_to_witness
 from test_framework.authproxy import AuthServiceProxy, JSONRPCException
+from test_framework.lost_cases import check_cases, each_case, selected
 from test_framework.messages import hash256, tx_from_hex
 from test_framework.util import assert_equal, p2p_port, rpc_port
 
-CASES = os.environ.get("LOST_CASES", "hx").split(",")
+CASES = selected("hx")
 RECORD_PREFIX = "6a0453514c52"  # OP_RETURN 'SQLR'
 
 
@@ -575,7 +576,7 @@ class LostSwapAttacksTest(LostSwapTest):
 
     def run_test(self):
         try:
-            for c in CASES:
+            for c in each_case(self, CASES):
                 getattr(self, "case_" + c)()
         finally:
             out = os.environ.get("LOST_RESULTS", "")
@@ -587,4 +588,5 @@ class LostSwapAttacksTest(LostSwapTest):
 
 
 if __name__ == '__main__':
+    check_cases(LostSwapAttacksTest, CASES)
     LostSwapAttacksTest().main()

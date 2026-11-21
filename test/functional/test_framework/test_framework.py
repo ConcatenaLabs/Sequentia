@@ -180,6 +180,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         parser.add_argument("--randomseed", type=int,
                             help="set a random seed for deterministically reproducing a previous test run")
         parser.add_argument('--timeout-factor', dest="timeout_factor", type=float, default=1.0, help='adjust test timeouts by a factor. Setting it to 0 disables all timeouts')
+        parser.add_argument("--cases", dest="cases", help="comma-separated case names, for the suites that define cases (test_framework/lost_cases.py)")
 
         group = parser.add_mutually_exclusive_group()
         group.add_argument("--descriptors", action='store_const', const=True,

@@ -388,12 +388,18 @@ class BtcPaymentProofTest(BitcoinTestFramework):
     def run_test(self):
         try:
             self.results = []
-            self.setup_chain_state()
             # BTCPAY_CASES=name,name runs those scenarios alone, after the setup.
-            only = os.environ.get("BTCPAY_CASES")
+            # A name this suite does not define stops the run before the setup.
+            only = [name for name in os.environ.get("BTCPAY_CASES", "").split(",") if name]
+            unknown = [name for name in only if not callable(getattr(self, name, None))]
+            assert not unknown, "unknown case(s): %s" % ",".join(unknown)
+            self.setup_chain_state()
             if only:
-                for name in only.split(","):
+                for name in only:
+                    self.log.info("case %s: start", name)
                     getattr(self, name)()
+                    self.log.info("case %s: done", name)
+                self.log.info("cases run: %s", ",".join(only))
                 return
             self.test_swap_and_negatives()
         finally:

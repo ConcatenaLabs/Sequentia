@@ -37,10 +37,11 @@ from decimal import Decimal
 from feature_pos_lost_blocks import ALL_KEYS, SELLER, HONEST, LATE, N
 from feature_pos_lost_replay import LostReplayTest
 from test_framework.authproxy import JSONRPCException
+from test_framework.lost_cases import check_cases, each_case, selected
 from test_framework.messages import tx_from_hex
 from test_framework.util import assert_equal
 
-CASES = os.environ.get("LOST_CASES", "aT").split(",")
+CASES = selected("aT")
 ROUND_MS = int(os.environ.get("LOST_ROUND_MS", "9450"))
 WINDOW_MS = int(os.environ.get("LOST_WINDOW_MS", "6750"))
 TRIALS = int(os.environ.get("LOST_TRIALS", "6"))
@@ -428,7 +429,7 @@ class LostAutonomousTest(LostReplayTest):
 
     def run_test(self):
         try:
-            for c in CASES:
+            for c in each_case(self, CASES):
                 getattr(self, "case_" + c)()
         finally:
             from feature_pos_lost_blocks import RESULTS
@@ -440,4 +441,5 @@ class LostAutonomousTest(LostReplayTest):
 
 
 if __name__ == '__main__':
+    check_cases(LostAutonomousTest, CASES, needs={"mixT": "LOST_BASE_NODES"})
     LostAutonomousTest().main()

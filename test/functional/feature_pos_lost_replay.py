@@ -35,12 +35,13 @@ from decimal import Decimal
 from feature_pos_lost_blocks import BitcoinGate, WAIVER, LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W
 from test_framework.authproxy import JSONRPCException
 from test_framework.key import ECKey
+from test_framework.lost_cases import check_cases, each_case, selected
 from test_framework.messages import CTxInWitness, hash256, ser_compact_size, tx_from_hex
 from test_framework.p2p import MESSAGEMAP, P2PInterface
 from test_framework.script import CScript, OP_0, OP_1, OP_IF, OP_ENDIF, OP_DROP, OP_CHECKMULTISIG
 from test_framework.util import assert_equal, rpc_port
 
-CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6,b2,b2r,b2s,b2j").split(",")
+CASES = selected("r1,r2,r3,r4,r5,r6,b2,b2r,b2s,b2j")
 ABUSE_TXS = int(os.environ.get("LOST_ABUSE_TXS", "340"))
 
 
@@ -1135,7 +1136,7 @@ class LostReplayTest(LostBlocksTest):
 
     def run_test(self):
         try:
-            for c in CASES:
+            for c in each_case(self, CASES):
                 getattr(self, "case_" + c)()
         finally:
             from feature_pos_lost_blocks import RESULTS
@@ -1147,4 +1148,5 @@ class LostReplayTest(LostBlocksTest):
 
 
 if __name__ == '__main__':
+    check_cases(LostReplayTest, CASES)
     LostReplayTest().main()

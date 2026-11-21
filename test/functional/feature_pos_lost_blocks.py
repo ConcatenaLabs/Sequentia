@@ -30,12 +30,15 @@ from decimal import Decimal
 from test_framework.address import byte_to_base58
 from test_framework.authproxy import AuthServiceProxy, JSONRPCException
 from test_framework.key import ECKey
+from test_framework.lost_cases import check_cases, each_case, selected
 from test_framework.messages import tx_from_hex
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, p2p_port, rpc_port
 
 BITCOIND = os.environ.get("PARENT_BITCOIND", "/usr/local/bin/bitcoind")
-CASES = os.environ.get("LOST_CASES", "dep,a,b,c,f,g").split(",")
+CASES = selected("dep,a,b,c,f,g")
+# Names that change what case b or c does and run nothing by themselves.
+SWITCHES = ("b2", "c3")
 RESULTS = os.environ.get("LOST_RESULTS", "")
 BASE_BIN = os.environ.get("LOST_BASE_BIN", "")
 W = int(os.environ.get("LOST_WINDOW", "6"))
@@ -836,9 +839,7 @@ class LostBlocksTest(BitcoinTestFramework):
 
     def run_test(self):
         try:
-            for c in CASES:
-                if c in ("b2", "c3"):
-                    continue
+            for c in each_case(self, CASES, SWITCHES):
                 getattr(self, "case_" + c)()
         finally:
             if RESULTS:
@@ -848,4 +849,5 @@ class LostBlocksTest(BitcoinTestFramework):
 
 
 if __name__ == '__main__':
+    check_cases(LostBlocksTest, CASES, switches=SWITCHES, needs={"d": "LOST_BASE_NODES"})
     LostBlocksTest().main()

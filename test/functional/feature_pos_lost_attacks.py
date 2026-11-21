@@ -39,11 +39,12 @@ from decimal import Decimal
 from feature_pos_lost_blocks import LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W, make_key
 from pos_lost_attack_util import (LostP2PDataStore, block_from_hex, corrupt_aggregate, msg_anchor_headers)
 from test_framework.authproxy import JSONRPCException
+from test_framework.lost_cases import check_cases, each_case, selected
 from test_framework.messages import CTxOut, CTxOutAsset, CTxOutValue, CTxOutWitness, hash256, msg_block, tx_from_hex
 from test_framework.util import calcfastmerkleroot
 from test_framework.util import assert_equal
 
-CASES = os.environ.get("LOST_CASES", "lx").split(",")
+CASES = selected("lx")
 
 
 def ser_cs(n):
@@ -406,7 +407,7 @@ class LostAttacksTest(LostBlocksTest):
 
     def run_test(self):
         try:
-            for c in CASES:
+            for c in each_case(self, CASES):
                 if c == "lx":
                     self.case_lx()
                 elif c == "desc":
@@ -425,4 +426,5 @@ class LostAttacksTest(LostBlocksTest):
 
 
 if __name__ == '__main__':
+    check_cases(LostAttacksTest, CASES, variants=("root0", "root1", "late0", "late1"))
     LostAttacksTest().main()

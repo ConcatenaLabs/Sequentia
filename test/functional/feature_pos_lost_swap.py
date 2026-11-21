@@ -32,11 +32,12 @@ from feature_pos_lost_blocks import LostBlocksTest, SELLER, HONEST, LATE, ALL_KE
 from test_framework.address import program_to_witness
 from test_framework.authproxy import JSONRPCException
 from test_framework.key import compute_xonly_pubkey, generate_privkey
+from test_framework.lost_cases import check_cases, each_case, selected
 from test_framework.messages import tx_from_hex
 from test_framework.script import CScript
 from test_framework.util import assert_equal
 
-CASES = os.environ.get("LOST_CASES", "sA,sB,sC,sD,sR").split(",")
+CASES = selected("sA,sB,sC,sD,sR")
 
 
 class LostSwapTest(LostBlocksTest):
@@ -498,7 +499,7 @@ class LostSwapTest(LostBlocksTest):
 
     def run_test(self):
         try:
-            for c in CASES:
+            for c in each_case(self, CASES):
                 getattr(self, "case_" + c)()
         finally:
             from feature_pos_lost_blocks import RESULTS
@@ -510,4 +511,5 @@ class LostSwapTest(LostBlocksTest):
 
 
 if __name__ == '__main__':
+    check_cases(LostSwapTest, CASES)
     LostSwapTest().main()

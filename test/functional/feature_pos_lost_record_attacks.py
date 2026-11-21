@@ -47,13 +47,14 @@ from feature_pos_lost_blocks import SELLER, HONEST, ALL_KEYS, N, W
 from feature_pos_lost_swap import LostSwapTest
 from pos_lost_attack_util import LostP2PDataStore, block_from_hex
 from test_framework.authproxy import JSONRPCException
+from test_framework.lost_cases import check_cases, each_case, selected
 from test_framework.messages import (COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutAsset, CTxOutValue, CTxOutWitness,
                                      ser_uint256, tx_from_hex, uint256_from_str)
 from test_framework.messages import hash256
 from test_framework.util import assert_equal, calcfastmerkleroot
 import test_framework.util as fu
 
-CASES = os.environ.get("LOST_CASES", "fab,powneg").split(",")
+CASES = selected("fab,powneg")
 STALE = any(c.endswith("@stale") for c in CASES)
 CASES = [c.split("@")[0] for c in CASES]
 GRACE = int(os.environ.get("LOST_GRACE", "0"))
@@ -1565,7 +1566,7 @@ class LostRecordAttacksTest(LostSwapTest):
 
     def run_test(self):
         try:
-            for c in CASES:
+            for c in each_case(self, CASES):
                 try:
                     getattr(self, "case_" + c)()
                     if c in OPEN:
@@ -1584,4 +1585,5 @@ class LostRecordAttacksTest(LostSwapTest):
 
 
 if __name__ == '__main__':
+    check_cases(LostRecordAttacksTest, CASES)
     LostRecordAttacksTest().main()
