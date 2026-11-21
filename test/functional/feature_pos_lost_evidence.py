@@ -23,6 +23,9 @@ the network of feature_pos_lost_blocks.py. Cases (LOST_CASES):
            follow a block X carrying R once a quorum has certified past it at
            the waiver's depth, and Bitcoin then takes X too. Both are their own:
            T comes first by lost order, R's block is refused, and T is mined.
+  afterwaiver  the holders have followed a quorum past one lost block. A later,
+           unrelated block L2 is lost above it: the waiver of the first loss says
+           nothing about L2, so a sub-quorum block carrying L2's respend is refused.
 """
 
 import time
@@ -173,6 +176,45 @@ class LostEvidenceTest(LostAutonomousTest, LostRecordAttacksTest):
         if r_at is not None or t_at is None or txs[1] != st["t_id"]:
             raise AssertionError("ATTACK SUCCEEDED (twolost): T at %s, R at %s" % (t_at, r_at))
         self.record(case, "blocked", "T comes first by lost order and is mined; R is not")
+
+    def case_afterwaiver(self):
+        case = "afterwaiver"
+        self.log.info("(afterwaiver) a later loss above a block the holders followed, waiver depth %d" % WAIVER)
+        st = self.gap(case)
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        self.btc_mine(3)
+        time.sleep(2)
+        self.produce(SELLER, ALL_KEYS, leaders=[SELLER], txs_must=[st["r_id"]])
+        for _ in range(WAIVER):
+            top = self.produce(SELLER, ALL_KEYS, leaders=[SELLER])
+        self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == top["hash"] for i in HONEST), timeout=120)
+        self.record(case, "first loss", "the holders followed the quorum past L at depth %d" % WAIVER)
+        coin = self.fund()
+        t_hex = self.spend(coin, n1.getnewaddress(), Decimal("0.0001"))
+        r_hex = self.spend(coin, a.getnewaddress(), Decimal("0.001"))
+        t_id, r_id = tx_from_hex(t_hex).rehash(), tx_from_hex(r_hex).rehash()
+        self.btc_mine(1)
+        anchor = self.btc().getblockcount()
+        n1.sendrawtransaction(t_hex)
+        l2 = self.produce(1, ALL_KEYS, txs_must=[t_id])
+        assert_equal(l2["block"]["anchorheight"], anchor)
+        self.produce(1, ALL_KEYS)
+        self.sync_tips(range(len(self.nodes)))
+        since = [self.log_size(i) for i in range(len(self.nodes))]
+        self.bitcoin_reorg(1)
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() < l2["height"] for i in HONEST), timeout=60)
+        self.wait_lost(l2["hash"], HONEST)
+        if r_id not in a.getrawmempool():
+            a.sendrawtransaction(r_hex)
+        y = self.produce(SELLER, COALITION, leaders=[SELLER], txs_must=[r_id])
+        self.wait_until(lambda: all(self.nodes[i].getbestblockhash() == y["hash"] or
+                                    self.log_has(i, "Lost blocks: refusing block %s" % y["hash"], since[i]) for i in HONEST), timeout=30)
+        took = [i for i in HONEST if self.nodes[i].getbestblockhash() == y["hash"]]
+        self.record(case, "a sub-quorum block with L2's respend, 3 seats, no certified child", "taken by holders %s" % took)
+        if took:
+            raise AssertionError("ATTACK SUCCEEDED (afterwaiver): holders %s took the respend of a later lost block" % took)
+        self.assert_refused(case, HONEST, y["hash"], since)
+        self.record(case, "blocked", "the waiver of the first loss does not bear on the second")
 
     def case_evstall(self):
         case = "evstall"
