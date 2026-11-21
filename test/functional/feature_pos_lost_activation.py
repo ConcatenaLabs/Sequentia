@@ -36,6 +36,7 @@ from test_framework.util import assert_equal
 
 H = 30
 COMMITMENT = bytes.fromhex("6a24aa21a9ed")
+EVIDENCE_MSG = "poslost"
 
 
 class LostActivationTest(LostSwapTest):
@@ -67,6 +68,7 @@ class LostActivationTest(LostSwapTest):
         self.disconnect_all(1)
         base, leader = self.produce_by()
         assert_equal(base["height"], height)
+        self.template_txs = n1.getblock(base["hash"])["tx"]
         raw = n1.getblock(base["hash"], 0)
         n1.invalidateblock(base["hash"])
         rc = self.forced(raw, leader, **kw)
@@ -119,10 +121,10 @@ class LostActivationTest(LostSwapTest):
         assert res["complete"], res
         return res["hex"]
 
-    def lost_T(self, case, coin):
-        """T, spending `coin` without signalling replacement, certified in L at the next height, then lost."""
+    def lost_T(self, case, coin, replaceable=False):
+        """T, spending `coin`, certified in L at the next height, then lost. It signals replacement only if asked."""
         n1, b, a = self.nodes[1], self.btc(), self.nodes[SELLER]
-        raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"], "sequence": 0xffffffff}],
+        raw = a.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"], "sequence": 0xfffffffd if replaceable else 0xffffffff}],
                                      [{a.getnewaddress(): coin["amount"] - Decimal("0.001")}, {"fee": Decimal("0.001")}])
         t_hex = self.signed(a, raw)
         t_id = tx_from_hex(t_hex).rehash()
@@ -166,7 +168,7 @@ class LostActivationTest(LostSwapTest):
     def body(self):
         self.wallets()
         n1 = self.nodes[1]
-        coins = [self.fund(Decimal("2")), self.fund(Decimal("2"))]
+        coins = [self.fund(Decimal("2")), self.fund(Decimal("2")), self.fund(Decimal("2"))]
         garbage = b"\x02not a record"
 
         self.log.info("below: the lost block's height is H - 1")
@@ -175,12 +177,28 @@ class LostActivationTest(LostSwapTest):
         self.sync_tips(range(N))
         self.active(False)
         assert_equal(self.dep()["height"], H)
-        t_hex, t_id, r_hex, h = self.lost_T("below", coins[0])
+        t_hex, t_id, r_hex, h = self.lost_T("below", coins[0], replaceable=True)
         assert_equal(h, H - 1)
         why = n1.testmempoolaccept([r_hex])[0].get("reject-reason")
         self.record("below", "the respend in the mempool", why)
         assert why != "txn-lost-conflict"
+        # Below H the node is one without the rule: the respend replaces T by the
+        # ordinary rules and stays there, a better paying transaction goes first,
+        # and no evidence crosses the network.
+        r_id = n1.sendrawtransaction(r_hex)
+        u_hex = self.spend(coins[2], n1.getnewaddress(), Decimal("0.005"))
+        u_id = tx_from_hex(u_hex).rehash()
+        n1.sendrawtransaction(u_hex)
+        time.sleep(4)  # several passes of the rule's upkeep
+        pool = n1.getrawmempool()
+        assert r_id in pool and t_id not in pool, (r_id in pool, t_id in pool)
+        self.record("below", "the mempool after the upkeep", "holds the respend, not T")
+        relayed = sum(p["bytesrecv_per_msg"].get(EVIDENCE_MSG, 0) for j in range(N) for p in self.nodes[j].getpeerinfo())
+        assert_equal(relayed, 0)
+        self.record("below", "evidence bytes received, all nodes", relayed)
         self.forced_alone(H - 1, drop=[t_hex], add=[r_hex], record=garbage)
+        assert t_id not in self.template_txs and self.template_txs.index(u_id) < self.template_txs.index(r_id), self.template_txs
+        self.record("below", "template", "the better paying transaction first, then the respend; T is not in it")
         self.record("below", "forced", "block %d with the respend and a malformed record instead of T: accepted "
                     "by every node" % (H - 1))
 
