@@ -227,26 +227,27 @@ LostBlk MakeBlk(const std::shared_ptr<const CBlock>& block, int height)
     return b;
 }
 
-//! Where a Bitcoin block hash stands on the daemon's best chain, judged by
-//! height: OK when the best chain has it there, STALE when the best chain
-//! reaches that height with another block, UNKNOWN otherwise. The daemon need
-//! not know the stale block itself. This is the holders' view (the duty, soft);
-//! validity reads the judged block's own anchor ancestry instead.
+//! Where a Bitcoin block stands on the daemon's best chain, by the anchor
+//! watcher's own verdict, which asks by hash. OK when the best chain has it at
+//! that height. STALE when the daemon knows it off its best chain, at any height,
+//! so also above a shorter branch with more work; or when the daemon has reached
+//! that height without ever seeing it. UNKNOWN when the daemon does not answer,
+//! or has not reached that height and does not know the block: nothing then says
+//! whether it is stale or still ahead of the daemon. This is the holders' view
+//! (the duty, soft); validity reads the judged block's own anchor ancestry instead.
 AnchorState BestChainVerdict(uint32_t height, const uint256& hash)
 {
-    try {
-        int count = -1;
-        if (!GetMainchainBlockCount(count) || count < 0 || (uint32_t)count < height) return AnchorState::UNKNOWN;
-        UniValue p(UniValue::VARR);
-        p.push_back((int)height);
-        const UniValue reply = CallMainChainRPC("getblockhash", p);
-        if (!find_value(reply, "error").isNull()) return AnchorState::UNKNOWN;
-        const UniValue r = find_value(reply, "result");
-        if (!r.isStr()) return AnchorState::UNKNOWN;
-        return uint256S(r.get_str()) == hash ? AnchorState::OK : AnchorState::STALE;
-    } catch (const std::exception&) {
+    switch (CheckMainchainAnchor(height, hash)) {
+    case AnchorCheckResult::OK:
+        return AnchorState::OK;
+    case AnchorCheckResult::STALE:
+    case AnchorCheckResult::HEIGHT_MISMATCH:
+    case AnchorCheckResult::NOT_FOUND:
+        return AnchorState::STALE;
+    case AnchorCheckResult::NO_CONNECTION:
         return AnchorState::UNKNOWN;
     }
+    return AnchorState::UNKNOWN;
 }
 
 fs::path JournalPath() { return gArgs.GetDataDirNet() / "lostblocks.journal"; }
@@ -602,6 +603,8 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
     LOCK(g_lost_mutex);
     const uint256 h = pindex->GetBlockHash();
     auto known = g_blocks.find(h);
+    // The watcher's disconnect is itself the verdict on this anchor.
+    if (by_watcher && known != g_blocks.end()) known->second.anchor_state = AnchorState::STALE;
     if (known != g_blocks.end() && (known->second.own || !taken)) return;
     if (known != g_blocks.end()) {
         LogPrintf("Lost blocks: %s, held as evidence, was on this chain when Bitcoin took it: now this node's own\n", h.ToString());
@@ -609,6 +612,7 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
     LostBlk b = known != g_blocks.end() ? known->second : MakeBlk(block, pindex->nHeight);
     b.certified = b.certified || pindex->PosCarriesQuorum();
     b.own = taken;
+    if (by_watcher) b.anchor_state = AnchorState::STALE;
     // DisconnectTip goes down from the tip: a block whose child was the last
     // one noted belongs to the same loss.
     if (g_last_noted_prev != h) ++g_epoch;
@@ -1892,8 +1896,8 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     if (expired) return "expired";
     // Where its anchor stands on this node's view of Bitcoin's best chain (the
     // duty's view, soft): a block of a branch Bitcoin left, or the child of
-    // one. The daemon need not have seen the stale block: the best chain
-    // having another block at that height is enough.
+    // one. A daemon that has passed that height need not have seen the stale
+    // block; one below it that does not know the block leaves it unknown.
     AnchorState verdict = BestChainVerdict(block.m_anchor_height, block.m_anchor_hash);
     if (verdict == AnchorState::UNKNOWN) return "anchor-unknown";
     if (verdict == AnchorState::OK && !parent_in_store) return "anchor-on-best-chain";

@@ -285,11 +285,18 @@ The rule has two layers.
   the chain lock, so before it signs anything afterwards; the maintenance pass
   folds the journal into `lostblocks.dat`. It reads both back before it
   connects a block or meets a peer. A holder judges whether L's anchor is off
-  Bitcoin's best chain from its own Bitcoin daemon: the best chain has another
-  block at that height. The daemon need not have seen the stale block:
-  evidence carries the Bitcoin headers from the best chain to L's anchor, and
-  the holder checks their work itself. Evidence whose stale anchor is not
-  proven this way is not taken, so an invented block binds nothing. A node
+  Bitcoin's best chain from its own Bitcoin daemon, by the anchor's hash, as the
+  anchor watcher does: the daemon knows the block off its best chain, at any
+  height, which includes a block above the tip of a branch with fewer blocks and
+  more work; or the daemon has reached that height without ever seeing it. A
+  block the watcher disconnected is off the best chain by that verdict. When the
+  daemon has not reached the anchor's height and does not know the block,
+  nothing says whether it is stale or still ahead of the daemon: the anchor stays
+  unknown and evidence for it is not taken from a peer. The daemon need not have
+  seen a stale block below its tip: evidence carries the Bitcoin headers from the
+  best chain to L's anchor, and the holder checks their work itself. Evidence
+  whose stale anchor is not proven this way is not taken, so an invented block
+  binds nothing. A node
   neither serves nor sends a stale-anchored block until it holds those headers,
   and counts a block as sent to a peer only when it went out with them.
 
