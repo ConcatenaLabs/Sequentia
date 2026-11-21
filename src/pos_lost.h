@@ -227,6 +227,11 @@ int LostPruneFloor(const CBlockIndex* tip);
 //! A block was connected: while a loss is pending, the watcher's thread is woken
 //! to prepare the next height's plan. cs_main held.
 void LostNoteTipConnected(const CBlockIndex* tip);
+//! Compute the plan for the tip's child at the anchor this node would propose,
+//! so that a round finds it ready instead of computing it when a member signs.
+//! No lock held.
+void LostPreparePlan(ChainstateManager& chainman);
+
 //! getlostblocks. "active" is whether the rule applies to the block at
 //! `next_height` (the tip's child), as getdeploymentinfo reports it.
 UniValue LostGetInfo(int next_height);

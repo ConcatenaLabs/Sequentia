@@ -1498,9 +1498,11 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
 } // namespace
 
 //! The plan is a function of the parent (its chain, its coins, the records
-//! on it), the candidate's anchor height and the store. It is computed once
-//! for each and shared by the template, the block's test, every proposal on
-//! the same parent and the block's connection.
+//! on it), the candidate's anchor and the store. It is computed once for each
+//! and shared by the template, the block's test, every proposal on the same
+//! parent and the block's connection. Several are held, since after a
+//! reorganization proposals at one height carry different anchors and evidence
+//! keeps arriving: neither may discard the plan another proposal still needs.
 struct PlanMemo {
     uint256 prev;
     uint32_t anchor_h{0};
@@ -1508,7 +1510,8 @@ struct PlanMemo {
     uint256 store;
     Plan plan;
 };
-std::optional<PlanMemo> g_plan_memo GUARDED_BY(g_lost_mutex);
+constexpr size_t LOST_PLAN_MEMOS = 8;
+std::deque<PlanMemo> g_plan_memos GUARDED_BY(g_lost_mutex);
 
 uint256 StoreFingerprint() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
 {
@@ -1527,14 +1530,17 @@ Plan PlanLocked(const CBlockIndex* prev, uint32_t anchor_h, const uint256& ancho
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_lost_mutex)
 {
     const uint256 store = StoreFingerprint();
-    if (g_plan_memo && g_plan_memo->prev == prev->GetBlockHash() && g_plan_memo->anchor_h == anchor_h && g_plan_memo->anchor == anchor && g_plan_memo->store == store) {
-        Plan hit = g_plan_memo->plan;
-        hit.summary += "; reused";
-        return hit;
+    for (const PlanMemo& m : g_plan_memos) {
+        if (m.prev == prev->GetBlockHash() && m.anchor_h == anchor_h && m.anchor == anchor && m.store == store) {
+            Plan hit = m.plan;
+            hit.summary += "; reused";
+            return hit;
+        }
     }
     Plan plan = PlanCompute(prev, anchor_h, anchor, view, /*build=*/true);
     if (!plan.summary.empty()) LogPrint(BCLog::VALIDATION, "Lost blocks: plan computed on %s at height %d: %s\n", prev->GetBlockHash().ToString(), prev->nHeight + 1, plan.summary);
-    g_plan_memo = PlanMemo{prev->GetBlockHash(), anchor_h, anchor, store, plan};
+    g_plan_memos.push_front(PlanMemo{prev->GetBlockHash(), anchor_h, anchor, store, plan});
+    if (g_plan_memos.size() > LOST_PLAN_MEMOS) g_plan_memos.pop_back();
     return plan;
 }
 
@@ -2617,6 +2623,33 @@ void LostNoteTipConnected(const CBlockIndex* tip)
         pending = !g_spends.empty();
     }
     if (pending) g_anchor_watch_wake = true;
+}
+
+void LostPreparePlan(ChainstateManager& chainman)
+{
+    if (!LostActive()) return;
+    uint256 tip_hash, prev_anchor;
+    uint32_t prev_anchor_h{0};
+    {
+        LOCK2(cs_main, g_lost_mutex);
+        const CBlockIndex* tip = chainman.ActiveChain().Tip();
+        if (!tip || g_spends.empty() || !LostActiveAt(tip->nHeight + 1)) return;
+        tip_hash = tip->GetBlockHash();
+        prev_anchor_h = tip->m_anchor_height;
+        prev_anchor = tip->m_anchor_hash;
+    }
+    // The anchor this node would itself propose; asked of the Bitcoin daemon
+    // with no lock held.
+    uint32_t anchor_h{prev_anchor_h};
+    uint256 anchor{prev_anchor};
+    bool replaced{false};
+    if (!GetAnchorForNewBlock(prev_anchor_h, prev_anchor, anchor_h, anchor, &replaced) || replaced) return;
+    LOCK2(cs_main, g_lost_mutex);
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    if (!tip || tip->GetBlockHash() != tip_hash) return;
+    if (!LoadRecorded(tip)) return;
+    CCoinsViewCache view(&chainman.ActiveChainstate().CoinsTip());
+    (void)PlanLocked(tip, anchor_h, anchor, view, /*build=*/true);
 }
 
 UniValue LostGetInfo(int next_height)

@@ -2465,6 +2465,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     try {
                         AnchorWatchTask(*anchor_chainman);
                         LostMaintain(*anchor_chainman, lost_mempool);
+                        LostPreparePlan(*anchor_chainman);
                     } catch (const std::exception& e) {
                         LogPrintf("WARNING: anchor watcher tick failed, retrying next interval: %s\n", e.what());
                     } catch (...) {
