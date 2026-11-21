@@ -1371,7 +1371,10 @@ uint256 StoreFingerprint() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
 {
     CHashWriter hw(SER_GETHASH, 0);
     hw << g_gen;
+    // The plan carries only blocks this node had on its own chain, so evidence
+    // that binds nothing new does not make it compute again.
     for (const auto& [h, b] : g_blocks) {
+        if (!b.own) continue;
         hw << h << b.prot << b.certified << (uint8_t)b.anchor_state << b.fork_height << b.epoch;
     }
     return hw.GetHash();
