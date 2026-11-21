@@ -328,7 +328,7 @@ The classification uses validity's own checks, the records' bindings
 included, so a block that does what the duty asks is valid.
 
 The holder refuses B (`bad-lost-replay`) unless B begins, right after its
-coinbase, with the due transactions in lost order: the longest run of them,
+coinbase, with the due transactions that are not contested (below), in lost order: the longest run of them,
 from the first, that fits the consensus limits. The weight left for them is
 the block's maximum weight less 8,000 (the header and the coinbase), less the
 certificate's maximum size, less 100,000 when B owes a record, and less 640
@@ -346,6 +346,15 @@ outpoint that a pending lost transaction spends, or if a record in B binds such
 an outpoint to another transaction: the first binding of a coin stands, so a
 record is as good as a spend. Which of two conflicting lost transactions of its
 own chain stands is decided by lost order alone.
+
+When a certified block at the same fork point and height spends a pending
+transaction's coin differently, two quorums signed conflicting blocks there and
+neither can be shown to have come first. That transaction and its descendants
+are *contested*. A block may carry them and is not refused for leaving them out,
+no record of them is owed, and what conflicts with them stays refused. A producer
+offers them by default. Once a collection at a height ends without a certificate,
+its next proposal at that height leaves them out, so a block that neither side of
+the split refuses can certify. Each height tries them again.
 
 An evidence-only block creates no duty to carry or record. Its transactions
 bind their coins for the holder's own signature only when they are valid against

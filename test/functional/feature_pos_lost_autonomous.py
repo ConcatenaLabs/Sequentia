@@ -34,10 +34,11 @@ import os
 import time
 from decimal import Decimal
 
-from feature_pos_lost_blocks import SELLER, HONEST, LATE, N
+from feature_pos_lost_blocks import ALL_KEYS, SELLER, HONEST, LATE, N
 from feature_pos_lost_replay import LostReplayTest
 from test_framework.authproxy import JSONRPCException
 from test_framework.messages import tx_from_hex
+from test_framework.util import assert_equal
 
 CASES = os.environ.get("LOST_CASES", "aT").split(",")
 ROUND_MS = int(os.environ.get("LOST_ROUND_MS", "9450"))
@@ -156,6 +157,71 @@ class LostAutonomousTest(LostReplayTest):
         self.record(case, "trial %d" % k, res)
         assert res["T_first"] and not res["R_in_chain"], res
         return res
+
+    def case_split(self):
+        """Two certified siblings that spend one coin differently, each held by half the seats: neither side has a
+        quorum for its own transaction, and live rounds still produce a block both sides take."""
+        case = "split"
+        self.log.info("(split) a double-signed split under live rounds, %d/%d ms" % (ROUND_MS, WINDOW_MS))
+        self.restart_node(SELLER, extra_args=self.node_args(SELLER) + ["-posdebugignorelost=0"])
+        self.nodes[SELLER].loadwallet("w")
+        self.mesh(range(N))
+        self.sync_tips(range(N))
+        coin = self.fund()
+        t_hex = self.spend(coin, self.nodes[1].getnewaddress(), Decimal("0.0001"))
+        r_hex = self.spend(coin, self.nodes[SELLER].getnewaddress(), Decimal("0.001"))
+        t_id, r_id = tx_from_hex(t_hex).rehash(), tx_from_hex(r_hex).rehash()
+        side_a, side_b = [1, 2, 3], [0, 4, 5]
+        for i in range(N):
+            self.disconnect_all(i)
+        self.mesh(side_a)
+        self.mesh(side_b)
+        self.btc_mine(1)
+        self.nodes[1].sendrawtransaction(t_hex)
+        self.nodes[4].sendrawtransaction(r_hex)
+        l = self.produce(1, ALL_KEYS, txs_must=[t_id])
+        s = self.produce(4, ALL_KEYS, txs_must=[r_id])
+        assert_equal(l["height"], s["height"])
+        self.sync_tips(side_a)
+        self.sync_tips(side_b)
+        fork_h = l["height"] - 1
+        self.record(case, "siblings", "L %s (T) on seats %s, S %s (R) on seats %s, both certified, height %d" % (l["hash"][:12], side_a, s["hash"][:12], side_b, l["height"]))
+        self.bitcoin_reorg(1)
+        self.wait_lost(l["hash"], side_a)
+        self.wait_lost(s["hash"], side_b)
+        self.mesh_across(side_a, side_b)
+        self.wait_lost(s["hash"], side_a, timeout=120)
+        self.wait_lost(l["hash"], side_b, timeout=120)
+        marks = {i: self.lost(i)[l["hash"] if i in side_a else s["hash"]]["own"] for i in range(N)}
+        other = {i: self.lost(i)[s["hash"] if i in side_a else l["hash"]]["own"] for i in range(N)}
+        self.record(case, "each side holds its own block as its own and the other's as evidence", {"own": marks, "other": other})
+        assert all(marks.values()) and not any(other.values())
+        since = [self.log_size(i) for i in range(N)]
+        t0 = time.time()
+        self.start_producers(range(N))
+        self.wait_height(range(N), l["height"], timeout=420)
+        self.sync_tips(range(N), timeout=120)
+        took = time.time() - t0
+        tip = self.nodes[1].getblockhash(l["height"])
+        txs = self.nodes[1].getblock(tip)["tx"]
+        hdr = self.nodes[1].getblockheader(tip)
+        left = sum(1 for i in range(N) if self.log_has(i, "leaves out", since[i]))
+        restarts = sum(1 for i in range(N) if self.log_has(i, "restarting collection", since[i]))
+        self.record(case, "outcome", "block %s at height %d in %.0f s, certified %s, on all %d nodes; carries T: %s, R: %s; %d node(s) restarted a collection, %d left the contested transactions out" % (
+            tip[:12], l["height"], took, hdr["poscertified"], N, t_id in txs, r_id in txs, restarts, left))
+        assert hdr["poscertified"]
+        assert t_id not in txs and r_id not in txs
+        assert left > 0
+        self.wait_height(range(N), l["height"] + 1, timeout=420)
+        self.sync_tips(range(N), timeout=120)
+        self.record(case, "next", "the chain goes on: height %d on all nodes, T and R both unmined: %s" % (
+            self.nodes[1].getblockcount(), all(t not in self.nodes[1].getblock(self.nodes[1].getblockhash(h))["tx"]
+                                               for h in range(fork_h + 1, self.nodes[1].getblockcount() + 1) for t in (t_id, r_id))))
+
+    def mesh_across(self, side_a, side_b):
+        for i in side_a:
+            for j in side_b:
+                self.connect_nodes(i, j)
 
     def case_aT(self, case="aT"):
         self.log.info("(%s) autonomous committee, rounds %d ms, window %d ms, %d trials" % (case, ROUND_MS, WINDOW_MS, TRIALS))

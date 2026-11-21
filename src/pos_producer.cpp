@@ -192,7 +192,7 @@ static void LogAssemblyFailure(const char* who, int height, const std::string& w
 //! block and its height, or nullptr.
 std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMemPool& mempool,
                                               const CChainParams& chainparams, const CKey& leader_key,
-                                              int& out_height)
+                                              int& out_height, int leave_contested_at = 0)
 {
     const CPubKey pubkey = leader_key.GetPubKey();
     CBlockIndex* tip;
@@ -217,8 +217,9 @@ std::shared_ptr<CBlock> BuildUnsignedBlsBlock(ChainstateManager& chainman, CTxMe
     if (feeDest == CScript()) feeDest = g_con_pos ? PosRequiredCoinbaseScript(pubkey, tip->nHeight + 1, PosPayoutSeedForChild(tip)) : (CScript() << OP_TRUE);
     std::unique_ptr<CBlockTemplate> tmpl;
     try {
-        tmpl = BlockAssembler(chainman.ActiveChainstate(), mempool, chainparams)
-            .CreateNewBlock(feeDest, std::chrono::seconds(0), nullptr, &vrf_commitments, &pubkey, &*proof, nullptr);
+        BlockAssembler assembler(chainman.ActiveChainstate(), mempool, chainparams);
+        assembler.SetLeaveContested(tip->nHeight + 1 == leave_contested_at);
+        tmpl = assembler.CreateNewBlock(feeDest, std::chrono::seconds(0), nullptr, &vrf_commitments, &pubkey, &*proof, nullptr);
     } catch (const std::exception& e) {
         // CreateNewBlock throws if its final TestBlockValidity fails — e.g. the tip
         // advanced between computing our VRF proof (against the old parent) and
@@ -1330,6 +1331,9 @@ std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
               height, RoundsPerCollection());
     m_propose_at_height = height;
     m_propose_at_ms = ((exhausted.value_or(now) + 999) / 1000) * 1000;
+    // A round that failed here may have failed on a contested lost transaction:
+    // what this node proposes next at this height leaves those out (pos_lost.h).
+    m_leave_contested_at = height;
     m_round_height = 0;
     m_candidates.clear();
     m_anchor_deferred.clear();
@@ -1364,7 +1368,7 @@ std::optional<uint256> PosProducer::RestartCollection(int height, int64_t now)
 void PosProducer::ProposeGossip(const CKey& leader_key)
 {
     int height = 0;
-    auto block = BuildUnsignedBlsBlock(m_chainman, m_mempool, m_chainparams, leader_key, height);
+    auto block = BuildUnsignedBlsBlock(m_chainman, m_mempool, m_chainparams, leader_key, height, m_leave_contested_at.load());
     if (!block) {
         LogPrint(BCLog::VALIDATION, "PoS gossip: failed to build a proposal\n");
         return;
