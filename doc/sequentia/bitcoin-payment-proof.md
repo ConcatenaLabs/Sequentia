@@ -1338,9 +1338,10 @@ and the swap completes at any depth. What can still cost the buyer its payment:
   reorganization reaching the lock's anchor block. The lock does not signal
   replacement, so honest mempools refuse the respend; under the rule for the
   transactions of a lost block (`03-bitcoin-anchoring.md`, "Transactions of a
-  lost block") the nodes that hold the lock's lost block carry it first into the
-  chain that replaces it and refuse a block that respends it, so the seller needs
-  a dishonest quorum of committee seats as well as the producer.
+  lost block") the nodes that had the lock's lost block on their own chain carry
+  it first into the chain that replaces it and refuse a block that respends it
+  or records a respend of it, so the seller needs a dishonest quorum of committee
+  seats, at the waiver depth of that section, as well as the producer.
 
 So the buyer's risk after paying is a Bitcoin reorganization that mines the
 payment again outside the lock's heights (above `D`, which the deadline and the
