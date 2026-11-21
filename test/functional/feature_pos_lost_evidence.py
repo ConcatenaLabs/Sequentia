@@ -36,6 +36,10 @@ the network of feature_pos_lost_blocks.py. Cases (LOST_CASES):
            seats mine T in sub-quorum blocks; the coalition keeps its own
            sub-quorum branch from the fork point carrying R, one block longer,
            and shows it once the honest tip has passed the lapse. T must stay.
+           evlapseafter: the coalition's block at the lost height is anchored
+           after the window, so that nothing in validity refuses its R.
+  certfinal  a quorum mines T and the holders' chain passes the lapse: the loss
+           is dropped, and a longer branch carrying R is refused by finality.
 """
 
 import time
@@ -292,14 +296,59 @@ class LostEvidenceTest(LostAutonomousTest, LostRecordAttacksTest):
         self.assert_refused(case, HONEST, y["hash"], since)
         self.record(case, "blocked", "the waiver of the first loss does not bear on the second")
 
-    def case_evlapse(self):
-        case = "evlapse"
-        self.log.info("(evlapse) a blocking share's own branch, shown after the lapse, waiver depth %d" % WAIVER)
+    def case_evlapseafter(self):
+        self.case_evlapse(after=True)
+
+    def case_certfinal(self):
+        case = "certfinal"
+        self.log.info("(certfinal) T certified, the lapse passed, then a longer branch with R, waiver depth %d" % WAIVER)
+        st = self.gap(case)
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        fork = n1.getblockheader(st["L"])["height"] - 1
+        self.isolate()
+        honest = [1, 2, 3, 4]
+        first = self.produce(1, honest, leaders=honest, txs_must=[st["t_id"]])
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() >= first["height"] for i in HONEST), timeout=60)
+        assert n1.getblockheader(first["hash"])["poscertified"]
+        lapse = max(n1.getblockheader(st["L"])["anchorheight"], first["block"]["anchorheight"]) + W
+        self.btc_mine(max(1, lapse + 1 - self.btc().getblockcount()))
+        time.sleep(2)
+        top = self.produce(1, honest, leaders=honest)
+        assert top["block"]["anchorheight"] > lapse, (top["block"]["anchorheight"], lapse)
+        self.wait_until(lambda: st["L"] not in {b["hash"] for b in n1.getlostblocks()["blocks"]}, timeout=30)
+        self.record(case, "dropped", "T certified at height %d; tip anchor %d past the lapse %d; the loss is dropped" % (
+            first["height"], top["block"]["anchorheight"], lapse))
+        if st["r_id"] not in a.getrawmempool():
+            a.sendrawtransaction(st["r_hex"])
+        self.produce(SELLER, COALITION, leaders=[SELLER], txs_must=[st["r_id"]])
+        while a.getblockcount() <= n1.getblockcount():
+            self.produce(SELLER, COALITION, leaders=[SELLER])
+        since = self.log_size(1)
+        a.setnetworkactive(True)
+        for j in range(1, len(self.nodes)):
+            self.connect_nodes(j, SELLER)
+        self.wait_until(lambda: self.log_has(1, "bad-fork-prior-to-pos-final", since), timeout=45)
+        t_at, r_at = self.chain_has(n1, st["t_id"], fork + 1), self.chain_has(n1, st["r_id"], fork + 1)
+        self.record(case, "outcome", "branch to height %d shown: refused by finality; T at %s, R at %s" % (a.getblockcount(), t_at, r_at))
+        if r_at is not None or t_at is None:
+            raise AssertionError("ATTACK SUCCEEDED (certfinal): T at %s, R at %s" % (t_at, r_at))
+        self.record(case, "blocked", "finality holds T")
+
+    def case_evlapse(self, after=False):
+        case = "evlapseafter" if after else "evlapse"
+        self.log.info("(%s) a blocking share's own branch, shown after the lapse, waiver depth %d" % (case, WAIVER))
         st = self.gap(case)
         a, n1 = self.nodes[SELLER], self.nodes[1]
         hdr = n1.getblockheader(st["L"])
         fork = hdr["height"] - 1
         self.isolate()
+        if after:
+            self.btc_mine(W + 2)
+            time.sleep(2)
+            first = self.produce(SELLER, COALITION, leaders=[SELLER], txs_must=[st["r_id"]])
+            assert first["block"]["anchorheight"] > hdr["anchorheight"] + W, first["block"]["anchorheight"]
+            self.record(case, "coalition's block at the lost height", "anchor %d, the lost anchor %d + W = %d" % (
+                first["block"]["anchorheight"], hdr["anchorheight"], hdr["anchorheight"] + W))
         since = [self.log_size(i) for i in range(len(self.nodes))]
         t0 = time.time()
         self.start_producers(HOLDERS)
@@ -333,7 +382,7 @@ class LostEvidenceTest(LostAutonomousTest, LostRecordAttacksTest):
         t_at, r_at = self.chain_has(n1, st["t_id"], fork + 1), self.chain_has(n1, st["r_id"], fork + 1)
         self.record(case, "outcome", "on an honest holder: T at height %s, the seller's R at height %s" % (t_at, r_at))
         if r_at is not None:
-            raise AssertionError("ATTACK SUCCEEDED (evlapse): a holder left T's chain for the seller's R, with no quorum at any height")
+            raise AssertionError("ATTACK SUCCEEDED (" + case + "): a holder left T's chain for the seller's R, with no quorum at any height")
         self.record(case, "blocked", "T stays and R is not mined")
 
     def case_evstall(self):

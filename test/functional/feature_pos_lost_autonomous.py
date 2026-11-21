@@ -28,9 +28,15 @@ LOST_WINDOW_MS (the testnet's 9450 and 6750 by default). Cases (LOST_CASES):
          moves again (timing-dependent: retried until it lands).
   mixT   one member on master's binary (LOST_BASE_BIN, node LOST_BASE_NODES)
          in a committee on the rule: the gap's rounds, as in aT.
-  split  a real split: three seats hold each of two certified siblings as their
-         own. Bitcoin moves three blocks at a time (LOST_SPLIT_STEPS steps) until
-         all six nodes are on one tip.
+  split  a real split with no quorum on either side: three seats hold each of
+         two certified siblings as their own. Bitcoin moves three blocks at a
+         time for LOST_SPLIT_STEPS steps: both sides stay on their own chains
+         and no coin moves on either.
+  splitq the same with four seats on one side: it certifies, the other side
+         follows at the waiver's depth, and one spend stands.
+  splitop the split of `split`, ended by operators on one side: each stops its
+         node, removes lostblocks.dat and its journal, restarts, and invalidates
+         its own block at the lost height.
 """
 
 import os
@@ -49,7 +55,7 @@ WINDOW_MS = int(os.environ.get("LOST_WINDOW_MS", "6750"))
 TRIALS = int(os.environ.get("LOST_TRIALS", "6"))
 C2_SIGNERS = int(os.environ.get("LOST_C2_SIGNERS", "3"))
 C2_ON = os.environ.get("LOST_C2", "1") == "1"
-SPLIT_STEPS = int(os.environ.get("LOST_SPLIT_STEPS", "7"))
+SPLIT_STEPS = int(os.environ.get("LOST_SPLIT_STEPS", "10"))
 
 
 class LostAutonomousTest(LostReplayTest):
@@ -162,35 +168,31 @@ class LostAutonomousTest(LostReplayTest):
         assert res["T_first"] and not res["R_in_chain"], res
         return res
 
-    def case_split(self):
-        """Two certified siblings that spend one coin differently, each held as its own by half the seats. Neither side
-        has a quorum for its own transaction. Bitcoin moves on under live rounds: each step records the tips, what each
-        side's chain carries and how many certified blocks stand above the fork, until all six nodes are on one tip."""
-        case = "split"
-        self.log.info("(split) a double-signed split under live rounds, %d/%d ms" % (ROUND_MS, WINDOW_MS))
+    def split_setup(self, case, side_a, side_b):
+        """L (T) certified on side_a and S (R) on side_b, Bitcoin takes both, each side holds its own as its own."""
         self.restart_node(SELLER, extra_args=self.node_args(SELLER) + ["-posdebugignorelost=0"])
         self.nodes[SELLER].loadwallet("w")
         self.mesh(range(N))
         self.sync_tips(range(N))
         coin = self.fund()
-        t_hex = self.spend(coin, self.nodes[1].getnewaddress(), Decimal("0.0001"))
+        a0, b0 = side_a[0], side_b[-1]
+        t_hex = self.spend(coin, self.nodes[a0].getnewaddress(), Decimal("0.0001"))
         r_hex = self.spend(coin, self.nodes[SELLER].getnewaddress(), Decimal("0.001"))
         t_id, r_id = tx_from_hex(t_hex).rehash(), tx_from_hex(r_hex).rehash()
-        side_a, side_b = [1, 2, 3], [0, 4, 5]
         for i in range(N):
             self.disconnect_all(i)
         self.mesh(side_a)
         self.mesh(side_b)
         self.btc_mine(1)
-        self.nodes[1].sendrawtransaction(t_hex)
-        self.nodes[4].sendrawtransaction(r_hex)
-        l = self.produce(1, ALL_KEYS, txs_must=[t_id])
-        s = self.produce(4, ALL_KEYS, txs_must=[r_id])
+        self.nodes[a0].sendrawtransaction(t_hex)
+        self.nodes[b0].sendrawtransaction(r_hex)
+        l = self.produce(a0, ALL_KEYS, txs_must=[t_id])
+        s = self.produce(b0, ALL_KEYS, txs_must=[r_id])
         assert_equal(l["height"], s["height"])
         self.sync_tips(side_a)
         self.sync_tips(side_b)
-        fork_h = l["height"] - 1
-        self.record(case, "siblings", "L %s (T) on seats %s, S %s (R) on seats %s, both certified, height %d" % (l["hash"][:12], side_a, s["hash"][:12], side_b, l["height"]))
+        self.record(case, "siblings", "L %s (T) on seats %s, S %s (R) on seats %s, both certified, height %d" % (
+            l["hash"][:12], side_a, s["hash"][:12], side_b, l["height"]))
         self.bitcoin_reorg(1)
         self.wait_lost(l["hash"], side_a)
         self.wait_lost(s["hash"], side_b)
@@ -201,42 +203,99 @@ class LostAutonomousTest(LostReplayTest):
         other = {i: self.lost(i)[s["hash"] if i in side_a else l["hash"]]["own"] for i in range(N)}
         self.record(case, "each side holds its own block as its own and the other's as evidence", {"own": marks, "other": other})
         assert all(marks.values()) and not any(other.values())
+        return dict(t_id=t_id, r_id=r_id, fork=l["height"] - 1, height=l["height"], a0=a0, b0=b0)
+
+    def split_has(self, st, i):
+        n = self.nodes[i]
+        txs = set()
+        for h in range(st["fork"] + 1, n.getblockcount() + 1):
+            txs |= set(n.getblock(n.getblockhash(h))["tx"])
+        return {"T": st["t_id"] in txs, "R": st["r_id"] in txs}
+
+    def split_certified(self, st, i):
+        n = self.nodes[i]
+        return sum(1 for h in range(st["fork"] + 1, n.getblockcount() + 1) if n.getblockheader(n.getblockhash(h))["poscertified"])
+
+    def split_run(self, case, st, side_a, side_b):
+        """Live rounds while Bitcoin moves three blocks a step. Returns the seconds and Bitcoin blocks run."""
         t0 = time.time()
         btc0 = self.btc().getblockcount()
         self.start_producers(range(N))
         since = [self.log_size(i) for i in range(N)]
-
-        def chain_from(i):
-            n = self.nodes[i]
-            return [n.getblock(n.getblockhash(h)) for h in range(fork_h + 1, n.getblockcount() + 1)]
-
-        def certified_above(i):
-            n = self.nodes[i]
-            return sum(1 for h in range(fork_h + 1, n.getblockcount() + 1) if n.getblockheader(n.getblockhash(h))["poscertified"])
-        one_tip_at = None
         for step in range(SPLIT_STEPS):
             before = [self.nodes[i].getblockcount() for i in range(N)]
             self.wait_until(lambda: any(self.nodes[i].getblockcount() > before[i] or
-                                        self.log_has(i, "restarting collection", since[i]) for i in (1, 4)), timeout=300)
+                                        self.log_has(i, "restarting collection", since[i]) for i in (st["a0"], st["b0"])), timeout=300)
             since = [self.log_size(i) for i in range(N)]
             self.btc_mine(3)
             end = time.time() + 150
             while time.time() < end and all(self.nodes[i].getblockcount() == before[i] for i in range(N)):
                 time.sleep(1)
             time.sleep(3)
-            tips = {i: self.nodes[i].getbestblockhash() for i in range(N)}
-            has = {i: {"T": any(t_id in b["tx"] for b in chain_from(i)), "R": any(r_id in b["tx"] for b in chain_from(i))} for i in (1, 4)}
             self.record(case, "step %d" % step, dict(at_s=round(time.time() - t0), bitcoin_blocks=self.btc().getblockcount() - btc0,
-                        heights={i: self.nodes[i].getblockcount() for i in range(N)}, tips=len(set(tips.values())),
-                        certified_above_fork={i: certified_above(i) for i in (1, 4)}, side_a_has=has[1], side_b_has=has[4]))
-            if len(set(tips.values())) == 1 and self.nodes[1].getblockcount() >= l["height"]:
-                one_tip_at = round(time.time() - t0)
-                break
-        chain_a, chain_b = chain_from(1), chain_from(4)
-        self.record(case, "outcome", "one tip on all %d nodes: %s (at %s s); side A's chain carries T: %s, R: %s; side B's carries T: %s, R: %s; %d Bitcoin blocks" % (
-            N, one_tip_at is not None, one_tip_at, any(t_id in b["tx"] for b in chain_a), any(r_id in b["tx"] for b in chain_a),
-            any(t_id in b["tx"] for b in chain_b), any(r_id in b["tx"] for b in chain_b), self.btc().getblockcount() - btc0))
-        assert one_tip_at is not None, "the two sides did not reach one tip"
+                        heights={i: self.nodes[i].getblockcount() for i in range(N)},
+                        tips=len({self.nodes[i].getbestblockhash() for i in range(N)}),
+                        certified_above_fork={i: self.split_certified(st, i) for i in (st["a0"], st["b0"])},
+                        side_a_has=self.split_has(st, st["a0"]), side_b_has=self.split_has(st, st["b0"])))
+        return round(time.time() - t0), self.btc().getblockcount() - btc0
+
+    def case_split(self, case="split"):
+        """No quorum on either side: both stay on their own chains, each with its own spend."""
+        self.log.info("(%s) a double-signed split with no quorum on either side, rounds %d/%d ms, waiver depth %d" % (case, ROUND_MS, WINDOW_MS, WAIVER))
+        side_a, side_b = [1, 2, 3], [0, 4, 5]
+        st = self.split_setup(case, side_a, side_b)
+        took, blocks = self.split_run(case, st, side_a, side_b)
+        tips = {i: self.nodes[i].getbestblockhash() for i in range(N)}
+        has = {i: self.split_has(st, i) for i in range(N)}
+        self.record(case, "outcome", "after %d s and %d Bitcoin blocks: %d tips; certified above the fork: %s; each node's chain: %s" % (
+            took, blocks, len(set(tips.values())), {i: self.split_certified(st, i) for i in range(N)}, has))
+        assert_equal(len({tips[i] for i in side_a}), 1)
+        assert_equal(len({tips[i] for i in side_b}), 1)
+        assert tips[side_a[0]] != tips[side_b[0]], "the two sides reached one tip"
+        assert all(has[i] == {"T": True, "R": False} for i in side_a), has
+        assert all(has[i] == {"T": False, "R": True} for i in side_b), has
+        return st, side_a, side_b
+
+    def case_splitq(self):
+        """A quorum of live seats on one side: it certifies, the other follows at the depth, and its spend stands."""
+        case = "splitq"
+        self.log.info("(splitq) a split with a quorum on one side, rounds %d/%d ms, waiver depth %d" % (ROUND_MS, WINDOW_MS, WAIVER))
+        side_a, side_b = [1, 2, 3, 4], [0, 5]
+        st = self.split_setup(case, side_a, side_b)
+        t0 = time.time()
+        self.start_producers(range(N))
+        self.wait_until(lambda: len({self.nodes[i].getbestblockhash() for i in range(N)}) == 1 and
+                        self.nodes[side_b[0]].getblockcount() >= st["height"] + WAIVER, timeout=900)
+        has = {i: self.split_has(st, i) for i in range(N)}
+        self.record(case, "outcome", "one tip on all %d nodes in %d s at height %d; certified above the fork: %d; each node's chain: %s" % (
+            N, time.time() - t0, self.nodes[1].getblockcount(), self.split_certified(st, 1), has))
+        assert all(h == {"T": True, "R": False} for h in has.values()), has
+
+    def case_splitop(self):
+        """The split of case_split, ended by the operators of one side."""
+        case = "splitop"
+        st, side_a, side_b = self.case_split(case)
+        t0 = time.time()
+        for i in side_b:
+            own = self.nodes[i].getblockhash(st["height"])
+            self.stop_node(i)
+            base = os.path.join(self.nodes[i].datadir, "elementsregtest")
+            for name in ("lostblocks.dat", "lostblocks.journal"):
+                if os.path.exists(os.path.join(base, name)):
+                    os.remove(os.path.join(base, name))
+            self.start_node(i, extra_args=self.node_args(i))
+            self.nodes[i].invalidateblock(own)
+        self.mesh(range(N))
+        self.start_producers(side_b)
+        self.wait_until(lambda: len({self.nodes[i].getbestblockhash() for i in range(N)}) == 1, timeout=300)
+        target = self.nodes[1].getblockcount() + 1
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() >= target for i in range(N)), timeout=420)
+        self.wait_until(lambda: self.split_certified(st, 1) > 0, timeout=420)
+        self.sync_tips(range(N), timeout=120)
+        has = {i: self.split_has(st, i) for i in range(N)}
+        self.record(case, "after the operators of side B acted", "one tip in %d s at height %d; certified above the fork: %d; each node's chain: %s" % (
+            time.time() - t0, self.nodes[1].getblockcount(), self.split_certified(st, 1), has))
+        assert all(h == {"T": True, "R": False} for h in has.values()), has
 
     def mesh_across(self, side_a, side_b):
         for i in side_a:
