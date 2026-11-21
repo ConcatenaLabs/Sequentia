@@ -218,6 +218,12 @@ void LostPeerGone(int64_t peer);
 //! it, and judge again the active chain and every refused block.
 void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool);
 
+//! The lowest height whose block and undo data this node must keep: the blocks
+//! that can carry a record still in force on `tip`'s chain, back to the lowest
+//! fork point such a record can name, and the fork points of the lost blocks
+//! held. INT_MAX when the rule does not apply. cs_main held.
+int LostPruneFloor(const CBlockIndex* tip);
+
 //! A block was connected: while a loss is pending, the watcher's thread is woken
 //! to prepare the next height's plan. cs_main held.
 void LostNoteTipConnected(const CBlockIndex* tip);

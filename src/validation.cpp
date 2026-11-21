@@ -5404,6 +5404,8 @@ bool CChainState::FlushStateToDisk(
             ForEachBlockFilterIndex([&](BlockFilterIndex& index) {
                last_prune = std::max(1, std::min(last_prune, index.GetSummary().best_block_height));
             });
+            // SEQUENTIA: nor a block a lost-block record still in force needs.
+            last_prune = std::max(1, std::min(last_prune, LostPruneFloor(m_chain.Tip()) - 1));
 
             if (nManualPruneHeight > 0) {
                 LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune (manual)", BCLog::BENCH);

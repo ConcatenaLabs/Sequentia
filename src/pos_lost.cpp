@@ -23,6 +23,7 @@
 #include <rpc/protocol.h>
 #include <script/btcpayment.h>
 #include <script/interpreter.h>
+#include <shutdown.h>
 #include <streams.h>
 #include <sync.h>
 #include <txmempool.h>
@@ -30,10 +31,12 @@
 #include <univalue.h>
 #include <util/system.h>
 #include <util/time.h>
+#include <util/translation.h>
 #include <validation.h>
 
 #include <algorithm>
 #include <deque>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -730,16 +733,25 @@ bool RecordReach(const CBlockIndex* p, const CBlockIndex* prev, int height, uint
 }
 
 //! F10: the bindings of the records of `tip`'s chain, rebuilt after a restart
-//! from the blocks the index marks as carrying one (no count limit).
-void LoadRecorded(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+//! from the blocks the index marks as carrying one (no count limit). A block
+//! carrying a record in force that cannot be read stops the node: going on
+//! would silently drop a binding every other node still enforces.
+bool LoadRecorded(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    if (g_recorded_loaded || !tip) return;
+    if (g_recorded_loaded || !tip) return true;
     g_recorded_loaded = true;
     for (const CBlockIndex* p = tip; p && RecordReach(p, tip, tip->nHeight + 1, tip->m_anchor_height); p = p->pprev) {
         if (!(p->nStatus & BLOCK_HAS_LOST_RECORD)) continue;
         if (!Params().GetConsensus().LostBlocksActiveAt(p->nHeight)) continue;
         CBlock blk;
-        if (!ReadBlockFromDisk(blk, p, Params().GetConsensus())) continue;
+        if (!ReadBlockFromDisk(blk, p, Params().GetConsensus())) {
+            g_recorded_loaded = false;
+            g_recorded.clear();
+            AbortNode(strprintf("Lost blocks: cannot read block %s at height %d, which carries a lost-block record still in force",
+                                p->GetBlockHash().ToString(), p->nHeight),
+                      _("A block carrying a record still in force cannot be read. Restart with -reindex to download it again."));
+            return false;
+        }
         std::vector<Binding> b;
         for (const auto& r : LostParseRecords(blk)) {
             if (!r) continue;
@@ -748,6 +760,7 @@ void LoadRecorded(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
         }
         if (!b.empty()) g_recorded[p->GetBlockHash()] = std::move(b);
     }
+    return true;
 }
 
 //! Every binding of `prev`'s chain still in force for its child anchored at `anchor_h`.
@@ -927,6 +940,11 @@ int CertSeatsCached(const CBlockHeader& h, const CBlockIndex* parent, const uint
 //! known, so no key registered after it can sit on it (doc 03, "Records and
 //! bindings"). nullptr when `fork` is not below `top` or a block or its undo
 //! data cannot be read (soft: this node's own fault, never a verdict).
+//! Set when RegistryAt could not read a block or its undo data. The validity
+//! path clears it, judges, and stops the node if it was set; evidence from a
+//! peer never reads it, so a peer cannot stop a node this way.
+bool g_registry_unreadable GUARDED_BY(::cs_main){false};
+
 std::shared_ptr<const StakeRegistry> RegistryAt(const CBlockIndex* fork, const CBlockIndex* top) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     static Mutex cache_mutex;
@@ -942,7 +960,10 @@ std::shared_ptr<const StakeRegistry> RegistryAt(const CBlockIndex* fork, const C
     for (const CBlockIndex* p = top; p != fork; p = p->pprev) {
         CBlock blk;
         CBlockUndo undo;
-        if (!ReadBlockFromDisk(blk, p, Params().GetConsensus()) || !node::UndoReadFromDisk(undo, p)) return nullptr;
+        if (!ReadBlockFromDisk(blk, p, Params().GetConsensus()) || !node::UndoReadFromDisk(undo, p)) {
+            g_registry_unreadable = true;
+            return nullptr;
+        }
         PosRevertBlockStake(blk, undo, p->nHeight, *reg);
     }
     LOCK(cache_mutex);
@@ -1557,7 +1578,7 @@ bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool j
     // Below the rule's height a record is an ordinary OP_RETURN output: judged by
     // nothing and binding nothing.
     if (!Params().GetConsensus().LostBlocksActiveAt(pindexPrev->nHeight + 1)) return true;
-    LoadRecorded(pindexPrev);
+    if (!LoadRecorded(pindexPrev)) return state.Error("lost-record-unreadable");
     std::vector<Binding> mine;
     size_t bytes = 0;
     // The bindings already in force, and the coins as this block's records
@@ -1569,7 +1590,15 @@ bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool j
         bytes += GetSerializeSize(*r, PROTOCOL_VERSION);
         if (bytes > LOST_RECORD_MAX_BYTES) return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-lost-record", "too large");
         bool soft = false;
+        g_registry_unreadable = false;
         const std::string why = JudgeRecord(*r, block.m_anchor_height, block.m_anchor_hash, pindexPrev, soft, mine, records_view, bound);
+        if (g_registry_unreadable) {
+            // A record that passed the window check names a fork point the
+            // pruning floor keeps, so this is this node's own missing data.
+            return AbortNode(state, strprintf("Lost blocks: cannot read the blocks back to the fork point of a record in block %s",
+                                              block.GetHash().ToString()),
+                             _("A block needed to judge a lost-block record cannot be read. Restart with -reindex to download it again."));
+        }
         if (!why.empty()) {
             LogPrintf("Lost blocks: block %s carries a record that is not valid: %s\n", block.GetHash().ToString(), why);
             if (soft) return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "lost-record-unverifiable", why);
@@ -1608,7 +1637,7 @@ LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor
     AssertLockHeld(::cs_main);
     LostTemplateParts out;
     if (!pindexPrev || !LostActiveAt(pindexPrev->nHeight + 1)) return out;
-    LoadRecorded(pindexPrev);
+    if (!LoadRecorded(pindexPrev)) return out;
     LOCK(g_lost_mutex);
     Plan plan = PlanLocked(pindexPrev, anchor_height, anchor_hash, view, /*build=*/true);
     out.prefix = std::move(plan.prefix);
@@ -2559,6 +2588,23 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         // headers again, so they are taken now and not at the next block.
         ++g_anchor_refetch_epoch;
     }
+}
+
+int LostPruneFloor(const CBlockIndex* tip)
+{
+    AssertLockHeld(::cs_main);
+    if (!tip || !LostActiveAt(tip->nHeight + 1)) return std::numeric_limits<int>::max();
+    // RecordReach bounds both the blocks that can carry a record in force and
+    // the fork point a record can name and still pass the window check.
+    int floor = tip->nHeight;
+    for (const CBlockIndex* p = tip; p && RecordReach(p, tip, tip->nHeight + 1, tip->m_anchor_height); p = p->pprev) {
+        floor = p->nHeight;
+    }
+    LOCK(g_lost_mutex);
+    for (const auto& [h, b] : g_blocks) {
+        if (b.fork_height >= 0) floor = std::min(floor, b.fork_height);
+    }
+    return floor;
 }
 
 void LostNoteTipConnected(const CBlockIndex* tip)
