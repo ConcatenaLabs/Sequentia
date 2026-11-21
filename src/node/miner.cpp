@@ -498,6 +498,9 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
         if (LostRecordedConflict(it->GetTx(), m_prev_for_records, m_anchor_height, m_chainstate.CoinsTip())) {
             return false;
         }
+        // SEQUENTIA: a leader after a failed round leaves a contested lost
+        // transaction out, with whatever descends from it.
+        if (m_lost_left_out.count(it->GetTx().GetHash())) return false;
         // SEQUENTIA: a privately submitted supervision record already spends
         // this input in the block.
         for (const CTxIn& in : it->GetTx().vin) {
@@ -671,7 +674,8 @@ void BlockAssembler::addLostReplay(const CBlockIndex* pindexPrev)
     if (!pindexPrev || !LostActiveAt(pindexPrev->nHeight + 1)) return;
     const uint32_t anchor_h = m_anchor_height;
     CCoinsViewCache view(&m_chainstate.CoinsTip());
-    LostTemplateParts parts = LostForTemplate(pindexPrev, anchor_h, m_anchor_hash, view);
+    LostTemplateParts parts = LostForTemplate(pindexPrev, anchor_h, m_anchor_hash, view, m_lost_leave_contested);
+    m_lost_left_out = std::move(parts.left_out);
     m_lost_records = std::move(parts.records);
     m_lost_cut = parts.cut;
     CCoinsViewCache work(&m_chainstate.CoinsTip());

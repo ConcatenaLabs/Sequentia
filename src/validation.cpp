@@ -8242,7 +8242,10 @@ bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& 
             }
         }
         if (lost_refusal && !any_accepted) {
-            state = *lost_refusal;
+            // Never the last header's own reason: in a run above a refused block
+            // that is a missing parent, which would punish the peer relaying it.
+            state = BlockValidationState();
+            state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-prevblk-lost-respend");
             return false;
         }
     }

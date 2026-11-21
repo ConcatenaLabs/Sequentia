@@ -119,15 +119,35 @@ constexpr size_t LOST_MAX_UNCERTIFIED = 256;
 std::map<int64_t, std::set<uint256>> g_sent GUARDED_BY(g_lost_mutex);
 //! Blocks refused under the rule (BLOCK_FAILED_LOST), judged again on change.
 std::set<uint256> g_refused GUARDED_BY(g_lost_mutex);
-//! Headers above a refused block, by hash, and how many are kept per parent.
-//! Unverified until the maintenance pass, which drops any whose certificate
-//! fails, so junk cannot hold a parent's slots for long.
+//! Headers above a refused block whose certificate verified under the registry
+//! at the branch's fork point, by hash, and how many are kept per parent. Nothing
+//! else enters, so a header that will never certify cannot take a slot.
 constexpr size_t LOST_WAIVER_MAX_HEADERS = 4096;
 constexpr size_t LOST_WAIVER_MAX_CHILDREN = 16;
 constexpr size_t LOST_WAIVER_MAX_BYTES = 8 * 1000 * 1000;
 std::map<uint256, CBlockHeader> g_waiver_headers GUARDED_BY(g_lost_mutex);
 std::map<uint256, size_t> g_waiver_children GUARDED_BY(g_lost_mutex);
 size_t g_waiver_bytes GUARDED_BY(g_lost_mutex){0};
+//! Headers waiting for that check, one queue per peer, verified in turn and a few
+//! per maintenance pass. A peer that floods fills only its own queue, so it can
+//! delay another peer's real header by some passes and never turn it away.
+struct WaiverQueue {
+    std::deque<CBlockHeader> headers;
+    std::set<uint256> ids;
+    size_t bytes{0};
+};
+constexpr size_t LOST_WAIVER_PEER_HEADERS = 64;
+constexpr size_t LOST_WAIVER_PEER_BYTES = 256 * 1000;
+//! Certificates a maintenance pass may verify for the queues, and for the count.
+constexpr int LOST_WAIVER_VERIFY_QUEUE = 8;
+constexpr int LOST_WAIVER_VERIFY_COUNT = 16;
+//! What CertSeatsCached answers when its budget is spent and the verdict is not known.
+constexpr int LOST_CERT_LATER = -2;
+std::map<int64_t, WaiverQueue> g_waiver_pending GUARDED_BY(g_lost_mutex);
+int64_t g_waiver_turn GUARDED_BY(g_lost_mutex){std::numeric_limits<int64_t>::min()};
+int64_t g_waiver_pass_us GUARDED_BY(g_lost_mutex){0};
+//! The peer whose message this thread is processing; -1 for a local caller.
+thread_local int64_t t_header_peer{-1};
 bool g_waiver_dirty GUARDED_BY(g_lost_mutex){false};
 //! Parents with more certified evidence-only children than LostSiblingCap.
 std::set<uint256> g_sibling_capped GUARDED_BY(g_lost_mutex);
@@ -910,7 +930,7 @@ std::string ProveLostAnchors(const std::vector<std::vector<unsigned char>>& carr
 //! height and anchor, and the fork point that fixes the registry, so a verdict
 //! is never reused for another header, registry or parent.
 int CertSeatsCached(const CBlockHeader& h, const CBlockIndex* parent, const uint256& fork_hash, const StakeRegistry& reg,
-                    std::string& reason)
+                    std::string& reason, int* budget = nullptr)
 {
     static Mutex cert_mutex;
     static std::map<uint256, std::pair<int, std::string>> certs GUARDED_BY(cert_mutex);
@@ -924,6 +944,10 @@ int CertSeatsCached(const CBlockHeader& h, const CBlockIndex* parent, const uint
             reason = it->second.second;
             return it->second.first;
         }
+    }
+    if (budget) {
+        if (*budget <= 0) return LOST_CERT_LATER;
+        --*budget;
     }
     const int seats = PosVerifyBitfieldCertificate(h, parent, reg, reason);
     LOCK(cert_mutex);
@@ -1204,12 +1228,46 @@ Standing StandingOf(const std::set<uint256>& prot) EXCLUSIVE_LOCKS_REQUIRED(g_lo
     return st;
 }
 
+//! Transactions of this node's own lost blocks that a certified block at the
+//! same fork point and height spends differently: two quorums signed conflicting
+//! blocks there, and neither can be shown to have come first. Such a transaction
+//! is offered and not demanded, and what conflicts with it stays refused.
+std::set<uint256> ContestedOwn() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    std::set<uint256> out;
+    std::map<std::tuple<uint256, int, COutPoint>, std::set<uint256>> spends_at;
+    std::map<COutPoint, std::set<uint256>> own_spend;
+    for (const auto& [h, b] : g_blocks) {
+        if (!b.prot || !b.certified || b.fork_height < 0) continue;
+        for (size_t i = 1; i < b.block->vtx.size(); ++i) {
+            const CTransaction& tx = *b.block->vtx[i];
+            for (const CTxIn& in : tx.vin) {
+                if (in.m_is_pegin) continue;
+                spends_at[{b.fork_hash, b.height, in.prevout}].insert(tx.GetHash());
+                if (b.own) own_spend[in.prevout].insert(tx.GetHash());
+            }
+        }
+    }
+    for (const auto& [at, ids] : spends_at) {
+        if (ids.size() < 2) continue;
+        auto mine = own_spend.find(std::get<2>(at));
+        if (mine == own_spend.end()) continue;
+        for (const uint256& id : ids) if (mine->second.count(id)) out.insert(id);
+    }
+    return out;
+}
+
 //! The holders' plan for a block on `prev` anchored at `anchor_h`.
 struct Plan {
     std::vector<CTransactionRef> prefix;
     bool cut{false};
     std::set<uint256> to_record;
     std::vector<LostRecord> records;
+    //! Contested transactions and their descendants: not demanded of a block.
+    std::set<uint256> contested;
+    //! The owed records plus those of contested transactions: what a template
+    //! offers unless its leader is leaving the contested ones out.
+    std::vector<LostRecord> offered_records;
     std::string summary;
     int64_t micros{0};
 };
@@ -1315,6 +1373,14 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     const std::shared_ptr<const ClassMemo> classified = ClassifyMemoized(txs, view, prev, consensus, bound, lowest_fork);
     const auto& classes = classified->classes;
     const auto& sigops = classified->sigops;
+    const std::set<uint256> contested_own = ContestedOwn();
+    if (!contested_own.empty()) {
+        for (const CTransactionRef& t : txs) {
+            bool held = contested_own.count(t->GetHash()) > 0;
+            for (const CTxIn& in : t->vin) held = held || plan.contested.count(in.prevout.hash) > 0;
+            if (held) plan.contested.insert(t->GetHash());
+        }
+    }
     std::set<uint256> bound_txids;
     for (const auto& [o, t] : bound) bound_txids.insert(t.txid);
     // The branch of a store block from its fork point's child, or empty.
@@ -1382,7 +1448,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     // this chain, that a record in this block would make valid: judged by the
     // record check's own function (P5), so the duty never asks for a record
     // that validity refuses.
-    std::vector<std::pair<const LostBlk*, uint32_t>> recordable;
+    std::vector<std::pair<const LostBlk*, uint32_t>> recordable, contested_recordable;
     int n_due = 0, n_later = 0, n_fails = 0, n_gone = 0, n_never = 0;
     std::string unrecordable;
     for (size_t i = 0; i < txs.size(); ++i) {
@@ -1415,7 +1481,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
                           unrecordable, (unsigned)GetSerializeSize(recs[0], PROTOCOL_VERSION), (unsigned)LOST_RECORD_MAX_BYTES);
                 break;
             }
-            recordable.push_back(where[i]);
+            (plan.contested.count(txs[i]->GetHash()) ? contested_recordable : recordable).push_back(where[i]);
             break;
         }
         }
@@ -1461,6 +1527,33 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
         }
     }
     for (const auto& [b, pos] : chosen) plan.to_record.insert(b->block->vtx[pos]->GetHash());
+    // What a template may add: the contested ones, for as many bytes as are left
+    // and only if the whole set is still valid.
+    std::vector<std::pair<const LostBlk*, uint32_t>> offered = chosen;
+    if (!contested_recordable.empty()) {
+        std::set<COutPoint> taken;
+        for (const auto& e : offered) for (const CTxIn& in : e.first->block->vtx[e.second]->vin) taken.insert(in.prevout);
+        for (const auto& e : contested_recordable) {
+            const CTransaction& t = *e.first->block->vtx[e.second];
+            bool clash = false;
+            for (const CTxIn& in : t.vin) clash = clash || taken.count(in.prevout);
+            if (clash) continue;
+            auto trial = offered;
+            trial.push_back(e);
+            if (bytes_of(trial) > LOST_RECORD_MAX_BYTES) break;
+            offered = std::move(trial);
+            for (const CTxIn& in : t.vin) taken.insert(in.prevout);
+        }
+        std::vector<Binding> ignored;
+        CCoinsViewCache scratch(&view);
+        for (const LostRecord& r : build_records(offered)) {
+            bool soft = false;
+            if (!JudgeRecord(r, anchor_h, anchor, prev, soft, ignored, scratch, bound).empty()) {
+                offered = chosen;
+                break;
+            }
+        }
+    }
     // The prefix: the due transactions in lost order, the longest run of them
     // that fits the consensus limits. The weight left for them is the block's
     // less a fixed reserve for the header, the coinbase and the certificate,
@@ -1476,6 +1569,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
     std::set<CAsset> fee_assets;
     for (size_t i = 0; i < txs.size(); ++i) {
         if (classes[i].first != LostTxCat::DUE) continue;
+        if (plan.contested.count(txs[i]->GetHash())) continue;
         int64_t w = GetTransactionWeight(*txs[i]);
         for (const auto& [asset, amount] : GetFeeMap(*txs[i])) {
             if (amount > 0 && !fee_assets.count(asset)) w += LOST_FEE_OUTPUT_WEIGHT;
@@ -1487,11 +1581,14 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
         for (const auto& [asset, amount] : GetFeeMap(*txs[i])) if (amount > 0) fee_assets.insert(asset);
         plan.prefix.push_back(txs[i]);
     }
-    if (build) plan.records = build_records(chosen);
+    if (build) {
+        plan.records = build_records(chosen);
+        plan.offered_records = build_records(offered);
+    }
     plan.micros = GetTimeMicros() - t0;
-    plan.summary = strprintf("%d due (%d in the prefix%s), %d later, %d failing (%d to record of %d recordable, %d never recordable), %d gone; classified in %d us",
+    plan.summary = strprintf("%d due (%d in the prefix%s), %d later, %d failing (%d to record of %d recordable, %d never recordable), %d gone, %d contested; classified in %d us",
                              n_due, (int)plan.prefix.size(), plan.cut ? ", cut" : "", n_later, n_fails,
-                             (int)plan.to_record.size(), (int)recordable.size(), n_never, n_gone, (int)plan.micros);
+                             (int)plan.to_record.size(), (int)recordable.size(), n_never, n_gone, (int)plan.contested.size(), (int)plan.micros);
     return plan;
 }
 
@@ -1523,6 +1620,8 @@ uint256 StoreFingerprint() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
         if (!b.own) continue;
         hw << h << b.prot << b.certified << (uint8_t)b.anchor_state << b.fork_height << b.epoch;
     }
+    // What the plan reads from evidence: which of its transactions are contested.
+    for (const uint256& t : ContestedOwn()) hw << t;
     return hw.GetHash();
 }
 
@@ -1638,7 +1737,7 @@ bool LostCheckRecords(const CBlock& block, const CBlockIndex* pindexPrev, bool j
     return true;
 }
 
-LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, const uint256& anchor_hash, CCoinsViewCache& view)
+LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, const uint256& anchor_hash, CCoinsViewCache& view, bool leave_contested)
 {
     AssertLockHeld(::cs_main);
     LostTemplateParts out;
@@ -1648,7 +1747,14 @@ LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor
     Plan plan = PlanLocked(pindexPrev, anchor_height, anchor_hash, view, /*build=*/true);
     out.prefix = std::move(plan.prefix);
     out.cut = plan.cut;
-    for (const LostRecord& r : plan.records) out.records.push_back(RecordOutput(r));
+    for (const LostRecord& r : (leave_contested ? plan.records : plan.offered_records)) out.records.push_back(RecordOutput(r));
+    if (leave_contested) {
+        out.left_out = plan.contested;
+        if (!out.left_out.empty()) {
+            LogPrintf("Lost blocks: after a failed round, the template on %s leaves out %d contested transaction(s)\n",
+                      pindexPrev->GetBlockHash().ToString(), (int)out.left_out.size());
+        }
+    }
     if (!out.prefix.empty() || !out.records.empty()) {
         LogPrintf("Lost blocks: template on %s: %s\n", pindexPrev->GetBlockHash().ToString(), plan.summary);
     }
@@ -1782,32 +1888,36 @@ void LostNoteRefused(const CBlockIndex* pindex)
     g_waiver_dirty = true;
 }
 
+LostHeaderPeerScope::LostHeaderPeerScope(int64_t peer) : m_prev(t_header_peer) { t_header_peer = peer; }
+LostHeaderPeerScope::~LostHeaderPeerScope() { t_header_peer = m_prev; }
+
 void LostNoteRefusedChild(const CBlockHeader& header, bool only_if_parent_kept)
 {
     LOCK(g_lost_mutex);
-    if (only_if_parent_kept && !g_waiver_headers.count(header.hashPrevBlock)) return;
-    const uint256 hash = header.GetHash();
-    if (g_waiver_headers.count(hash) || g_waiver_headers.size() >= LOST_WAIVER_MAX_HEADERS) return;
-    // Only the run a holder counts is kept: the waiver depth above the refused block.
-    int above = 1;
-    for (auto p = g_waiver_headers.find(header.hashPrevBlock); p != g_waiver_headers.end(); p = g_waiver_headers.find(p->second.hashPrevBlock)) {
-        if (++above > g_waiver_depth) return;
+    const int64_t peer = t_header_peer;
+    if (only_if_parent_kept && !g_waiver_headers.count(header.hashPrevBlock)) {
+        auto mine = g_waiver_pending.find(peer);
+        if (mine == g_waiver_pending.end() || !mine->second.ids.count(header.hashPrevBlock)) return;
     }
+    const uint256 hash = header.GetHash();
+    if (g_waiver_headers.count(hash)) return;
+    WaiverQueue& q = g_waiver_pending[peer];
     const size_t bytes = GetSerializeSize(header, PROTOCOL_VERSION);
-    if (g_waiver_bytes + bytes > LOST_WAIVER_MAX_BYTES) return;
-    size_t& kept = g_waiver_children[header.hashPrevBlock];
-    if (kept >= LOST_WAIVER_MAX_CHILDREN) return;
-    ++kept;
-    g_waiver_bytes += bytes;
-    g_waiver_headers.emplace(hash, header);
-    g_waiver_dirty = true;
-    g_dirty_file = true;
+    if (q.ids.count(hash) || q.headers.size() >= LOST_WAIVER_PEER_HEADERS || q.bytes + bytes > LOST_WAIVER_PEER_BYTES) {
+        if (q.headers.empty()) g_waiver_pending.erase(peer);
+        return;
+    }
+    q.headers.push_back(header);
+    q.ids.insert(hash);
+    q.bytes += bytes;
 }
 
 bool LostWaiverKept(const uint256& hash)
 {
     LOCK(g_lost_mutex);
-    return g_waiver_headers.count(hash) > 0;
+    if (g_waiver_headers.count(hash)) return true;
+    auto mine = g_waiver_pending.find(t_header_peer);
+    return mine != g_waiver_pending.end() && mine->second.ids.count(hash) > 0;
 }
 
 void LostQueueEvidence(int64_t peer, LostEvidenceMsg msg)
@@ -2074,6 +2184,7 @@ void LostPeerGone(int64_t peer)
 {
     LOCK(g_lost_mutex);
     g_sent.erase(peer);
+    g_waiver_pending.erase(peer);
 }
 
 void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
@@ -2440,6 +2551,58 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         LOCK2(cs_main, g_lost_mutex);
         // Before the first scan, g_refused does not yet hold the refusals of the
         // last run, and the headers kept above them must survive until it does.
+        const int64_t waiver_t0 = GetTimeMicros();
+        if (g_refused_scanned && g_refused.empty()) g_waiver_pending.clear();
+        // The queues: at most a few certificates, one peer after another, each
+        // under the registry at the fork point of the refused branch it climbs.
+        for (int budget = LOST_WAIVER_VERIFY_QUEUE; budget > 0 && !g_waiver_pending.empty() && !g_refused.empty();) {
+            auto turn = g_waiver_pending.upper_bound(g_waiver_turn);
+            if (turn == g_waiver_pending.end()) turn = g_waiver_pending.begin();
+            g_waiver_turn = turn->first;
+            WaiverQueue& q = turn->second;
+            const CBlockHeader hdr = q.headers.front();
+            q.headers.pop_front();
+            const uint256 hash = hdr.GetHash();
+            q.ids.erase(hash);
+            q.bytes -= std::min(q.bytes, GetSerializeSize(hdr, PROTOCOL_VERSION));
+            if (q.headers.empty()) g_waiver_pending.erase(turn);
+            if (g_waiver_headers.count(hash)) continue;
+            // Climb the kept headers to the block index.
+            int above = 1;
+            uint256 at = hdr.hashPrevBlock;
+            std::optional<CBlockHeader> direct_parent;
+            while (true) {
+                auto up = g_waiver_headers.find(at);
+                if (up == g_waiver_headers.end()) break;
+                if (!direct_parent) direct_parent = up->second;
+                at = up->second.hashPrevBlock;
+                ++above;
+            }
+            if (above > g_waiver_depth) continue;
+            const CBlockIndex* x = chainman.m_blockman.LookupBlockIndex(at);
+            if (!x || !(x->nStatus & BLOCK_FAILED_MASK)) continue;
+            const CBlockIndex* fork = chainman.ActiveChain().FindFork(x);
+            const std::shared_ptr<const StakeRegistry> at_fork = fork ? RegistryAt(fork, chainman.ActiveChain().Tip()) : nullptr;
+            if (!at_fork) continue;
+            CBlockIndex view;
+            view.nHeight = x->nHeight + above - 1;
+            view.m_anchor_height = direct_parent ? direct_parent->m_anchor_height : x->m_anchor_height;
+            view.m_anchor_hash = direct_parent ? direct_parent->m_anchor_hash : x->m_anchor_hash;
+            std::string reason;
+            const int seats = CertSeatsCached(hdr, &view, fork->GetBlockHash(), *at_fork, reason, &budget);
+            if (seats < 0 || seats < PosSlotQuorumAt(*at_fork, view.nHeight + 1)) continue;
+            const size_t bytes = GetSerializeSize(hdr, PROTOCOL_VERSION);
+            size_t& kept = g_waiver_children[hdr.hashPrevBlock];
+            if (g_waiver_headers.size() >= LOST_WAIVER_MAX_HEADERS || g_waiver_bytes + bytes > LOST_WAIVER_MAX_BYTES || kept >= LOST_WAIVER_MAX_CHILDREN) {
+                if (kept == 0) g_waiver_children.erase(hdr.hashPrevBlock);
+                continue;
+            }
+            ++kept;
+            g_waiver_bytes += bytes;
+            g_waiver_headers.emplace(hash, hdr);
+            g_waiver_dirty = true;
+            g_dirty_file = true;
+        }
         if (g_refused_scanned && g_blocks.empty() && g_refused.empty()) {
             if (!g_waiver_headers.empty()) g_dirty_file = true;
             g_waived.clear();
@@ -2449,6 +2612,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             g_sibling_capped.clear();
         } else if (g_waiver_dirty && !g_refused.empty()) {
             g_waiver_dirty = false;
+            int count_budget = LOST_WAIVER_VERIFY_COUNT;
             // Children by parent: those kept aside, and those the index took
             // before their ancestor was refused.
             std::map<uint256, std::vector<CBlockHeader>> kids;
@@ -2473,7 +2637,11 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 for (const CBlockHeader& hdr : it->second) {
                     const uint256 hash = hdr.GetHash();
                     std::string reason;
-                    const int seats = CertSeatsCached(hdr, &view, fork, reg, reason);
+                    const int seats = CertSeatsCached(hdr, &view, fork, reg, reason, &count_budget);
+                    if (seats == LOST_CERT_LATER) {
+                        g_waiver_dirty = true; // the rest on the next pass
+                        continue;
+                    }
                     if (seats < 0 || seats < PosSlotQuorumAt(reg, view.nHeight + 1)) {
                         // Junk does not keep a parent's slot.
                         if (g_waiver_headers.count(hash)) {
@@ -2541,6 +2709,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             // A slot freed: ask again, in case a real header was turned away.
             if (dropped) ++g_anchor_refetch_epoch;
         }
+        g_waiver_pass_us = GetTimeMicros() - waiver_t0;
     }
     if (gen == g_last_scan_gen && !changed && g_refused_scanned) return;
     g_last_scan_gen = gen;
@@ -2684,6 +2853,10 @@ UniValue LostGetInfo(int next_height)
     for (const uint256& h : g_refused) refused.push_back(h.GetHex());
     out.pushKV("refused", refused);
     out.pushKV("waiverheaders", (int)g_waiver_headers.size());
+    size_t pending = 0;
+    for (const auto& [peer, q] : g_waiver_pending) pending += q.headers.size();
+    out.pushKV("waiverpending", (int)pending);
+    out.pushKV("waiverpassus", g_waiver_pass_us);
     return out;
 }
 

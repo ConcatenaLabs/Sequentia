@@ -328,7 +328,7 @@ The classification uses validity's own checks, the records' bindings
 included, so a block that does what the duty asks is valid.
 
 The holder refuses B (`bad-lost-replay`) unless B begins, right after its
-coinbase, with the due transactions in lost order: the longest run of them,
+coinbase, with the due transactions that are not contested (below), in lost order: the longest run of them,
 from the first, that fits the consensus limits. The weight left for them is
 the block's maximum weight less 8,000 (the header and the coinbase), less the
 certificate's maximum size, less 100,000 when B owes a record, and less 640
@@ -346,6 +346,15 @@ outpoint that a pending lost transaction spends, or if a record in B binds such
 an outpoint to another transaction: the first binding of a coin stands, so a
 record is as good as a spend. Which of two conflicting lost transactions of its
 own chain stands is decided by lost order alone.
+
+When a certified block at the same fork point and height spends a pending
+transaction's coin differently, two quorums signed conflicting blocks there and
+neither can be shown to have come first. That transaction and its descendants
+are *contested*. A block may carry them and is not refused for leaving them out,
+no record of them is owed, and what conflicts with them stays refused. A producer
+offers them by default. Once a collection at a height ends without a certificate,
+its next proposal at that height leaves them out, so a block that neither side of
+the split refuses can certify. Each height tries them again.
 
 An evidence-only block creates no duty to carry or record. Its transactions
 bind their coins for the holder's own signature only when they are valid against
@@ -386,14 +395,19 @@ consecutive certified headers above a refused block reaches the waiver depth
 (`DEFAULT_LOST_WAIVER_DEPTH` in `src/pos_lost.h`), it takes that block, and the
 duty is off for every block above it. The holder keeps the headers above a
 refused block aside and reads a headers message past a refused header, so the
-result depends on the set of headers it has seen and not on their order. Those
-headers are kept in `lostblocks.dat`, so a restart does not start the count over,
-up to the waiver depth above the refused block, 16 children per parent, 4,096
-headers and 8 MB; a header no refused block roots any more is dropped. Their
-certificates are verified under the registry at the refused branch's fork point,
-as a record's are, so a key registered on that branch counts for nothing, and a
-branch whose own stake changes alter a committee above it does not reach the
-depth: its holders then rejoin at the lapse. A holder still does not sign the
+result depends on the set of headers it has seen and not on their order. A
+header enters that store only once its certificate verifies under the registry at
+the refused branch's fork point, as a record's does, so a header that will never
+certify takes no slot. Until then it waits in a queue of the peer that sent it (64
+headers, 256 kB), and a maintenance pass verifies at most 8 of them, one peer
+after another: a peer that floods fills its own queue and delays another's real
+header by some passes, without turning it away. The store is kept in
+`lostblocks.dat`, so a restart does not start the count over, and holds up to the
+waiver depth above the refused block, 16 children per parent, 4,096 headers and
+8 MB; a header no refused block roots any more is dropped. A key registered on
+the refused branch counts for nothing, so a branch whose own stake changes alter
+a committee above it does not reach the depth: its holders then rejoin at the
+lapse. A holder still does not sign the
 waived block itself. The holder drops L once its active chain has lapsed for L (or, when
 its active chain no longer contains F, once Bitcoin is 2W above a_L: a bound on
 memory, not a rule), and then judges every block it refused by validity
