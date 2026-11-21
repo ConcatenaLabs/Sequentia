@@ -27,17 +27,86 @@ feature_pos_lost_blocks.py. Cases (LOST_CASES):
 
 import os
 import shutil
+import struct
+import threading
 import time
 from decimal import Decimal
 
 from feature_pos_lost_blocks import BitcoinGate, WAIVER, LostBlocksTest, SELLER, HONEST, LATE, ALL_KEYS, N, W
 from test_framework.authproxy import JSONRPCException
-from test_framework.messages import tx_from_hex, CTxInWitness
+from test_framework.key import ECKey
+from test_framework.messages import CTxInWitness, hash256, ser_compact_size, tx_from_hex
+from test_framework.p2p import MESSAGEMAP, P2PInterface
 from test_framework.script import CScript, OP_0, OP_1, OP_IF, OP_ENDIF, OP_DROP, OP_CHECKMULTISIG
 from test_framework.util import assert_equal, rpc_port
 
-CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6,b2").split(",")
+CASES = os.environ.get("LOST_CASES", "r1,r2,r3,r4,r5,r6,b2,b2r,b2s,b2j").split(",")
 ABUSE_TXS = int(os.environ.get("LOST_ABUSE_TXS", "340"))
+
+
+class msg_poslost:
+    """Evidence a node offers a peer: read and ignored by a test's P2P connection."""
+    msgtype = b"poslost"
+
+    def deserialize(self, f):
+        f.read()
+
+    def serialize(self):
+        return b""
+
+
+MESSAGEMAP[b"poslost"] = msg_poslost
+
+
+class msg_raw_headers:
+    """A headers message of serialized headers exactly as the node prints them."""
+    msgtype = b"headers"
+
+    def __init__(self, headers):
+        self.headers = headers
+
+    def serialize(self):
+        return ser_compact_size(len(self.headers)) + b"".join(h + b"\x00" for h in self.headers)
+
+
+def forged_header(template, key, pub, k):
+    """A child of the template's parent that passes every check a header meets before
+    its certificate: a leader signature, by a key with no stake that names itself.
+    Layout: version, parent, merkle root, time, height, anchor height, anchor hash,
+    then the challenge and the solution (the hash leaves the solution out)."""
+    at = 112
+    clen = template[at]
+    challenge = template[at + 1:at + 1 + clen]
+    assert challenge[0] == 0x52 and challenge[1] == 33, "not the BLS challenge form"
+    solution_at = at + 1 + clen
+    if template[solution_at] < 253:
+        solution = template[solution_at + 1:]
+    else:
+        assert template[solution_at] == 253
+        solution = template[solution_at + 3:]
+    when = struct.unpack("<I", template[68:72])[0] + 1 + k
+    mine = challenge[:2] + pub + challenge[35:]
+    unsigned = template[:68] + struct.pack("<I", when) + template[72:at] + ser_compact_size(len(mine)) + mine
+    sig = key.sign_ecdsa(hash256(unsigned))
+    rest = solution[1 + solution[0]:]
+    forged = bytes([len(sig)]) + sig + rest
+    return unsigned + ser_compact_size(len(forged)) + forged
+
+
+class msg_poscert(msg_poslost):
+    """A certificate a node floods: read and ignored likewise."""
+    msgtype = b"poscert"
+
+
+MESSAGEMAP[b"poscert"] = msg_poscert
+
+
+class HeaderPeer(P2PInterface):
+    def on_poslost(self, message):
+        pass
+
+    def on_poscert(self, message):
+        pass
 
 
 class LostReplayTest(LostBlocksTest):
@@ -905,6 +974,70 @@ class LostReplayTest(LostBlocksTest):
             n1.submitblock(raw)
         self.wait_until(lambda: self.log_has(1, "refused block %s has %d certified block(s) above it" % (x["hash"], WAIVER), since), timeout=30)
         self.record("b2s", "outcome", "the %d certificate(s) above the refused block verify under the registry at the fork point" % WAIVER)
+        self.mesh(range(N))
+
+    def case_b2j(self):
+        """Peers with no stake flood children of a refused block that will never certify; the real run still counts."""
+        self.log.info("(b2j) junk headers above a refused block cannot crowd out a certified run")
+        st, x = self.b_setup("b2j", honest_apart=True)
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        chain = [x] + [self.produce(SELLER, ALL_KEYS, leaders=[SELLER]) for _ in range(WAIVER)]
+        raws = [a.getblock(b["hash"], 0) for b in chain]
+        for i in HONEST:
+            self.disconnect_all(i)
+        n1.submitblock(raws[0])
+        assert not self.in_chain(n1, x["hash"])
+        real = [bytes.fromhex(a.getblockheader(b["hash"], False)) for b in chain[1:]]
+        template = real[0]
+        attacker = ECKey()
+        attacker.generate(compressed=True)
+        attacker_pub = attacker.get_pubkey().get_bytes()
+        forged = [forged_header(template, attacker, attacker_pub, k) for k in range(600)]
+        def junk(k):
+            return forged[k % len(forged)]
+        flooders = [n1.add_p2p_connection(HeaderPeer()) for _ in range(3)]
+        stop = threading.Event()
+        sent = [0]
+        def flood(peer, base):
+            k = base
+            while not stop.is_set():
+                try:
+                    peer.send_message(msg_raw_headers([junk(k)]))
+                except Exception:
+                    return
+                k += 1
+                sent[0] += 1
+                if k % 20 == 0:
+                    time.sleep(0.005)
+        threads = [threading.Thread(target=flood, args=(p, 200 * j), daemon=True) for j, p in enumerate(flooders)]
+        for t in threads:
+            t.start()
+        try:
+            time.sleep(6)
+            info = n1.getlostblocks()
+            self.record("b2j", "under the flood", "%d junk headers sent, %s kept, %s queued, the last pass spent %s us there" % (
+                sent[0], info.get("waiverheaders"), info.get("waiverpending"), info.get("waiverpassus")))
+            kept_junk = info.get("waiverheaders")
+            since = self.log_size(1)
+            honest = n1.add_p2p_connection(HeaderPeer())
+            t0 = time.time()
+            # An honest peer answers the node's getheaders, so its run is offered again.
+            def reached():
+                if self.log_has(1, "refused block %s has %d certified block(s) above it" % (x["hash"], WAIVER), since):
+                    return True
+                honest.send_message(msg_raw_headers(real))
+                return False
+            self.wait_until(reached, timeout=60)
+            self.record("b2j", "outcome", "with the flood still running, the real run of %d reached the depth in %.1f s" % (WAIVER, time.time() - t0))
+            peak = max(n1.getlostblocks().get("waiverpassus", 0) for _ in range(5))
+            self.record("b2j", "time in the waiver step of one pass", "%d us" % peak)
+            if kept_junk is not None:
+                assert_equal(kept_junk, 0)
+        finally:
+            stop.set()
+            for t in threads:
+                t.join(timeout=10)
+            n1.disconnect_p2ps()
         self.mesh(range(N))
 
     # ---------------------------------------------------------------- hc

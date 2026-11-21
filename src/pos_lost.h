@@ -201,13 +201,26 @@ std::optional<uint256> LostConflict(const CTransaction& tx, const CBlockIndex* t
 
 //! ConnectTip refused `pindex` under the rule and marked it failed. cs_main held.
 void LostNoteRefused(const CBlockIndex* pindex);
-//! A header above a refused block, which the block index will not take: kept
-//! aside so that what a holder follows depends on the headers it has seen and
-//! not on the order they came in. With `only_if_parent_kept`, a header whose
-//! parent the index does not know is kept only when that parent was kept here.
+//! A header above a refused block, which the block index will not take: queued
+//! for the delivering peer, and kept aside once its certificate verifies, so
+//! that what a holder follows depends on the headers it has seen and not on the
+//! order they came in. With `only_if_parent_kept`, a header whose parent the
+//! index does not know is taken only when that parent is kept or in this peer's
+//! queue.
 void LostNoteRefusedChild(const CBlockHeader& header, bool only_if_parent_kept = false);
-//! Whether that side store holds this header.
+//! Whether that store, or the delivering peer's queue, holds this header.
 bool LostWaiverKept(const uint256& hash);
+//! Names the peer whose message this thread is processing, for the queues above.
+class LostHeaderPeerScope {
+public:
+    explicit LostHeaderPeerScope(int64_t peer);
+    ~LostHeaderPeerScope();
+    LostHeaderPeerScope(const LostHeaderPeerScope&) = delete;
+    LostHeaderPeerScope& operator=(const LostHeaderPeerScope&) = delete;
+
+private:
+    int64_t m_prev;
+};
 
 //! Evidence received from a peer, judged on the maintenance pass.
 void LostQueueEvidence(int64_t peer, LostEvidenceMsg msg);
