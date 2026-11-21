@@ -364,8 +364,13 @@ bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
 
         if (g_pos_committee_size > 1) {
             candidates.emplace(pubkey, leader_key);
-            if ((int)committee_keys.size() > MAX_POS_AGG_COMMITTEE_SIZE) {
-                error = strprintf("At most %d committee keys may be supplied", MAX_POS_AGG_COMMITTEE_SIZE);
+            // A test chain may name a whole public committee, so that a regtest
+            // network can certify at the size the real chains run. This path
+            // also serves the autonomous producer, so the limit on the testnet
+            // and on mainnet stays where it is.
+            const int max_committee_keys = (chainparams.IsMockableChain() && g_pos_public_committee) ? PosMaxCommitteeMembers() : MAX_POS_AGG_COMMITTEE_SIZE;
+            if ((int)committee_keys.size() > max_committee_keys) {
+                error = strprintf("At most %d committee keys may be supplied", max_committee_keys);
                 err_kind = PosProduceError::BAD_PARAM;
                 return false;
             }

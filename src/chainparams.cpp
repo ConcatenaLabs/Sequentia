@@ -2181,8 +2181,10 @@ protected:
         }
         if (g_con_pos) {
             // MuSig2 aggregation lifts the script-multisig committee cap of 16
-            // to the paper's 100 (doc 07 §6).
-            const int max_committee = (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
+            // to the paper's 100 (doc 07 §6); a public committee is bounded by
+            // its own limit, as on the testnet.
+            const int max_committee = g_pos_public_committee ? MAX_POS_PUBLIC_COMMITTEE_SIZE :
+                (g_pos_agg_committee || g_pos_bls) ? MAX_POS_AGG_COMMITTEE_SIZE : MAX_POS_COMMITTEE_SIZE;
             if (g_pos_committee_size < 1 || g_pos_committee_size > max_committee) {
                 throw std::runtime_error(strprintf("-poscommitteesize must be between 1 and %d", max_committee));
             }
