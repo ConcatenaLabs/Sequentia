@@ -25,6 +25,7 @@ stale Bitcoin block as the lost anchor instead of an invented hash):
   siblingbranch   the same, against the second block of a two-block lost branch
   siblingbefore   the same, on a real stale anchor, shown before the loss
   branchleaf a key branch of the bound leaf, with a proof no opcode reads, must not pass
+  rebind     a later record tries to move a bound coin to another transaction (use @stale)
   gracetwo   a refund certified at two heights while no record binds the lock
 
 A case in OPEN states a limit the rule does not close yet: the run reports it
@@ -53,11 +54,7 @@ GRACE = int(os.environ.get("LOST_GRACE", "0"))
 RECORD_VERSION = int(os.environ.get("LOST_RECORD_VERSION", "3"))
 V3 = RECORD_VERSION >= 3
 YIELD = V3
-OPEN = {
-    "flood": "sibling blocks of valid transactions are all carried: forced space per height is not bounded yet",
-    "siblingbranch": "a certified sibling's respend can come before the honest lost transaction in the carry",
-    "siblingbefore": "a certified sibling's respend can come before the honest lost transaction in the carry",
-}
+OPEN = {}
 
 
 def sha(b):
@@ -879,18 +876,12 @@ class LostRecordAttacksTest(LostSwapTest):
             self.show_evidence(ev, btc=[s_raw])
             self.wait_until(lambda: all(ev.hash in self.lost(i) for i in HONEST), timeout=30)
             self.record("keyless", "evidence", "the same forged claim is also held as lost by every honest node")
-        if YIELD:
-            # The forged claim is valid here but for its proof, so an honest
-            # producer holding the evidence records it itself.
-            made = self.produce(1, [1, 2, 3, 4, 5], leaders=[1, 2, 3, 4, 5])
-            h = made["hash"]
-            assert self.records_in(n1, h), "no honest record of the forged claim"
-            self.record("keyless", "record", "written by an honest producer at height %d" % made["height"])
-        else:
-            data = self.mk([hdr.header_bytes()], [(0, e[0], e[1], e[2])], [])
-            h, ok, since = self.put("keyless", data)
-            if not ok:
-                return self.blocked("keyless", "the record is refused")
+        # Evidence creates no duty to record, so the coalition writes it itself:
+        # the forged claim is valid here but for its proof.
+        data = self.mk([hdr.header_bytes()], [(0, e[0], e[1], e[2])], [s_raw] if V3 else [])
+        h, ok, since = self.put("keyless", data)
+        if not ok:
+            return self.blocked("keyless", "the record is refused")
         self.rejoin()
         self.sync_tips(range(N))
         self.record("keyless", "record", "binds the lock to the coalition's claim on stale block %s (%d seats at one height)" % (s[:12], seats))
@@ -1016,6 +1007,40 @@ class LostRecordAttacksTest(LostSwapTest):
         if r_at is not None or t_at is None:
             raise AssertionError("ATTACK SUCCEEDED (siblingrespend): the seller's respend replaced the honest lost transaction")
         self.blocked(case, "the honest lost transaction is mined")
+
+    def case_rebind(self):
+        """The first binding stands: a second record cannot move the coin to another transaction."""
+        case = "rebind"
+        a, n1 = self.nodes[SELLER], self.nodes[1]
+        info = a.decodescript("51")["segwit"]
+        spk = bytes.fromhex(info["hex"])
+        txid = a.sendtoaddress(address=info["address"], amount=Decimal("1"), fee_asset_label="bitcoin")
+        self.produce(SELLER, ALL_KEYS, txs_must=[txid])
+        self.sync_tips(range(N))
+        vout = [o["n"] for o in a.getrawtransaction(txid, 1)["vout"] if o["scriptPubKey"]["hex"] == spk.hex()][0]
+        asset = CTxOutAsset(b"\x01" + bytes.fromhex(n1.dumpassetlabels()["bitcoin"])[::-1])
+        t1 = self.anyone_spend(txid, vout, spk, asset, 1)
+        t2 = self.anyone_spend(txid, vout, b"\x00\x14" + bytes(20), asset, 1)
+        assert t1.rehash() != t2.rehash()
+        ah, an, btc = self.anchor_choice(self.tip(n1))
+        self.isolate()
+        h1, e1, _ = self.fab_header(ah, an, [0, 1, 2, 3], tx=t1)
+        h2, e2, _ = self.fab_header(ah, an, [0, 1, 2, 3], tx=t2)
+        _, ok, _ = self.put(case + "-first", self.mk([h1.header_bytes()], [(0, e1[0], e1[1], e1[2])], btc))
+        assert ok, "the first record was refused"
+        _, ok, since = self.put(case + "-second", self.mk([h2.header_bytes()], [(0, e2[0], e2[1], e2[2])], btc))
+        line = self.log_has(1, "carries a record that is not valid", since)
+        if ok:
+            raise AssertionError("ATTACK SUCCEEDED (rebind): a later record moved a bound coin")
+        assert line and "entry-conflicts-with-a-binding" in line[-1], line
+        self.record(case, "second record refused for", line[-1].split("not valid: ", 1)[-1][:70])
+        for j in range(2, N):
+            self.connect_nodes(1, j)
+        self.rejoin()
+        self.sync_tips(range(N))
+        self.force_raw(case + "-other-tx", t2, "bad-txns-recorded-respend")
+        self.spendable(case, t1.serialize().hex())
+        self.blocked(case, "the first binding stands: T2 is refused and T1 is mined")
 
     def sibling_outcome(self, case, t_id, r_id):
         n1 = self.nodes[1]
@@ -1201,8 +1226,8 @@ class LostRecordAttacksTest(LostSwapTest):
         ev.rehash()
         self.show_evidence(ev, btc=[s_raw])
         self.wait_until(lambda: all(ev.hash in self.lost(i) for i in HONEST), timeout=30)
-        made = self.produce(1, [1, 2, 3, 4, 5], leaders=[1, 2, 3, 4, 5])
-        assert self.records_in(n1, made["hash"]), "no record of the claim"
+        _, ok, _ = self.put(case, self.mk([hdr.header_bytes()], [(0, e[0], e[1], e[2])], [s_raw]))
+        assert ok, "the record of the claim was refused"
         self.rejoin()
         self.sync_tips(range(N))
         # A real proof for the key branch to carry: the same payment, mined on the best chain.
