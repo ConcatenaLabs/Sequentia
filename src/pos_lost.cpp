@@ -153,6 +153,10 @@ std::map<uint256, SignedBlk> g_signed GUARDED_BY(g_lost_mutex);
 std::map<COutPoint, std::vector<LostSpend>> g_signed_spends GUARDED_BY(g_lost_mutex);
 //! Bitcoin's best height, as the last maintenance pass read it.
 std::atomic<int> g_btc_h{-1};
+//! The height of the active tip's child. What a node does for the rule outside
+//! block validation (relaying evidence, putting lost transactions back in the
+//! mempool) waits for the rule's height, like the validation itself.
+std::atomic<int> g_next_height{-1};
 int64_t g_last_replay{0};
 
 fs::path LostPath() { return gArgs.GetDataDirNet() / "lostblocks.dat"; }
@@ -570,6 +574,7 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
 {
     AssertLockHeld(::cs_main);
     if (!g_con_pos || !g_con_bitcoin_anchor || !g_validate_anchor || !pindex || !block) return;
+    g_next_height = pindex->nHeight;
     // Its own chain means on this node's chain when Bitcoin took it. The watcher
     // disconnects only such blocks. Any other disconnect (fork choice, an
     // operator) counts only if Bitcoin had already left the anchor; a daemon
@@ -2006,7 +2011,7 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
 std::vector<LostEvidenceMsg> LostToSend(int64_t peer)
 {
     std::vector<LostEvidenceMsg> out;
-    if (!LostActive()) return out;
+    if (!LostActiveAt(g_next_height.load())) return out;
     LOCK(g_lost_mutex);
     std::vector<const LostBlk*> todo;
     std::set<uint256>& sent = g_sent[peer];
@@ -2298,7 +2303,17 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         LOCK(g_lost_mutex);
         if (g_dirty_file) WriteFile();
     }
-    if (!LostActive()) return;
+    // Below the rule's height the store is kept, so that a loss just before it
+    // is known when it starts, and nothing else happens: the mempool, the
+    // templates and the relay are those of a node without the rule. The pass
+    // that judges refused blocks again runs at the first height it applies,
+    // because its generation has then not been seen.
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip = chainman.ActiveChain().Tip();
+        g_next_height = tip ? tip->nHeight + 1 : 0;
+    }
+    if (!LostActiveAt(g_next_height.load())) return;
     const int64_t now = GetTime();
     uint64_t gen;
     bool any;
@@ -2544,6 +2559,18 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
         // headers again, so they are taken now and not at the next block.
         ++g_anchor_refetch_epoch;
     }
+}
+
+void LostNoteTipConnected(const CBlockIndex* tip)
+{
+    g_next_height = tip->nHeight + 1;
+    if (!LostActiveAt(tip->nHeight + 1)) return;
+    bool pending;
+    {
+        LOCK(g_lost_mutex);
+        pending = !g_spends.empty();
+    }
+    if (pending) g_anchor_watch_wake = true;
 }
 
 UniValue LostGetInfo(int next_height)
