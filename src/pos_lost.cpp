@@ -685,7 +685,8 @@ std::map<COutPoint, LostBoundSpend> ChainBindings(const CBlockIndex* prev, uint3
         auto it = g_recorded.find(p->GetBlockHash());
         if (it == g_recorded.end()) continue;
         for (const Binding& b : it->second) {
-            if (LostStillBinds(b.height, b.anchor_h, height, anchor_h, prev)) out.emplace(b.o, LostBoundSpend{b.txid, b.leaf});
+            // Newest first, so the oldest binding in force is the one kept.
+            if (LostStillBinds(b.height, b.anchor_h, height, anchor_h, prev)) out[b.o] = LostBoundSpend{b.txid, b.leaf};
         }
     }
     return out;
@@ -997,6 +998,14 @@ std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const uint256& a
     }
     for (const LostRecordEntry& e : r.entries) {
         if (first_off[e.k] < 0) return "not-lost";
+    }
+    // The first binding stands: a record cannot move a bound coin to another
+    // transaction, not even one the binding would yield to.
+    for (const CTransactionRef& t : txs) {
+        for (const CTxIn& in : t->vin) {
+            auto it = bound.find(in.prevout);
+            if (it != bound.end() && it->second.txid != t->GetHash()) return "entry-conflicts-with-a-binding";
+        }
     }
     // Rule 1: each entry is valid in this block, in order, by the block's own
     // transaction checks, with one exception: its payment proof may link to a
