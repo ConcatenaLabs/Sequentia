@@ -116,6 +116,19 @@ constexpr size_t LOST_MAX_UNCERTIFIED = 256;
 std::map<int64_t, std::set<uint256>> g_sent GUARDED_BY(g_lost_mutex);
 //! Blocks refused under the rule (BLOCK_FAILED_LOST), judged again on change.
 std::set<uint256> g_refused GUARDED_BY(g_lost_mutex);
+//! Headers above a refused block, by hash, and how many are kept per parent.
+//! Unverified until the maintenance pass, which drops any whose certificate
+//! fails, so junk cannot hold a parent's slots for long.
+constexpr size_t LOST_WAIVER_MAX_HEADERS = 4096;
+constexpr size_t LOST_WAIVER_MAX_CHILDREN = 16;
+std::map<uint256, CBlockHeader> g_waiver_headers GUARDED_BY(g_lost_mutex);
+std::map<uint256, size_t> g_waiver_children GUARDED_BY(g_lost_mutex);
+bool g_waiver_dirty GUARDED_BY(g_lost_mutex){false};
+//! Parents with more certified evidence-only children than LostSiblingCap.
+std::set<uint256> g_sibling_capped GUARDED_BY(g_lost_mutex);
+//! Refused blocks with enough certified blocks above them: this holder follows.
+std::set<uint256> g_waived GUARDED_BY(g_lost_mutex);
+int g_waiver_depth{DEFAULT_LOST_WAIVER_DEPTH};
 
 std::vector<std::pair<const CBlockIndex*, std::shared_ptr<const CBlock>>> g_pending GUARDED_BY(::cs_main);
 
@@ -208,6 +221,7 @@ void WriteFile() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
             file << *b.block << b.height << b.certified << b.own << b.epoch
                  << b.prot << b.fork_hash << b.fork_height << (uint8_t)b.anchor_state << b.btc << b.seed_ok;
         }
+        file << g_sibling_capped;
         if (!FileCommit(file.Get())) return;
         file.fclose();
         if (!RenameOver(tmp, LostPath())) return;
@@ -376,6 +390,7 @@ bool LostActiveAt(int height)
 }
 
 uint32_t LostWindow() { return g_window; }
+int LostWaiverDepth() { return g_waiver_depth; }
 
 void LostInit()
 {
@@ -386,6 +401,10 @@ void LostInit()
     g_window = DEFAULT_POS_LOST_WINDOW;
     if (chain != CBaseChainParams::TESTNET && chain != "sequentia") {
         g_window = (uint32_t)std::max<int64_t>(1, gArgs.GetIntArg("-poslostwindow", DEFAULT_POS_LOST_WINDOW));
+    }
+    g_waiver_depth = DEFAULT_LOST_WAIVER_DEPTH;
+    if (chain != CBaseChainParams::TESTNET && chain != "sequentia") {
+        g_waiver_depth = (int)std::max<int64_t>(1, gArgs.GetIntArg("-poslostwaiverdepth", DEFAULT_LOST_WAIVER_DEPTH));
     }
     g_bind_signed = gArgs.GetBoolArg("-poslostbindsigned", false);
     LOCK(g_lost_mutex);
@@ -439,6 +458,7 @@ void LostInit()
             b.epoch = epoch;
             g_blocks.emplace(b.hash, std::move(b));
         }
+        file >> g_sibling_capped;
         // The duty holds from the first block this node judges after a
         // restart, before any maintenance pass: the bound spends as written.
         // Evidence binds only what the next maintenance pass finds valid here.
@@ -1029,6 +1049,34 @@ std::string JudgeRecord(const LostRecord& r, uint32_t anchor_h, const uint256& a
     return "";
 }
 
+//! The holders' side of a record: it counts as a spend. The first binding of a
+//! coin stands, so a record naming another transaction would take the coin from
+//! a transaction this node had on its own chain as surely as mining the respend
+//! would, even before the duty names that transaction.
+std::optional<std::string> RecordViolationLocked(const CBlock& block, const CBlockIndex* prev) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
+{
+    for (const auto& r : LostParseRecords(block)) {
+        if (!r) continue;
+        for (const LostRecordEntry& e : r->entries) {
+            const auto entry = DeserTx(e.tx);
+            if (!entry) continue;
+            const uint256 txid = (*entry)->GetHash();
+            for (const CTxIn& in : (*entry)->vin) {
+                if (in.m_is_pegin) continue;
+                auto it = g_spends.find(in.prevout);
+                if (it == g_spends.end()) continue;
+                for (const LostSpend& s : it->second) {
+                    if (!s.own || s.txid == txid || !Binds(s, block.m_anchor_height, prev)) continue;
+                    return strprintf("a record binds %s:%u to tx %s, which tx %s of lost block %s (anchor %u, fork %d) spends",
+                                     in.prevout.hash.ToString(), in.prevout.n, txid.ToString(), s.txid.ToString(),
+                                     s.block.ToString(), s.anchor_h, s.fork_height);
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 //! What a holder's duty stands on, of the blocks in `prot`. Every block it had
 //! on its own chain stands. An evidence-only sibling of one, and that sibling's
 //! descendants, do not. An evidence-only transaction that conflicts with one of
@@ -1054,7 +1102,10 @@ Standing StandingOf(const std::set<uint256>& prot) EXCLUSIVE_LOCKS_REQUIRED(g_lo
     }
     std::sort(order.begin(), order.end(), [](const LostBlk* a, const LostBlk* b) { return a->height < b->height; });
     for (const LostBlk* b : order) {
-        if (!b->own && (own_at.count({b->fork_hash, b->height}) || st.blocks_out.count(b->prev))) st.blocks_out.insert(b->hash);
+        if (b->own) continue;
+        if (own_at.count({b->fork_hash, b->height}) || st.blocks_out.count(b->prev) || g_sibling_capped.count(b->prev)) {
+            st.blocks_out.insert(b->hash);
+        }
     }
     std::map<COutPoint, std::set<uint256>> own_spend, evidence_spend;
     for (const LostBlk* b : order) {
@@ -1320,7 +1371,10 @@ uint256 StoreFingerprint() EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
 {
     CHashWriter hw(SER_GETHASH, 0);
     hw << g_gen;
+    // The plan carries only blocks this node had on its own chain, so evidence
+    // that binds nothing new does not make it compute again.
     for (const auto& [h, b] : g_blocks) {
+        if (!b.own) continue;
         hw << h << b.prot << b.certified << (uint8_t)b.anchor_state << b.fork_height << b.epoch;
     }
     return hw.GetHash();
@@ -1446,14 +1500,27 @@ LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor
 
 bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
                     const std::function<bool()>& certified_descendant, CCoinsViewCache& view,
-                    BlockValidationState& state)
+                    BlockValidationState& state, bool just_check)
 {
     AssertLockHeld(::cs_main);
     if (!pindexPrev || ibd || !LostActiveAt(pindexPrev->nHeight + 1)) return true;
     LOCK(g_lost_mutex);
+    if (!g_waived.empty()) {
+        // A quorum has certified past this holder: it takes that block, and the
+        // duty is off above it, or it would be refused again one block later. It
+        // still does not sign the waived block itself.
+        bool waived = !just_check && g_waived.count(block.GetHash()) > 0;
+        const CBlockIndex* w = pindexPrev;
+        for (int i = 0; !waived && w && i <= LOST_MAX_BRANCH; ++i, w = w->pprev) waived = g_waived.count(w->GetBlockHash()) > 0;
+        if (waived) {
+            LogPrintf("Lost blocks: block %s at height %d is at or above a block a quorum certified past this holder; the duty does not bear on it\n",
+                      block.GetHash().ToString(), pindexPrev->nHeight + 1);
+            return true;
+        }
+    }
     std::optional<std::string> why;
     std::string reason;
-    if ((why = ViolationLocked(block, pindexPrev, view))) {
+    if ((why = ViolationLocked(block, pindexPrev, view)) || (why = RecordViolationLocked(block, pindexPrev))) {
         reason = "bad-txns-lost-respend";
     } else if ((why = SignedViolationLocked(block, pindexPrev))) {
         reason = "bad-txns-signed-respend";
@@ -1555,6 +1622,26 @@ void LostNoteRefused(const CBlockIndex* pindex)
 {
     LOCK(g_lost_mutex);
     g_refused.insert(pindex->GetBlockHash());
+    g_waiver_dirty = true;
+}
+
+void LostNoteRefusedChild(const CBlockHeader& header, bool only_if_parent_kept)
+{
+    LOCK(g_lost_mutex);
+    if (only_if_parent_kept && !g_waiver_headers.count(header.hashPrevBlock)) return;
+    const uint256 hash = header.GetHash();
+    if (g_waiver_headers.count(hash) || g_waiver_headers.size() >= LOST_WAIVER_MAX_HEADERS) return;
+    size_t& kept = g_waiver_children[header.hashPrevBlock];
+    if (kept >= LOST_WAIVER_MAX_CHILDREN) return;
+    ++kept;
+    g_waiver_headers.emplace(hash, header);
+    g_waiver_dirty = true;
+}
+
+bool LostWaiverKept(const uint256& hash)
+{
+    LOCK(g_lost_mutex);
+    return g_waiver_headers.count(hash) > 0;
 }
 
 void LostQueueEvidence(int64_t peer, LostEvidenceMsg msg)
@@ -1756,6 +1843,22 @@ std::string LostAcceptEvidence(ChainstateManager& chainman, const LostEvidenceMs
     b.btc = msg.btc;
     b.seed_ok = seed_ok;
     LOCK(g_lost_mutex);
+    {
+        uint32_t certified_children = 0;
+        int below_quorum = 0;
+        for (const auto& [h, x] : g_blocks) {
+            if (x.own || x.prev != block.hashPrevBlock) continue;
+            if (x.certified) ++certified_children; else ++below_quorum;
+        }
+        if (certified && certified_children >= LostSiblingCap(g_window)) {
+            if (g_sibling_capped.insert(block.hashPrevBlock).second) {
+                ++g_gen;
+                g_dirty_file = true;
+            }
+            return "sibling-cap";
+        }
+        if (!certified && below_quorum >= LOST_MAX_BELOW_QUORUM_CHILDREN) return "sibling-below-quorum";
+    }
     if (!certified) {
         // F8: blocks that are not (yet) certified in order are few and bounded.
         size_t n = 0;
@@ -2079,7 +2182,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
     //    line for the next block whatever their fee.
     if (mempool && (changed || now - g_last_replay >= 2)) {
         g_last_replay = now;
-        std::vector<CTransactionRef> lost_txs;
+        std::vector<CTransactionRef> lost_txs, evidence_txs;
         {
             LOCK(g_lost_mutex);
             std::vector<const LostBlk*> order;
@@ -2087,6 +2190,15 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             for (const auto& [h, b] : g_blocks) if (b.prot && b.own) order.push_back(&b);
             std::sort(order.begin(), order.end(), [](const LostBlk* a, const LostBlk* b) { return a->height < b->height; });
             for (const LostBlk* b : order) for (size_t i = 1; i < b->block->vtx.size(); ++i) lost_txs.push_back(b->block->vtx[i]);
+            // What stands of evidence-only blocks: the transactions that bind.
+            std::set<uint256> standing_ids;
+            for (const auto& [o, v] : g_spends) for (const LostSpend& sp : v) if (!sp.own) standing_ids.insert(sp.txid);
+            for (const auto& [h, b] : g_blocks) {
+                if (!b.prot || b.own) continue;
+                for (size_t i = 1; i < b.block->vtx.size(); ++i) {
+                    if (standing_ids.count(b.block->vtx[i]->GetHash())) evidence_txs.push_back(b.block->vtx[i]);
+                }
+            }
         }
         LOCK2(cs_main, mempool->cs);
         const CBlockIndex* tip = chainman.ActiveChain().Tip();
@@ -2120,6 +2232,93 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
                 mempool->PrioritiseTransaction(tx->GetHash(), 100 * COIN);
                 LogPrintf("Lost blocks: lost transaction %s is back in the mempool, first in line\n", tx->GetHash().ToString());
             }
+        }
+        // Evidence-only transactions go back under ordinary fee policy: no
+        // priority and no duty. Each is offered once per tip.
+        static uint256 offered_tip;
+        static std::set<uint256> offered;
+        if (tip && offered_tip != tip->GetBlockHash()) {
+            offered_tip = tip->GetBlockHash();
+            offered.clear();
+        }
+        for (const auto& tx : evidence_txs) {
+            if (mempool->exists(GenTxid::Txid(tx->GetHash())) || !offered.insert(tx->GetHash()).second) continue;
+            const MempoolAcceptResult r = AcceptToMemoryPool(chainman.ActiveChainstate(), tx, GetTime(), /*bypass_limits=*/false, /*test_accept=*/false);
+            if (r.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                LogPrintf("Lost blocks: evidence transaction %s is in the mempool under ordinary fee policy\n", tx->GetHash().ToString());
+            }
+        }
+    }
+    // The waiver: a function of the headers this node has seen, in any order.
+    {
+        LOCK2(cs_main, g_lost_mutex);
+        if (g_blocks.empty() && g_refused.empty()) {
+            g_waived.clear();
+            g_waiver_headers.clear();
+            g_waiver_children.clear();
+            g_sibling_capped.clear();
+        } else if (g_waiver_dirty && !g_refused.empty()) {
+            g_waiver_dirty = false;
+            // Children by parent: those kept aside, and those the index took
+            // before their ancestor was refused.
+            std::map<uint256, std::vector<CBlockHeader>> kids;
+            for (const auto& [h, hdr] : g_waiver_headers) kids[hdr.hashPrevBlock].push_back(hdr);
+            int lowest = std::numeric_limits<int>::max();
+            for (const uint256& root : g_refused) {
+                if (const CBlockIndex* x = chainman.m_blockman.LookupBlockIndex(root)) lowest = std::min(lowest, x->nHeight);
+            }
+            for (const auto& [h, p] : chainman.m_blockman.m_block_index) {
+                if (!p->pprev || p->nHeight <= lowest || !(p->nStatus & BLOCK_FAILED_MASK) || p->trimmed()) continue;
+                if (!g_waiver_headers.count(h)) kids[p->pprev->GetBlockHash()].push_back(p->GetBlockHeader());
+            }
+            const StakeRegistry& reg = StakeRegistry::GetInstance();
+            bool dropped = false;
+            // The longest run of certified headers above `parent`, up to `need`.
+            std::function<int(const uint256&, const CBlockIndex&, const uint256&, int)> run =
+                [&](const uint256& parent, const CBlockIndex& view, const uint256& root, int need) -> int {
+                if (need <= 0) return 0;
+                auto it = kids.find(parent);
+                if (it == kids.end()) return 0;
+                int best = 0;
+                for (const CBlockHeader& hdr : it->second) {
+                    const uint256 hash = hdr.GetHash();
+                    std::string reason;
+                    const int seats = CertSeatsCached(hdr, &view, root, reg, reason);
+                    if (seats < 0 || seats < PosSlotQuorumAt(reg, view.nHeight + 1)) {
+                        // Junk does not keep a parent's slot.
+                        if (g_waiver_headers.erase(hash)) {
+                            size_t& kept = g_waiver_children[parent];
+                            kept -= std::min<size_t>(kept, 1);
+                            dropped = true;
+                        }
+                        continue;
+                    }
+                    CBlockIndex next;
+                    next.nHeight = view.nHeight + 1;
+                    next.m_anchor_height = hdr.m_anchor_height;
+                    next.m_anchor_hash = hdr.m_anchor_hash;
+                    best = std::max(best, 1 + run(hash, next, root, need - 1));
+                    if (best >= need) break;
+                }
+                return best;
+            };
+            for (const uint256& root : g_refused) {
+                if (g_waived.count(root)) continue;
+                const CBlockIndex* x = chainman.m_blockman.LookupBlockIndex(root);
+                if (!x) continue;
+                CBlockIndex view;
+                view.nHeight = x->nHeight;
+                view.m_anchor_height = x->m_anchor_height;
+                view.m_anchor_hash = x->m_anchor_hash;
+                const int depth = run(root, view, root, g_waiver_depth);
+                if (depth >= g_waiver_depth) {
+                    LogPrintf("Lost blocks: refused block %s has %d certified block(s) above it; following the quorum\n", root.ToString(), depth);
+                    g_waived.insert(root);
+                    changed = true;
+                }
+            }
+            // A slot freed: ask again, in case a real header was turned away.
+            if (dropped) ++g_anchor_refetch_epoch;
         }
     }
     if (gen == g_last_scan_gen && !changed && g_refused_scanned) return;

@@ -36,6 +36,8 @@ CASES = os.environ.get("LOST_CASES", "dep,a,b,c,f,g").split(",")
 RESULTS = os.environ.get("LOST_RESULTS", "")
 BASE_BIN = os.environ.get("LOST_BASE_BIN", "")
 W = int(os.environ.get("LOST_WINDOW", "6"))
+#: Consecutive certified blocks above a block that breaks the duty before a holder follows it.
+WAIVER = int(os.environ.get("LOST_WAIVER_DEPTH", "1"))
 # The testnet's block weight; fees in any accepted asset, as on the testnet.
 MAX_WEIGHT = int(os.environ.get("LOST_MAX_WEIGHT", "400000"))
 N = 6
@@ -108,6 +110,7 @@ class LostBlocksTest(BitcoinTestFramework):
         ] + self.specs
         if i not in self.base_nodes:
             a.append("-poslostwindow=%d" % W)
+            a.append("-poslostwaiverdepth=%d" % WAIVER)
         if i == SELLER:
             a += ["-minrelaytxfee=0", "-blockmintxfee=0"]
             if i not in self.base_nodes:

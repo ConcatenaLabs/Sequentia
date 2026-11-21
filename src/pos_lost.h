@@ -131,6 +131,26 @@ struct LostTemplateParts {
 };
 LostTemplateParts LostForTemplate(const CBlockIndex* pindexPrev, uint32_t anchor_height, const uint256& anchor_hash, CCoinsViewCache& view);
 
+//! How many consecutive certified blocks above a block that breaks the duty make
+//! a holder follow it. One place to change; custom chains can override it for
+//! tests with -poslostwaiverdepth.
+static constexpr int DEFAULT_LOST_WAIVER_DEPTH = 1;
+int LostWaiverDepth();
+
+//! Certified evidence-only children of one parent a holder keeps: the window
+//! plus one, the number of anchor heights open to a child of that parent (its
+//! anchor up to its anchor + W), so one honest child per height. Honest members
+//! do sign a second child after Bitcoin moves, and more than this many successive
+//! reorganisations inside one window, each undoing a certified child of the same
+//! parent, would pass it: very unlikely, not impossible. Passing it is safe. The
+//! parent's evidence-only blocks then restrain nothing, which leaves a node that
+//! holds them as evidence like a node with no evidence; a holder of a block from
+//! its own chain is unaffected, and nothing becomes valid or invalid. Blocks below
+//! the quorum never count, so seats short of a quorum cannot lift a restraint.
+inline uint32_t LostSiblingCap(uint32_t window) { return window + 1; }
+//! Evidence-only children below the quorum kept per parent.
+static constexpr int LOST_MAX_BELOW_QUORUM_CHILDREN = 2;
+
 //! Whether a refusal reason is one of the holders' duty (soft, re-judged).
 bool LostIsRefusal(const std::string& reason);
 
@@ -160,10 +180,12 @@ void LostNoteDisconnected(const CBlockIndex* pindex, const std::shared_ptr<const
 
 //! The rule, for `block` built on `pindexPrev`, the active tip. Off-chain
 //! evidence is not applied during initial block download, nor to a block that
-//! `certified_descendant` says has a certified descendant. cs_main held.
+//! `certified_descendant` says has a certified descendant, nor to a block at or
+//! above one a quorum has certified past this holder (`just_check`, a block this
+//! node is asked to sign, is not excused by being that block itself). cs_main held.
 bool LostCheckBlock(const CBlock& block, const CBlockIndex* pindexPrev, bool ibd,
                     const std::function<bool()>& certified_descendant, CCoinsViewCache& view,
-                    BlockValidationState& state);
+                    BlockValidationState& state, bool just_check = false);
 
 //! A lost transaction `tx` conflicts with, for the mempool, while a child of
 //! `tip` anchored like it is still bound.
@@ -171,6 +193,13 @@ std::optional<uint256> LostConflict(const CTransaction& tx, const CBlockIndex* t
 
 //! ConnectTip refused `pindex` under the rule and marked it failed. cs_main held.
 void LostNoteRefused(const CBlockIndex* pindex);
+//! A header above a refused block, which the block index will not take: kept
+//! aside so that what a holder follows depends on the headers it has seen and
+//! not on the order they came in. With `only_if_parent_kept`, a header whose
+//! parent the index does not know is kept only when that parent was kept here.
+void LostNoteRefusedChild(const CBlockHeader& header, bool only_if_parent_kept = false);
+//! Whether that side store holds this header.
+bool LostWaiverKept(const uint256& hash);
 
 //! Evidence received from a peer, judged on the maintenance pass.
 void LostQueueEvidence(int64_t peer, LostEvidenceMsg msg);

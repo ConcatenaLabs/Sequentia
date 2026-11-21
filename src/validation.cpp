@@ -4613,8 +4613,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         if (fJustCheck) return false;
         for (const auto& entry : m_blockman.m_block_index) {
             const CBlockIndex* p = entry.second;
-            if (p->nHeight <= pindex->nHeight || !p->PosCarriesQuorum()) continue;
+            if (p->nHeight < pindex->nHeight + LostWaiverDepth() || !p->PosCarriesQuorum()) continue;
             if (p->GetAncestor(pindex->nHeight) != pindex || !p->pprev) continue;
+            {
+                // Every block between carries a quorum too.
+                bool all = true;
+                for (const CBlockIndex* w = p->pprev; w != pindex; w = w->pprev) all = all && w->PosCarriesQuorum();
+                if (!all) continue;
+            }
             // "Certified" means a certificate that verifies, never the flag a
             // header stored before its body was checked (doc 03, "The duty of a
             // holder"): the aggregate under the committee its parent's anchor
@@ -4646,7 +4652,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         pindex->nStatus |= BLOCK_HAS_LOST_RECORD;
         m_blockman.m_dirty_blockindex.insert(pindex);
     }
-    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, IsInitialBlockDownload(), lost_certified_descendant, view, state)) {
+    if (check_pos_rules && !LostCheckBlock(block, pindex->pprev, IsInitialBlockDownload(), lost_certified_descendant, view, state, fJustCheck)) {
         return error("%s: LostCheckBlock: %s", __func__, state.ToString());
     }
 
@@ -7955,6 +7961,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-prevblk-anchor-orphaned");
         }
         if (lost_refused(prev)) {
+            LostNoteRefusedChild(block);
             return state.Invalid(BlockValidationResult::BLOCK_RECENT_CONSENSUS_CHANGE, "bad-prevblk-lost-respend");
         }
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
@@ -7999,6 +8006,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         BlockMap::iterator mi{m_blockman.m_block_index.find(block.hashPrevBlock)};
         if (mi == m_blockman.m_block_index.end()) {
             LogPrint(BCLog::VALIDATION, "%s: %s prev block not found\n", __func__, hash.ToString());
+            LostNoteRefusedChild(block, /*only_if_parent_kept=*/true);
             return state.Invalid(BlockValidationResult::BLOCK_MISSING_PREV, "prev-blk-not-found");
         }
         pindexPrev = (*mi).second;
@@ -8068,6 +8076,11 @@ bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& 
             *all_duplicate = true;
         }
         bool duplicate = false;
+        // SEQUENTIA lost blocks: a header refused under the rule does not end the
+        // message. The ones after it count toward following a quorum that has
+        // certified past this holder, in whatever order they were relayed.
+        std::optional<BlockValidationState> lost_refusal;
+        bool any_accepted = false;
         for (const CBlockHeader& header : headers) {
             CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
             bool accepted{AcceptBlockHeader(header, state, chainparams, &pindex, &duplicate)};
@@ -8077,11 +8090,23 @@ bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& 
                 (*all_duplicate) &= duplicate;  // False if any are false
             }
             if (!accepted) {
+                const std::string reason = state.GetRejectReason();
+                if (reason == "duplicate-lost-respend" || reason == "bad-prevblk-lost-respend" ||
+                    (reason == "prev-blk-not-found" && LostWaiverKept(header.GetHash()))) {
+                    lost_refusal = state;
+                    state = BlockValidationState();
+                    continue;
+                }
                 return false;
             }
+            any_accepted = true;
             if (ppindex) {
                 *ppindex = pindex;
             }
+        }
+        if (lost_refusal && !any_accepted) {
+            state = *lost_refusal;
+            return false;
         }
     }
     if (NotifyHeaderTip(ActiveChainstate())) {
