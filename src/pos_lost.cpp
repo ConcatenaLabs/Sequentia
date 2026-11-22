@@ -323,13 +323,34 @@ bool LostStillBinds(int lost_height, uint32_t lost_anchor_h, int height, uint32_
 
 namespace {
 
+//! Whether `prev`'s chain holds a block at or above `height` that carries a quorum.
+bool CertifiedAtOrAbove(const CBlockIndex* prev, int height)
+{
+    for (const CBlockIndex* p = prev; p && p->nHeight >= height; p = p->pprev) {
+        if (p->PosCarriesQuorum()) return true;
+    }
+    return false;
+}
+
+//! The holder's side of the lapse. Bitcoin passing the window is necessary to let
+//! go of a block of this node's own chain and not sufficient: until the chain has
+//! a certified block at or above the lost height, nothing is final there, and a
+//! longer branch could still replace what carried the lost transaction. Evidence
+//! only ever restrains until the window ends, and records stay judged by
+//! LostStillBinds alone, the same on every node.
+bool HolderBinds(int lost_height, uint32_t lost_anchor_h, bool own, int height, uint32_t anchor_h, const CBlockIndex* prev)
+{
+    if (LostStillBinds(lost_height, lost_anchor_h, height, anchor_h, prev)) return true;
+    return own && !CertifiedAtOrAbove(prev, lost_height);
+}
+
 //! Whether `s` binds a block anchored at `anchor_h` built on `prev`.
 bool Binds(const LostSpend& s, uint32_t anchor_h, const CBlockIndex* prev)
 {
     if (!prev) return false;
     const CBlockIndex* f = prev->GetAncestor(s.fork_height);
     if (!f || f->GetBlockHash() != s.fork_hash) return false;
-    return LostStillBinds(s.height, s.anchor_h, prev->nHeight + 1, anchor_h, prev);
+    return HolderBinds(s.height, s.anchor_h, s.own, prev->nHeight + 1, anchor_h, prev);
 }
 
 std::optional<std::string> ViolationLocked(const CBlock& block, const CBlockIndex* prev, const CCoinsViewCache& view, const std::set<uint256>& settled) EXCLUSIVE_LOCKS_REQUIRED(g_lost_mutex)
@@ -1272,7 +1293,7 @@ Plan PlanCompute(const CBlockIndex* prev, uint32_t anchor_h, const uint256& anch
         if (!b.prot || !b.own || b.fork_height < 0) continue;
         const CBlockIndex* f = prev->GetAncestor(b.fork_height);
         if (!f || f->GetBlockHash() != b.fork_hash) continue;
-        if (!LostStillBinds(b.height, b.anchor_h, prev->nHeight + 1, anchor_h, prev)) continue;
+        if (!HolderBinds(b.height, b.anchor_h, /*own=*/true, prev->nHeight + 1, anchor_h, prev)) continue;
         blocks.push_back(&b);
     }
     if (blocks.empty()) return plan;
@@ -2198,7 +2219,7 @@ void LostMaintain(ChainstateManager& chainman, CTxMemPool* mempool)
             const bool active = self && chainman.ActiveChain().Contains(self);
             const CBlockIndex* f = (tip && b.fork_height >= 0) ? tip->GetAncestor(b.fork_height) : nullptr;
             const bool on_fork = f && f->GetBlockHash() == b.fork_hash;
-            const bool expired = on_fork ? !LostStillBinds(b.height, b.anchor_h, tip->nHeight + 1, tip->m_anchor_height, tip)
+            const bool expired = on_fork ? !HolderBinds(b.height, b.anchor_h, b.own, tip->nHeight + 1, tip->m_anchor_height, tip)
                                          : (btc_h >= 0 && (uint32_t)btc_h > b.anchor_h + 2 * g_window);
             if (active || expired) {
                 LogPrint(BCLog::VALIDATION, "Lost blocks: dropping %s (%s)\n", b.hash.ToString(), active ? "on the active chain" : "past the window");

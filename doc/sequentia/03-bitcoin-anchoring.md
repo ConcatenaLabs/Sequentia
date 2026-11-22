@@ -414,12 +414,24 @@ header by some passes, without turning it away. The store is kept in
 waiver depth above the refused block, 16 children per parent, 4,096 headers and
 8 MB; a header no refused block roots any more is dropped. A key registered on
 the refused branch counts for nothing, so a branch whose own stake changes alter
-a committee above it does not reach the depth: its holders then rejoin at the
-lapse. A holder still does not sign the
-waived block itself. The holder drops L once its active chain has lapsed for L (or, when
-its active chain no longer contains F, once Bitcoin is 2W above a_L: a bound on
-memory, not a rule), and then judges every block it refused by validity
-alone.
+a committee above it does not reach the depth, and its holders stay off it. A
+holder still does not sign the waived block itself. The holder drops L once its
+active chain has lapsed for L **and** holds a quorum-certified block at or above
+L's height (or, when its active chain no longer contains F, once Bitcoin is 2W
+above a_L: a bound on memory, not a rule), and then judges every block it refused
+by validity alone.
+
+**A holder keeps a loss until its own chain is certified.** Bitcoin passing the
+window is necessary for letting go of a block of the holder's own chain and not
+sufficient. Sub-quorum blocks are not final, so if the duty ended by the clock,
+half the seats could withhold their signatures, wait out the window, and show a
+longer branch that replaces the block carrying the lost transaction. While a loss
+is kept, a branch that leaves out or respends its transactions is refused, and the
+holder yields only to the waiver at its depth. Once its chain holds a certified
+block at or above the lost height, finality protects what that chain carries. This
+is a holder's rule alone: records and their bindings are validity, judged by the
+judged block's own anchor, the same on every node. Evidence-only blocks restrain a
+signature until the window ends and no longer.
 
 **A waiver accepts blocks; it does not release the duty.** It covers a lost block
 only when the chain holds the waived block, the lost block's fork point is below
@@ -546,10 +558,17 @@ leaf and needs a floor, does not. A mempool refuses what a record binds
   minimum difficulty costs about 2^32 hashes, so proof of work is a weak price
   there; the rules above that do not rest on work hold regardless. Below a
   seat quorum nothing can be recorded at all.
-- **A quorum that certifies past the holders is followed.** At the waiver depth
-  a holder takes the certified chain even if it skipped the duty, so a dishonest
-  quorum holding that many consecutive heights can still take a lost
-  transaction's coin. The depth sets how many heights that takes.
+- **Known limitation: a coalition holding consecutive committees can still take
+  a lock.** A coalition with a seat quorum at the first rebuilt height and at each
+  of the next *d* heights can mine the seller's respend, and holders follow it at
+  the waiver depth. It must hold all *d* + 1 committees in a row, from a height it
+  cannot choose. Without this rule the seller needs no committee at all.
+- **A real split does not end by itself.** When members signed two siblings before
+  the loss, the nodes hold different ones as their own, and no side has a quorum of
+  live seats, each side stays on its own sub-quorum chain with its own spend and no
+  block certifies. No coin moves on either chain. It ends when one side reaches a
+  quorum and the waiver's depth, or when operators act; a side that has a quorum
+  certifies, and the other follows at the depth.
 - **Every node judges records alike.** A late node, one syncing from nothing
   with a Bitcoin daemon that never saw the stale block, and one whose daemon
   goes back and forth between a block's header and its body all reach the
@@ -612,7 +631,8 @@ leaf and needs a floor, does not. A mempool refuses what a record binds
   transaction, and a refund after a claim that failed for good, wait until
   the lapse: W Bitcoin blocks after the chain rebuilds the lost block's
   height. For a shallow loss that is about W; for a deep one, W after the
-  replay ends.
+  replay ends. On a holder they also wait for a quorum-certified block at or
+  above the lost height on its own chain.
 - **Record bytes and the check's cost.** A record carries each entry's whole
   transaction, and 80 bytes per stale Bitcoin block its branch names. Judging
   one walks B's anchor's parents (header readings are kept per hash), rewinds

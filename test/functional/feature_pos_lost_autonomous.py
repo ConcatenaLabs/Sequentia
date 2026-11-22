@@ -43,7 +43,7 @@ import os
 import time
 from decimal import Decimal
 
-from feature_pos_lost_blocks import ALL_KEYS, SELLER, HONEST, LATE, N
+from feature_pos_lost_blocks import ALL_KEYS, SELLER, HONEST, LATE, N, WAIVER
 from feature_pos_lost_replay import LostReplayTest
 from test_framework.authproxy import JSONRPCException
 from test_framework.messages import tx_from_hex
