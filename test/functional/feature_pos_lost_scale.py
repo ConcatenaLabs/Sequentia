@@ -330,7 +330,10 @@ class LostScaleTest(LostAutonomousTest):
         if SPACING:
             # The lost branch ends about now, as a real one does: the fork
             # point is as old as the branch and no older.
-            self.mock = max(self.mock, int(time.time()) - SPACING * (nblocks + 2))
+            # At a large committee a leader's time gate moves a block's stamp
+            # well past the spacing (up to about 400 s a block at 250 seats).
+            per_block = SPACING + (2 * MEMBERS if MEMBERS > N else 0)
+            self.mock = max(self.mock, int(time.time()) - per_block * (nblocks + 2))
         f_height = n1.getblockcount()
         blocks = []
         for d in range(DEPTH):
