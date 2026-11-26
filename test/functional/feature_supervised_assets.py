@@ -43,7 +43,10 @@ Covered, in the order the test runs them:
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.blocktools import COINBASE_MATURITY
-from test_framework.key import ECKey, compute_xonly_pubkey, sign_schnorr
+from test_framework.key import ECKey, compute_xonly_pubkey, generate_privkey, sign_schnorr, tweak_add_privkey
+from test_framework.address import program_to_witness
+from test_framework.messages import CTxInWitness, CTxOutWitness, tx_from_hex
+from test_framework.script import SIGHASH_DEFAULT, TaprootSignatureHash, taproot_construct
 from test_framework.util import assert_equal, assert_raises_rpc_error
 
 from decimal import Decimal
@@ -162,6 +165,7 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         self.test_reorg_takes_the_freeze_with_it(node, asset)
         self.test_pause(node)
         self.test_private_submission(node)
+        self.test_private_submission_taproot_input(node)
         self.test_wallet_issuance(node)
 
     def test_descriptor_is_in_the_asset_id(self, node):
@@ -708,6 +712,47 @@ class SupervisedAssetsTest(BitcoinTestFramework):
         signed = node.signrawtransactionwithwallet(raw)
         assert signed["complete"], signed
         return signed["hex"], built["targethash"]
+
+    def test_private_submission_taproot_input(self, node):
+        self.log.info("A private submission spending a taproot coin is checked as the mempool checks it")
+        asset = self.issue_asset(node)
+        victim = self.nodes[1].getnewaddress()
+        self.spend_asset(node, asset, Decimal("10"), victim)
+        self.generate(node, 1)
+        self.sync_all()
+
+        # A coin under a taproot key-path output, signed below by hand.
+        sec = generate_privkey()
+        tap = taproot_construct(compute_xonly_pubkey(sec)[0])
+        fund = node.sendtoaddress(address=program_to_witness(1, tap.scriptPubKey[2:]), amount=Decimal("2"),
+                                  fee_asset_label=self.policy_asset)
+        self.generate(node, 1)
+        self.sync_all()
+        funded = tx_from_hex(node.getrawtransaction(fund))
+        vout = [i for i, o in enumerate(funded.vout) if o.scriptPubKey == tap.scriptPubKey][0]
+        amount = node.gettxout(fund, vout)["value"]
+
+        sighash = node.getsupervisionrecordhash("freeze", asset, victim, None, fund, vout)["sighash"]
+        built = node.buildsupervisionrecord("freeze", asset, victim, None, schnorr(self.operational, sighash))
+        raw = node.createrawtransaction([{"txid": fund, "vout": vout}],
+                                        [{node.getnewaddress(): amount - Decimal("0.001")}, {"fee": Decimal("0.001")}])
+        raw = node.addsupervisionrecordoutput(raw, built["script"], asset)
+        tx = tx_from_hex(raw)
+        tx.wit.vtxinwit = [CTxInWitness()]
+        tx.wit.vtxoutwit = [CTxOutWitness() for _ in tx.vout]
+        msg = TaprootSignatureHash(tx, [funded.vout[vout]], SIGHASH_DEFAULT, int(node.getblockhash(0), 16), 0)
+        tx.wit.vtxinwit[0].scriptWitness.stack = [sign_schnorr(tweak_add_privkey(sec, tap.tweak), msg)]
+        signed = tx.serialize().hex()
+
+        # The mempool accepts its taproot signature, so the private channel must too.
+        res = node.testmempoolaccept([signed])[0]
+        assert res["allowed"], res
+        txid = node.submitsupervisionrecord(signed)["txid"]
+        self.generate(node, 1)
+        self.sync_all()
+        assert txid in node.getblock(node.getbestblockhash())["tx"], "the submission was not included"
+        assert_equal(node.isassetfrozen(asset, victim)["frozen"], True)
+        assert_equal(node.getsupervisionsubmissions(), [])
 
     def test_private_submission(self, node):
         self.log.info("A freeze reaches a block without ever entering a mempool")
