@@ -102,6 +102,11 @@ PosCompactProposal MakePosCompactProposal(const CBlock& block);
  *  merkle root matches the header; otherwise nullptr (the caller fetches the full
  *  block). */
 std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact, CTxMemPool& mempool);
+//! SEQUENTIA: whether the block's witnesses match its coinbase's witness
+//! commitment (no witness at all when it has none), as ContextualCheckBlock
+//! checks them. A rebuilt proposal must pass it: the txid merkle root does not
+//! bind witnesses.
+bool PosProposalWitnessesMatch(const CBlock& block);
 
 /** The outcome of producing one PoS block, for RPC result formatting. */
 struct PosProduceResult {

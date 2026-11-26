@@ -300,7 +300,36 @@ std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact
     // looked-up transactions are exactly the ones the proposer committed to.
     bool mutated = false;
     if (BlockMerkleRoot(*block, &mutated) != block->hashMerkleRoot || mutated) return nullptr;
+    // SEQUENTIA: but only their txids. A transaction with the same txid and
+    // another witness (any witness item a script leaves unconstrained can be
+    // changed by anyone who relays it) passes that root, and a block rebuilt
+    // with it fails `bad-witness-merkle-match`, which would make this member
+    // exclude an honest leader. So the witnesses are checked against the
+    // coinbase's witness commitment, as ContextualCheckBlock checks them, and on
+    // a mismatch the caller fetches the full proposal instead.
+    if (!PosProposalWitnessesMatch(*block)) return nullptr;
     return block;
+}
+
+bool PosProposalWitnessesMatch(const CBlock& block)
+{
+    if (block.vtx.empty()) return false;
+    const int commitpos = GetWitnessCommitmentIndex(block);
+    if (commitpos == NO_WITNESS_COMMITMENT) {
+        // A block without a commitment carries no witness at all.
+        for (const CTransactionRef& tx : block.vtx) {
+            if (tx->HasWitness()) return false;
+        }
+        return true;
+    }
+    const CTransaction& coinbase = *block.vtx[0];
+    if (coinbase.witness.vtxinwit.empty() || coinbase.witness.vtxinwit[0].scriptWitness.stack.size() != 1 ||
+        coinbase.witness.vtxinwit[0].scriptWitness.stack[0].size() != 32) {
+        return false;
+    }
+    uint256 root = BlockWitnessMerkleRoot(block);
+    CHash256().Write(root).Write(coinbase.witness.vtxinwit[0].scriptWitness.stack[0]).Finalize(root);
+    return memcmp(root.begin(), &coinbase.vout[commitpos].scriptPubKey[6], 32) == 0;
 }
 
 bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
@@ -1855,6 +1884,8 @@ int64_t PosProducer::DriveRound()
                               backed->GetHash().GetHex(), height, reject_reason);
                     m_anchor_deferred[parts->leader] = m_parent_tip_seen;
                 } else {
+                    LogPrintf("PoS gossip: proposal %s at height %d is invalid (%s); excluding its leader\n",
+                              backed->GetHash().GetHex(), height, reject_reason);
                     m_excluded.insert(parts->leader);
                     m_candidates.erase(parts->leader);
                 }
