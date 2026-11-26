@@ -41,7 +41,6 @@
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
 #include <wallet/fees.h>
-#include <wallet/receive.h>
 #include <wallet/external_signer_scriptpubkeyman.h>
 
 #include <univalue.h>
@@ -1903,14 +1902,15 @@ void CWallet::RecheckRejectedTransactions()
         //    block confirms the parents a moment later: valid again, never
         //    refused, and in no mempool, so its change stops counting as
         //    trusted. These are the payments whose change the balance trusts
-        //    (CachedTxIsTrusted), so they are the ones kept in the mempool.
+        //    (CachedTxIsTrusted asks the same IsFromMe question), so they are
+        //    the ones kept in the mempool.
         //  - anything whose refusal has just lifted: usually a lock time the
         //    chain has grown past again, after a reorg that lost height.
         // Never one replaced by its own fee bump, even when the bump is out of
         // the mempool too: it is a payment the user has superseded, and handed
         // back first it would be announced and then evicted by the bump.
         if (wtx->mapValue.count("replaced_by_txid")) continue;
-        if (!changed && !CachedTxIsFromMe(*this, *wtx, ISMINE_ALL)) continue;
+        if (!changed && !IsFromMe(*wtx->tx)) continue;
         std::string err_string;
         if (SubmitTxMemoryPoolAndRelay(*wtx, err_string, /*relay=*/true)) ++handed_back;
     }
