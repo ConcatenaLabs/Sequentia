@@ -119,11 +119,11 @@ class PosProposalWitnessTest(BitcoinTestFramework):
             placed = (all(n.getblockcount() == height - 1 for n in self.nodes) and
                       self.nodes[leader].getmempoolentry(v1.hash)["wtxid"] == v1.getwtxid() and
                       all(self.nodes[i].getmempoolentry(v1.hash)["wtxid"] == v2.getwtxid() for i in members))
-            logs = [len(open(self.debug_log(i)).read().splitlines()) for i in range(3)]
+            logs = [len(open(self.debug_log(i), encoding="utf8").read().splitlines()) for i in range(3)]
             self.wait_height(height)
             blk = n0.getblock(n0.getblockhash(height), 2)
             held = [t for t in blk["tx"] if t["txid"] == v1.hash]
-            excluded = [line for i in range(3) for line in open(self.debug_log(i)).read().splitlines()[logs[i]:]
+            excluded = [line for i in range(3) for line in open(self.debug_log(i), encoding="utf8").read().splitlines()[logs[i]:]
                         if "excluding its leader" in line]
             attempts.append((attempt, leader, height, placed, held[0]["hash"] if held else None, len(excluded)))
             self.log.info("attempt %d: leader node %d at height %d, variants placed %s; block holds %s; %d exclusion(s)",
