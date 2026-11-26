@@ -202,7 +202,10 @@ public:
     //! inputs are the second case, not the first: a transaction spending an
     //! output of an unconfirmed parent looks unspendable on its own, and calling
     //! that a rejection would condemn every perfectly good chained payment.
-    virtual std::optional<MempoolRefusal> checkMempoolAccept(const CTransactionRef& tx) = 0;
+    //!
+    //! If accepted is given, it is set to whether the node would take the
+    //! transaction as it stands -- the one answer std::nullopt cannot give.
+    virtual std::optional<MempoolRefusal> checkMempoolAccept(const CTransactionRef& tx, bool* accepted = nullptr) = 0;
 
     //! Transaction is added to memory pool, if the transaction fee is below the
     //! amount specified by max_tx_fee, and broadcast to all peers if relay is set to true.

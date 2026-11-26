@@ -668,12 +668,16 @@ public:
 
     /** Re-derive whether the node refuses this transaction, updating m_rejection.
      *  Returns whether the answer changed. Notifies, and invalidates the caches
-     *  the answer feeds, so both the status and the balance follow it. */
-    bool UpdateTxRejection(CWalletTx& wtx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+     *  the answer feeds, so both the status and the balance follow it.
+     *  If accepted is given, it is set to whether the node was asked and would
+     *  take the transaction into its mempool as it stands. */
+    bool UpdateTxRejection(CWalletTx& wtx, bool* accepted = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /** Ask the node about every transaction that is unconfirmed and not in its
      *  mempool. Rate-limited: this is how a refusal is noticed, and equally how
-     *  it stops being one once the chain no longer justifies it. */
+     *  it stops being one once the chain no longer justifies it. A payment of
+     *  our own that the node would take, and one whose refusal just lifted, are
+     *  handed back to the mempool, parents first. */
     void RecheckRejectedTransactions();
 
     OutputType TransactionChangeType(const std::optional<OutputType>& change_type, const std::vector<CRecipient>& vecSend) const;
