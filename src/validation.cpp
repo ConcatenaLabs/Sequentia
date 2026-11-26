@@ -3106,7 +3106,9 @@ bool CheckTemplateTxScripts(const CTransaction& tx, const CCoinsViewCache& view,
         flags |= SCRIPT_VERIFY_SIMPLICITY_BUDGET4;
     }
     flags = WithRecordsV2For(flags, tip ? tip->nHeight + 1 : 0, params);
-    PrecomputedTransactionData txdata;
+    // ELEMENTS: a taproot signature hash commits to the genesis block, so the
+    // precomputed data needs it, as the mempool's own (MemPoolAccept::Workspace).
+    PrecomputedTransactionData txdata(Params().HashGenesisBlock());
     return CheckInputScripts(tx, state, view, flags, /*cacheSigStore=*/false, /*cacheFullScriptStore=*/false, txdata);
 }
 
