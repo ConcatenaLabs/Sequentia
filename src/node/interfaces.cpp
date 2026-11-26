@@ -658,12 +658,16 @@ public:
         auto it = m_node.mempool->GetIter(txid);
         return it && (*it)->GetCountWithDescendants() > 1;
     }
-    std::optional<interfaces::MempoolRefusal> checkMempoolAccept(const CTransactionRef& tx) override
+    std::optional<interfaces::MempoolRefusal> checkMempoolAccept(const CTransactionRef& tx, bool* accepted) override
     {
+        if (accepted) *accepted = false;
         if (!m_node.chainman || !m_node.mempool) return std::nullopt;
         LOCK(cs_main);
         const MempoolAcceptResult result = m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true);
-        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) return std::nullopt;
+        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+            if (accepted) *accepted = true;
+            return std::nullopt;
+        }
 
         const TxValidationState& state = result.m_state;
         switch (state.GetResult()) {

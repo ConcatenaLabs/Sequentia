@@ -1815,9 +1815,10 @@ bool CWallet::SubmitTxMemoryPoolAndRelay(CWalletTx& wtx, std::string& err_string
     return ret;
 }
 
-bool CWallet::UpdateTxRejection(CWalletTx& wtx)
+bool CWallet::UpdateTxRejection(CWalletTx& wtx, bool* accepted)
 {
     AssertLockHeld(cs_wallet);
+    if (accepted) *accepted = false;
 
     const std::optional<TxRejection> before = wtx.m_rejection;
     std::optional<TxRejection> after;
@@ -1827,7 +1828,7 @@ bool CWallet::UpdateTxRejection(CWalletTx& wtx)
     // and asking would spend a full validation to be told what we know.
     if (!wtx.IsCoinBase() && !wtx.isAbandoned() &&
         GetTxDepthInMainChain(wtx) == 0 && !wtx.InMempool()) {
-        if (auto refusal = chain().checkMempoolAccept(wtx.tx)) {
+        if (auto refusal = chain().checkMempoolAccept(wtx.tx, accepted)) {
             after = TxRejection{refusal->reason, refusal->is_consensus};
         }
     }
@@ -1869,29 +1870,58 @@ void CWallet::RecheckRejectedTransactions()
     m_next_rejection_check = now + REJECTION_RECHECK_SECONDS;
 
     LOCK(cs_wallet);
-    // Payments the node has just stopped refusing, to hand back to it at once.
-    std::vector<std::pair<int64_t, CWalletTx*>> lifted;
+    // Everything unconfirmed that the mempool lacks, or that the node refused
+    // last time. The candidates are few, and normally none: a transaction in a
+    // block or in the mempool is skipped without a validation, so the sweep
+    // costs nothing on a quiet wallet however many payments it has pending.
+    std::vector<std::pair<int64_t, CWalletTx*>> candidates;
     for (auto& item : mapWallet) {
         CWalletTx& wtx = item.second;
-        // The candidates are few, and normally none. A transaction in a block or
-        // in the mempool is skipped without a validation, so the sweep costs
-        // nothing on a quiet wallet.
         if (wtx.IsCoinBase() || wtx.isAbandoned()) continue;
         if (GetTxDepthInMainChain(wtx) != 0) continue;
         if (!wtx.isRejected() && wtx.InMempool()) continue;
-        if (UpdateTxRejection(wtx) && !wtx.isRejected() && !wtx.InMempool()) {
-            lifted.emplace_back(wtx.nOrderPos, &wtx);
-        }
+        candidates.emplace_back(wtx.nOrderPos, &wtx);
     }
-    // A refusal that lifts is usually a lock time the chain has grown past
-    // again: a reorg that loses height -- an anchor reorg -- leaves every recent
-    // payment non-final until then. Waiting for the periodic resend would leave
-    // it in no mempool for hours. Parents first, in the order they were made.
-    std::sort(lifted.begin(), lifted.end());
-    for (const auto& [pos, wtx] : lifted) {
+    // Parents first, in the order they were made, and each handed back before
+    // the next is asked about: a child's test accept then finds its parent in
+    // the mempool, so a whole chain comes back in one sweep.
+    std::sort(candidates.begin(), candidates.end());
+
+    size_t asked{0};
+    size_t handed_back{0};
+    for (const auto& [pos, wtx] : candidates) {
+        if (!wtx->InMempool()) ++asked;
+        bool accepted{false};
+        const bool changed = UpdateTxRejection(*wtx, &accepted);
+        if (!accepted) continue;
+        // The node would take it now, and its mempool lacks it. Two kinds go
+        // back at once rather than waiting for the periodic resend:
+        //  - a payment of our own, whatever became of it. A reorganization that
+        //    puts a block's transactions back in the mempool can trim our
+        //    payments chained on them for the ancestor limit, and the competing
+        //    block confirms the parents a moment later: valid again, never
+        //    refused, and in no mempool, so its change stops counting as
+        //    trusted. These are the payments whose change the balance trusts
+        //    (CachedTxIsTrusted asks the same IsFromMe question), so they are
+        //    the ones kept in the mempool.
+        //  - anything whose refusal has just lifted: usually a lock time the
+        //    chain has grown past again, after a reorg that lost height.
+        // Never one replaced by its own fee bump, even when the bump is out of
+        // the mempool too: it is a payment the user has superseded, and handed
+        // back first it would be announced and then evicted by the bump.
+        if (wtx->mapValue.count("replaced_by_txid")) continue;
+        if (!changed && !IsFromMe(*wtx->tx)) continue;
         std::string err_string;
-        SubmitTxMemoryPoolAndRelay(*wtx, err_string, /*relay=*/true);
+        if (SubmitTxMemoryPoolAndRelay(*wtx, err_string, /*relay=*/true)) ++handed_back;
     }
+    // A hand-back asks for another sweep on the next tick, which catches a
+    // child made before its parent was known to the wallet. A submission that
+    // failed must not: nothing changed, and asking again every second would
+    // turn a lasting failure (a fee over -maxtxfee at today's rate) into a loop.
+    if (handed_back == 0) m_next_rejection_check = now + REJECTION_RECHECK_SECONDS;
+
+    LogPrint(BCLog::MEMPOOL, "%s Mempool recheck: asked about %u missing from the mempool, handed back %u\n",
+             GetDisplayName(), asked, handed_back);
 }
 
 std::set<uint256> CWallet::GetTxConflicts(const CWalletTx& wtx) const
