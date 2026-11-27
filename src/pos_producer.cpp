@@ -854,7 +854,7 @@ void PosProducer::ThreadLoop()
             if (left <= 0) break;
             std::unique_lock<std::mutex> lock(m_mutex);
             if (m_stop) { stop = true; break; }
-            m_cv.wait_for(lock, std::chrono::milliseconds(std::min<int64_t>(left, POS_PROPOSAL_FETCH_ANSWER_MS / 4)),
+            m_cv.wait_for(lock, std::chrono::milliseconds(std::min<int64_t>(left, AnswerMs() / 4)),
                           [this] { return m_stop || m_wake; });
             if (m_stop) { stop = true; break; }
             if (m_wake) { m_wake = false; break; }
@@ -1439,6 +1439,15 @@ int64_t PosProducer::WindowMs() const
     return m_window_override_ms > 0 ? m_window_override_ms : 500 + 25 * (int64_t)g_pos_committee_size;
 }
 
+int64_t PosProducer::AnswerMs() const
+{
+    // A quarter of the collection window, so that a silent first announcer
+    // leaves time to ask the next one, and at least three more, before the
+    // window closes; never under 150 ms (a round trip across the network) nor
+    // over 1,000 ms.
+    return std::clamp<int64_t>(WindowMs() / 4, POS_PROPOSAL_FETCH_ANSWER_MIN_MS, POS_PROPOSAL_FETCH_ANSWER_MAX_MS);
+}
+
 int64_t PosProducer::RoundMs() const
 {
     return m_round_override_ms > 0 ? m_round_override_ms : 700 + 35 * (int64_t)g_pos_committee_size;
@@ -1693,14 +1702,30 @@ bool PosProducer::ProposeGossip(const CKey& leader_key)
         // bad-cb-multiple). Cheap checks (VRF, leader signature) pass, so it is
         // recorded as a candidate; lazy validation must reject it at sign time and
         // exclude the leader.
+        // The second coinbase differs from the first and the commitments are
+        // made again, so the body matches its header: the block is invalid in
+        // its content (bad-cb-multiple), the leader's fault, not a body its
+        // header does not bind. It replaces the genuine one among this node's
+        // candidates, so the node serves it to members that ask for its body.
         auto bad = std::make_shared<CBlock>(*block);
-        bad->vtx.push_back(bad->vtx[0]);
-        bad->hashMerkleRoot = BlockMerkleRoot(*bad);
+        CMutableTransaction second{*bad->vtx[0]};
+        second.vin[0].scriptSig << OP_TRUE;
+        bad->vtx.push_back(MakeTransactionRef(std::move(second)));
+        if (GetWitnessCommitmentIndex(*bad) != NO_WITNESS_COMMITMENT) {
+            node::RegenerateCommitments(*bad, m_chainman);
+        } else {
+            bad->hashMerkleRoot = BlockMerkleRoot(*bad);
+        }
         bad->proof.solution = CScript();
         std::vector<unsigned char> sig_bad;
         if (leader_key.Sign(bad->GetHash(), sig_bad)) {
             bad->proof.solution = CScript() << sig_bad;
             if (!record(*bad)) return true;
+            {
+                std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                m_candidates.erase(leader_key.GetPubKey());
+                RecordCandidate(bad, leader_key.GetPubKey(), own_beta, height);
+            }
             LogPrintf("PoS gossip: BYZANTINE proposing invalid block %s at height %d\n", bad->GetHash().GetHex(), height);
             FloodCompactProposal(*bad);
             return true;
@@ -2206,16 +2231,21 @@ static size_t PosFetchMarksPerPeer()
     return std::max<size_t>(16, 4 * (size_t)std::max(1, g_pos_committee_size));
 }
 
-void PosProducer::DropProposalMark(int64_t peer, const uint256& hash)
+bool PosProducer::DropProposalMark(int64_t peer, const uint256& hash)
 {
     // m_gossip_mutex held.
     auto it = m_fetches.find(hash);
-    if (it == m_fetches.end()) return;
+    if (it == m_fetches.end()) return false;
     ProposalFetch& f = it->second;
     f.sources.erase(std::remove(f.sources.begin(), f.sources.end(), peer), f.sources.end());
     f.asked.erase(peer);
+    const bool was_pending = f.pending == peer && !f.done;
     if (f.pending == peer) f.pending.reset();
-    if (f.sources.empty()) m_fetches.erase(it);
+    if (f.sources.empty()) {
+        m_fetches.erase(it);
+        return false;
+    }
+    return was_pending;
 }
 
 void PosProducer::NoteProposalSource(const uint256& hash, const uint256& parent, int64_t peer)
@@ -2223,19 +2253,25 @@ void PosProducer::NoteProposalSource(const uint256& hash, const uint256& parent,
     // Called before anything about the message is checked, so a peer can only
     // ever add marks of its own and push out its own oldest ones: one that floods
     // announcements removes nothing another peer announced.
-    std::lock_guard<std::mutex> lock(m_gossip_mutex);
-    auto [it, inserted] = m_fetches.try_emplace(hash);
-    ProposalFetch& f = it->second;
-    if (inserted) f.parent = parent;
-    if (std::find(f.sources.begin(), f.sources.end(), peer) != f.sources.end()) return;
-    f.sources.push_back(peer);
-    std::deque<uint256>& marks = m_source_marks[peer];
-    marks.push_back(hash);
-    while (marks.size() > PosFetchMarksPerPeer()) {
-        const uint256 oldest = marks.front();
-        marks.pop_front();
-        DropProposalMark(peer, oldest);
+    // A request pending on a mark the peer pushes out moves on to the next
+    // announcer, as when the peer disconnects (ForgetProposalPeer).
+    std::vector<uint256> moved;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        auto [it, inserted] = m_fetches.try_emplace(hash);
+        ProposalFetch& f = it->second;
+        if (inserted) f.parent = parent;
+        if (std::find(f.sources.begin(), f.sources.end(), peer) != f.sources.end()) return;
+        f.sources.push_back(peer);
+        std::deque<uint256>& marks = m_source_marks[peer];
+        marks.push_back(hash);
+        while (marks.size() > PosFetchMarksPerPeer()) {
+            const uint256 oldest = marks.front();
+            marks.pop_front();
+            if (DropProposalMark(peer, oldest)) moved.push_back(oldest);
+        }
     }
+    for (const uint256& h : moved) FetchProposal(h);
 }
 
 void PosProducer::ForgetProposalPeer(int64_t peer)
@@ -2246,9 +2282,7 @@ void PosProducer::ForgetProposalPeer(int64_t peer)
         auto marks = m_source_marks.find(peer);
         if (marks == m_source_marks.end()) return;
         for (const uint256& hash : marks->second) {
-            auto it = m_fetches.find(hash);
-            if (it != m_fetches.end() && it->second.pending == peer && !it->second.done) moved.push_back(hash);
-            DropProposalMark(peer, hash);
+            if (DropProposalMark(peer, hash)) moved.push_back(hash);
         }
         m_source_marks.erase(marks);
     }
@@ -2266,7 +2300,7 @@ void PosProducer::FetchProposal(const uint256& hash)
         if (it == m_fetches.end()) return;
         ProposalFetch& f = it->second;
         if (f.done) return;
-        if (f.pending && now_ms - f.pending_ms < POS_PROPOSAL_FETCH_ANSWER_MS) return;
+        if (f.pending && now_ms - f.pending_ms < AnswerMs()) return;
         f.pending.reset();
         for (const int64_t s : f.sources) {
             const auto a = f.asked.find(s);
@@ -2305,7 +2339,7 @@ void PosProducer::RetryProposalFetches()
         const int64_t now_ms = GetTimeMillis();
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
         for (const auto& [hash, f] : m_fetches) {
-            if (!f.done && f.pending && now_ms - f.pending_ms >= POS_PROPOSAL_FETCH_ANSWER_MS) late.push_back(hash);
+            if (!f.done && f.pending && now_ms - f.pending_ms >= AnswerMs()) late.push_back(hash);
         }
     }
     for (const uint256& hash : late) FetchProposal(hash);

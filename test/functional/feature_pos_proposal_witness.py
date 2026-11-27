@@ -45,6 +45,13 @@ heavy_block_signed: an honest block built to the weight limit is still signed.
 bad_signature_keeps_the_fetch_open: a body matching the header but with one byte of the staging signature
   changed is refused, and the member, which lacks the proposal's transaction, still fetches the body from an
   honest announcer and signs.
+silent_announcer_drops_its_mark: a cut-off member holding the other witness asks the first announcer of the
+  compact proposal, which stays silent and then floods announcements of its own until its mark for the proposal
+  is pushed out; the request pending on it moves on to the honest announcer at once, and the member signs.
+silent_first_announcer, silent_first_announcer_at_20: the same without the flood. The member waits a quarter of
+  the collection window for the silent announcer (at least 150 ms), asks the honest one, and the first block it
+  signs at that height is the leader's, at a 3-member committee's timings and at a 20-member one's (window
+  1,000 ms, round 1,400 ms, set with -poswindowms and -posroundms on these three nodes).
 stale_parent: a member about to sign the leader's proposal finds its parent is no longer the tip (forced with
   -posgossipstaleonce): nothing was judged, so it drops the proposal as stale and excludes nobody, and with the
   third node cut off the height is certified on a block the same leader proposed, signed by that member.
@@ -205,7 +212,9 @@ class PosProposalWitnessTest(BitcoinTestFramework):
                                                   "flood_keeps_the_fetch_book", "solution_appended_small",
                                                   "solution_appended_large", "padded_r", "padded_s", "signature_73_bytes",
                                                   "high_s", "padded_signature_reaches_the_round",
-                                                  "heavy_block_signed", "bad_signature_keeps_the_fetch_open"]:
+                                                  "heavy_block_signed", "silent_announcer_drops_its_mark",
+                                                  "silent_first_announcer", "silent_first_announcer_at_20",
+                                                  "bad_signature_keeps_the_fetch_open"]:
             self.log.info(case)
             getattr(self, case)()
 
@@ -510,6 +519,113 @@ class PosProposalWitnessTest(BitcoinTestFramework):
                 continue
             assert_equal(excluded, [])
             assert took is not None, "the member did not sign the leader's block after the flood: %s" % (row,)
+            return
+        raise AssertionError("the case was not reached: %s" % attempts)
+
+    def silent_announcer_drops_its_mark(self):
+        self.silent_announcer(flood_own_marks=True)
+
+    def silent_first_announcer(self):
+        self.silent_announcer(flood_own_marks=False)
+
+    def silent_first_announcer_at_20(self):
+        timing = ["-poswindowms=1000", "-posroundms=1400"]   # 500 + 25 x 20 and 700 + 35 x 20
+        for i in range(3):
+            self.restart_node(i, self.extra_args[i] + timing)
+        self.connect_nodes(0, 1)
+        self.connect_nodes(0, 2)
+        self.connect_nodes(1, 2)
+        self.wait_height(self.nodes[0].getblockcount() + 1)
+        try:
+            self.silent_announcer(flood_own_marks=False)
+        finally:
+            for i in range(3):
+                self.restart_node(i, self.extra_args[i])
+            self.connect_nodes(0, 1)
+            self.connect_nodes(0, 2)
+            self.connect_nodes(1, 2)
+            self.wait_height(self.nodes[0].getblockcount() + 1)
+
+    def silent_announcer(self, flood_own_marks):
+        """A cut-off member holding the other witness hears the compact proposal first from an announcer that never
+        answers, then from an honest one. With `flood_own_marks` the silent one then announces 20 made-up proposals
+        of its own, more than the marks a peer may hold. The first block the member signs at that height must be
+        the leader's."""
+        attempts = []
+        for attempt in range(3):
+            v1, v2 = self.variants(*self.fund())
+            h0 = self.nodes[0].getblockcount()
+            self.wait_height(h0 + 1)          # just after a block: SPACING seconds before the next one
+            leader, height = self.leader_of_next()
+            cut = [i for i in range(3) if i != leader][0]
+            pairs = [(min(cut, j), max(cut, j)) for j in range(3) if j != cut]
+            for a, b in pairs:
+                self.disconnect_nodes(a, b)
+            relay_in = self.nodes[leader].add_p2p_connection(PosRelay())
+            silent = self.nodes[cut].add_p2p_connection(PosRelay())
+            honest = self.nodes[cut].add_p2p_connection(PosRelay())
+            self.nodes[leader].sendrawtransaction(v1.serialize().hex())
+            self.nodes[cut].sendrawtransaction(v2.serialize().hex())   # its rebuild will not match
+            logs = [len(self.log_lines(i)) for i in range(3)]
+
+            def proposed():
+                for line in self.log_lines(leader)[logs[leader]:]:
+                    m = re.search(r"proposing block ([0-9a-f]{64}) at height %d" % height, line)
+                    if m:
+                        return m.group(1)
+                return None
+            self.wait_until(lambda: proposed() is not None, timeout=60)
+            bhash = proposed()
+            relay_in.send_message(RAW["getposprop"](bytes.fromhex(bhash)[::-1]))
+            self.wait_until(lambda: relay_in.got.get("posproposal"), timeout=30)
+            genuine = relay_in.got["posproposal"][-1]
+            self.wait_until(lambda: any(genuine[36:68] in c for c in relay_in.got.get("poscmpctprop", [])), timeout=30)
+            compact = [c for c in relay_in.got["poscmpctprop"] if genuine[36:68] in c][-1]
+            honest.answer = genuine
+            t0 = time.time()
+            silent.send_message(RAW["poscmpctprop"](compact))
+            silent.sync_with_ping()
+            honest.send_message(RAW["poscmpctprop"](compact))
+            honest.sync_with_ping()
+            if flood_own_marks:
+                for k in range(20):
+                    silent.send_message(RAW["poscmpctprop"](compact[:4] + hashlib.sha256(b"own %d" % k).digest() + compact[36:]))
+                silent.sync_with_ping()
+
+            def new_lines(i):
+                return self.log_lines(i)[logs[i]:]
+
+            def first_signed():
+                for line in new_lines(cut):
+                    m = re.search(r"signed ([0-9a-f]{64}) at height %d" % height, line)
+                    if m:
+                        return m.group(1)
+                return None
+            try:
+                self.wait_until(lambda: first_signed() is not None, timeout=15)
+            except AssertionError:
+                pass
+            took = time.time() - t0
+            first = first_signed()
+            placed = self.nodes[cut].getmempoolentry(v1.hash)["wtxid"] == v2.getwtxid()
+            excluded = [line for line in new_lines(cut) if "excluding its leader" in line]
+            row = (attempt, leader, cut, height, placed, len(silent.got.get("getposprop", [])),
+                   len(honest.got.get("getposprop", [])), first == bhash, round(took, 2), len(excluded))
+            attempts.append(row)
+            self.log.info("    attempt %d: leader node %d, cut-off member node %d, height %d, placed %s; body asked of "
+                          "the silent announcer %d, of the honest one %d; the first block it signed is the leader's "
+                          "%s (%s s after the first announcement); exclusions %d", *row)
+            for peer in (relay_in, silent, honest):
+                peer.peer_disconnect()
+            for a, b in pairs:
+                self.connect_nodes(a, b)
+            self.wait_height(height)
+            self.sync_blocks()
+            if not placed:
+                continue
+            assert_equal(excluded, [])
+            assert honest.got.get("getposprop"), row
+            assert_equal(first, bhash)
             return
         raise AssertionError("the case was not reached: %s" % attempts)
 

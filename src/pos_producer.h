@@ -234,7 +234,7 @@ public:
     void NoteProposalSource(const uint256& hash, const uint256& parent, int64_t peer);
     //! Ask for the body of `hash` from the first announcer that may be asked
     //! (each at most once per POS_PROPOSAL_FETCH_RETRY_SECONDS), unless the body
-    //! is in or a request made less than POS_PROPOSAL_FETCH_ANSWER_MS ago is
+    //! is in or a request made less than AnswerMs() ago is
     //! still unanswered.
     void FetchProposal(const uint256& hash);
     //! The body `peer` sent for `hash` was refused: ask the next announcer now.
@@ -293,6 +293,9 @@ private:
     //! Proposal collection window and round length (ms): local liveness timings
     //! scaled with the committee size, or the -poswindowms/-posroundms overrides.
     int64_t WindowMs() const;
+    //! How long a body request waits for its answer (ms): a quarter of the
+    //! collection window, at least 150 ms and at most 1,000 ms.
+    int64_t AnswerMs() const;
     int64_t RoundMs() const;
     //! How many rounds a collection runs before it is abandoned. m_gossip_mutex held.
     int RoundsPerCollection() const;
@@ -431,7 +434,9 @@ private:
     //! ever remove its own marks (at most PosFetchMarksPerPeer()).
     std::map<int64_t, std::deque<uint256>> m_source_marks;
     //! Remove `peer` as a source of `hash`; the entry goes when no source is left.
-    void DropProposalMark(int64_t peer, const uint256& hash);
+    //! Whether a request pending on `peer` for `hash` was dropped with the mark,
+    //! so that the caller asks the next announcer. m_gossip_mutex held.
+    bool DropProposalMark(int64_t peer, const uint256& hash);
     //! Ask the due announcers again whose answers are late (the thread loop).
     void RetryProposalFetches();
     std::set<uint256> m_seen_shares;                   //!< share dedup, by hash of the whole share
@@ -503,8 +508,10 @@ private:
 /** Seconds before a proposal body asked for and not received is asked for again. */
 static constexpr int64_t POS_PROPOSAL_FETCH_RETRY_SECONDS = 10;
 //! SEQUENTIA: how long a body request waits for its answer before the next
-//! announcer is asked.
-static constexpr int64_t POS_PROPOSAL_FETCH_ANSWER_MS = 1000;
+//! announcer is asked: a quarter of the collection window, within these bounds
+//! (PosProducer::AnswerMs).
+static constexpr int64_t POS_PROPOSAL_FETCH_ANSWER_MIN_MS = 150;
+static constexpr int64_t POS_PROPOSAL_FETCH_ANSWER_MAX_MS = 1000;
 
 /** For a node without a producer: whether this exact certificate (block hash
  *  and certificate) was already judged, so it is not verified again. */

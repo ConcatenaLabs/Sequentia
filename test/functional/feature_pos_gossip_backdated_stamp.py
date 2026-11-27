@@ -110,6 +110,11 @@ class PosGossipBackdatedStampTest(BitcoinTestFramework):
             return len(self.attacker_first(texts)) >= want_first
         self.wait_until(enough, timeout=300)
         first = self.attacker_first(texts)
+        # The honest members log their verdict on the last of those heights as
+        # they settle it: read the logs again once every one of them is past it.
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() > max(first) for i in HONEST), timeout=120)
+        texts.update({i: self.log_from(i, marks[i]) for i in range(COMMITTEE)})
+        first = [h for h in self.attacker_first(texts) if h <= max(first)]
         self.log.info("%s: node%d ranked first at heights %s" % (name, ATTACKER, first))
         return texts, first
 
@@ -174,3 +179,7 @@ class PosGossipBackdatedStampTest(BitcoinTestFramework):
                honest[0].getblock(honest[0].getblockhash(h))["time"] == stamped[h]]
         self.log.info("floor: %d proposals stamped at the floor, none refused; node%d's certified at %s of %s" %
                       (len(stamped), ATTACKER, won, first))
+
+
+if __name__ == '__main__':
+    PosGossipBackdatedStampTest().main()
