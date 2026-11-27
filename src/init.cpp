@@ -1232,20 +1232,6 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         }
     }
 
-    // SEQUENTIA: switches that weaken a committee member's own checks, for tests
-    // only: refused on every named network (the testnet and the mainnet among
-    // them), so they work on regtest and the custom chains built on it alone.
-    const std::string& chain_name = chainparams.NetworkIDString();
-    const bool named_network = chain_name == CBaseChainParams::MAIN || chain_name == CBaseChainParams::SEQUENTIA ||
-                               chain_name == CBaseChainParams::TESTNET || chain_name == CBaseChainParams::SIGNET ||
-                               chain_name == CBaseChainParams::LIQUID1 || chain_name == CBaseChainParams::LIQUID1TEST ||
-                               chain_name == CBaseChainParams::LIQUIDTESTNET;
-    for (const char* sw : {"-posgossipnobodycheck", "-posgossipstaleonce"}) {
-        if (args.IsArgSet(sw) && named_network) {
-            return InitError(strprintf(Untranslated("%s is for tests only and is refused on the %s chain"), sw,
-                                       chainparams.NetworkIDString()));
-        }
-    }
     fRequireStandard = !args.GetBoolArg("-acceptnonstdtxn", !chainparams.RequireStandard());
     if (!chainparams.IsTestChain() && !fRequireStandard) {
         return InitError(strprintf(Untranslated("acceptnonstdtxn is not currently supported for %s chain"), chainparams.NetworkIDString()));
