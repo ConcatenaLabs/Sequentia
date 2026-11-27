@@ -30,6 +30,12 @@ flood_keeps_the_fetch_book: a cut-off member holding the other witness hears the
   distinct made-up parents. The flood removes nothing the other two announced: when the silent announcer's
   second is up, the member asks the honest one and signs. Before, a clear-all at 1,000 entries left it nobody
   to ask.
+solution_appended_small, solution_appended_large: the leader's full proposal with bytes appended to its staging
+  solution (outside the block hash, inside its weight; the large one past the weight limit) is the sender's
+  fault: refused and penalised, nobody excluded, the genuine one signed.
+bad_signature_keeps_the_fetch_open: a body matching the header but with one byte of the staging signature
+  changed is refused, and the member, which lacks the proposal's transaction, still fetches the body from an
+  honest announcer and signs.
 stale_parent: a member about to sign the leader's proposal finds its parent is no longer the tip (forced with
   -posgossipstaleonce): nothing was judged, so it drops the proposal as stale and excludes nobody, and with the
   third node cut off the height is certified on a block the same leader proposed, signed by that member.
@@ -114,6 +120,7 @@ class PosProposalWitnessTest(BitcoinTestFramework):
             "-con_max_block_sig_size=4000", "-signblockscript=51",
             "-initialfreecoins=1000000000000", "-con_connect_genesis_outputs=1", "-con_blocksubsidy=0",
             "-anyonecanspendaremine=1", "-acceptnonstdtxn=1", "-validatepegin=0", "-debug=net", "-debug=validation",
+            "-con_maxblockweight=400000",   # the testnet's weight, so that appended solution bytes can pass it
         ] + ["-staker=%s:1" % pub for _, pub in self.stakers]
         self.extra_args = [common + ["-posproducer", "-posproducerkey=%s" % self.stakers[i][0]] for i in range(3)]
 
@@ -183,7 +190,8 @@ class PosProposalWitnessTest(BitcoinTestFramework):
         only = os.environ.get("POS_CASES")
         for case in only.split(",") if only else ["mempool_variant", "forged_witness", "forged_transactions",
                                                   "second_lock", "first_announcer_lies", "stale_parent",
-                                                  "flood_keeps_the_fetch_book"]:
+                                                  "flood_keeps_the_fetch_book", "solution_appended_small",
+                                                  "solution_appended_large", "bad_signature_keeps_the_fetch_open"]:
             self.log.info(case)
             getattr(self, case)()
 
@@ -266,8 +274,11 @@ class PosProposalWitnessTest(BitcoinTestFramework):
             # Nothing of the forged body is relayed: no compact proposal carrying the leader's header (its merkle
             # root, bytes 36 to 68 of the body) leaves the member before the genuine body reaches it.
             relayed_forged = len([c for c in relay_out.got.get("poscmpctprop", []) if genuine[36:68] in c])
-            relay_out.send_message(RAW["posproposal"](genuine))
-            relay_out.sync_with_ping()
+            if not second_lock:
+                relay_out.send_message(RAW["posproposal"](genuine))
+                relay_out.sync_with_ping()
+            # With the check switched off the genuine body is never sent unasked: only the round's fetch again, to
+            # the relay that answers with it, can bring it.
 
             def new_lines():
                 return self.log_lines(cut)[logs[cut]:]
@@ -485,6 +496,180 @@ class PosProposalWitnessTest(BitcoinTestFramework):
                 continue
             assert_equal(excluded, [])
             assert took is not None, "the member did not sign the leader's block after the flood: %s" % (row,)
+            return
+        raise AssertionError("the case was not reached: %s" % attempts)
+
+    @staticmethod
+    def header_parts(body, compact):
+        """Split a full proposal into (header before the proof's solution, solution, the rest): the header is the
+        common prefix of the full and the compact proposal; it ends with the challenge and the solution."""
+        def compact_size(b, i):
+            n = b[i]
+            if n < 253:
+                return n, i + 1
+            if n == 253:
+                return int.from_bytes(b[i + 1:i + 3], "little"), i + 3
+            return int.from_bytes(b[i + 1:i + 5], "little"), i + 5
+        for fixed in (76, 80, 112, 116):
+            try:
+                n, i = compact_size(body, fixed)
+                j = i + n                                   # past the challenge
+                m, k = compact_size(body, j)
+                end = k + m                                 # past the solution
+            except IndexError:
+                continue
+            if body[:end] == compact[:end] and compact[end:end + 60] == body[end + 1:end + 61]:
+                return body[:j], body[k:end], body[end:]
+        raise AssertionError("could not find the header's solution")
+
+    @staticmethod
+    def with_solution(prefix, solution, rest):
+        n = len(solution)
+        size = bytes([n]) if n < 253 else (b"\xfd" + n.to_bytes(2, "little") if n < 65536 else b"\xfe" + n.to_bytes(4, "little"))
+        return prefix + size + solution + rest
+
+    def solution_appended_small(self):
+        self.altered_header_body(lambda prefix, sol, rest: self.with_solution(prefix, sol + b"\x00", rest))
+
+    def solution_appended_large(self):
+        self.altered_header_body(lambda prefix, sol, rest: self.with_solution(prefix, sol + b"\x00" * 450_000, rest))
+
+    def altered_header_body(self, alter):
+        """The leader's full proposal with its staging solution altered, sent unasked to a cut-off member, then the
+        genuine one: the sender is penalised, nobody excluded, the genuine one signed."""
+        attempts = []
+        for attempt in range(3):
+            v1, v2 = self.variants(*self.fund())
+            h0 = self.nodes[0].getblockcount()
+            self.wait_height(h0 + 1)
+            leader, height = self.leader_of_next()
+            cut = [i for i in range(3) if i != leader][0]
+            pairs = [(min(cut, j), max(cut, j)) for j in range(3) if j != cut]
+            for a, b in pairs:
+                self.disconnect_nodes(a, b)
+            relay_in = self.nodes[leader].add_p2p_connection(PosRelay())
+            relay_out = self.nodes[cut].add_p2p_connection(PosRelay())
+            self.nodes[leader].sendrawtransaction(v1.serialize().hex())
+            logs = [len(self.log_lines(i)) for i in range(3)]
+
+            def proposed():
+                for line in self.log_lines(leader)[logs[leader]:]:
+                    m = re.search(r"proposing block ([0-9a-f]{64}) at height %d" % height, line)
+                    if m:
+                        return m.group(1)
+                return None
+            self.wait_until(lambda: proposed() is not None, timeout=60)
+            bhash = proposed()
+            relay_in.send_message(RAW["getposprop"](bytes.fromhex(bhash)[::-1]))
+            self.wait_until(lambda: relay_in.got.get("posproposal"), timeout=30)
+            genuine = relay_in.got["posproposal"][-1]
+            self.wait_until(lambda: any(genuine[36:68] in c for c in relay_in.got.get("poscmpctprop", [])), timeout=30)
+            compact = [c for c in relay_in.got["poscmpctprop"] if genuine[36:68] in c][-1]
+            prefix, sol, rest = self.header_parts(genuine, compact)
+            altered = alter(prefix, sol, rest)
+            placed = altered != genuine
+            relay_out.send_message(RAW["posproposal"](altered))
+            relay_out.sync_with_ping(timeout=60)
+            relay_out.send_message(RAW["posproposal"](genuine))
+            relay_out.sync_with_ping()
+
+            def new_lines():
+                return self.log_lines(cut)[logs[cut]:]
+
+            def signed():
+                return any("signed %s at height %d" % (bhash, height) in line for line in new_lines())
+            try:
+                self.wait_until(lambda: signed() or any("excluding its leader" in line for line in new_lines()), timeout=30)
+            except AssertionError:
+                pass
+            time.sleep(1)
+            penalised = [line for line in new_lines() if "Misbehaving" in line and "invalid posproposal" in line]
+            excluded = [line for line in new_lines() if "excluding its leader" in line]
+            row = (attempt, leader, cut, height, len(sol), len(altered) - len(genuine), len(penalised), len(excluded),
+                   signed())
+            attempts.append(row)
+            self.log.info("    attempt %d: leader node %d, cut-off member node %d, height %d; solution of %d bytes, %d "
+                          "appended; sender penalised %d, exclusions %d, leader's block signed %s", *row)
+            relay_in.peer_disconnect()
+            relay_out.peer_disconnect()
+            for a, b in pairs:
+                self.connect_nodes(a, b)
+            self.wait_height(height)
+            self.sync_blocks()
+            if not placed:
+                continue
+            assert_equal(excluded, [])
+            assert penalised, row
+            assert signed(), row
+            return
+        raise AssertionError("the case was not reached: %s" % attempts)
+
+    def bad_signature_keeps_the_fetch_open(self):
+        attempts = []
+        for attempt in range(3):
+            v1, v2 = self.variants(*self.fund())
+            h0 = self.nodes[0].getblockcount()
+            self.wait_height(h0 + 1)
+            leader, height = self.leader_of_next()
+            cut = [i for i in range(3) if i != leader][0]
+            pairs = [(min(cut, j), max(cut, j)) for j in range(3) if j != cut]
+            for a, b in pairs:
+                self.disconnect_nodes(a, b)
+            relay_in = self.nodes[leader].add_p2p_connection(PosRelay())
+            forger = self.nodes[cut].add_p2p_connection(PosRelay())
+            honest = self.nodes[cut].add_p2p_connection(PosRelay())
+            self.nodes[leader].sendrawtransaction(v1.serialize().hex())   # the cut-off member never gets it
+            logs = [len(self.log_lines(i)) for i in range(3)]
+
+            def proposed():
+                for line in self.log_lines(leader)[logs[leader]:]:
+                    m = re.search(r"proposing block ([0-9a-f]{64}) at height %d" % height, line)
+                    if m:
+                        return m.group(1)
+                return None
+            self.wait_until(lambda: proposed() is not None, timeout=60)
+            bhash = proposed()
+            relay_in.send_message(RAW["getposprop"](bytes.fromhex(bhash)[::-1]))
+            self.wait_until(lambda: relay_in.got.get("posproposal"), timeout=30)
+            genuine = relay_in.got["posproposal"][-1]
+            self.wait_until(lambda: any(genuine[36:68] in c for c in relay_in.got.get("poscmpctprop", [])), timeout=30)
+            compact = [c for c in relay_in.got["poscmpctprop"] if genuine[36:68] in c][-1]
+            prefix, sol, rest = self.header_parts(genuine, compact)
+            bad = sol[:-1] + bytes([sol[-1] ^ 1])                 # one byte of the signature changed
+            forged = self.with_solution(prefix, bad, rest)
+            honest.answer = genuine
+            placed = v1.hash not in self.nodes[cut].getrawmempool()
+            forger.send_message(RAW["posproposal"](forged))
+            forger.sync_with_ping()
+            t0 = time.time()
+            honest.send_message(RAW["poscmpctprop"](compact))
+            honest.sync_with_ping()
+
+            def new_lines():
+                return self.log_lines(cut)[logs[cut]:]
+
+            def signed():
+                return any("signed %s at height %d" % (bhash, height) in line for line in new_lines())
+            try:
+                self.wait_until(signed, timeout=8)
+                took = time.time() - t0
+            except AssertionError:
+                took = None
+            penalised = [line for line in new_lines() if "Misbehaving" in line and "invalid posproposal" in line]
+            row = (attempt, leader, cut, height, placed, len(penalised), len(honest.got.get("getposprop", [])), took)
+            attempts.append(row)
+            self.log.info("    attempt %d: leader node %d, cut-off member node %d, height %d, member lacks the tx %s; "
+                          "forger penalised %d; body asked of the honest announcer %d; signed after %s s", *row)
+            for peer in (relay_in, forger, honest):
+                peer.peer_disconnect()
+            for a, b in pairs:
+                self.connect_nodes(a, b)
+            self.wait_height(height)
+            self.sync_blocks()
+            if not placed:
+                continue
+            assert penalised, row
+            assert took is not None, "the member did not fetch and sign after the forged body: %s" % (row,)
             return
         raise AssertionError("the case was not reached: %s" % attempts)
 

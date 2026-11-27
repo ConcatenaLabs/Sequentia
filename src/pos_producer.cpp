@@ -2289,6 +2289,16 @@ void PosProducer::RetryProposalFetches()
 
 PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& block)
 {
+    // SEQUENTIA: the order of what follows. A body for a certified hash is
+    // checked against its header and connected. Otherwise: a proposal already
+    // seen is ignored; one that does not build on the tip is ignored; then every
+    // check of what a sender can alter (the body against the header, the
+    // staging solution's form, the challenge's form, the staker, the VRF, the
+    // leader's signature), each failure the sender's fault (Invalid); then the
+    // leader's own content (equivocation, timestamp). Only a proposal that passed
+    // every check a sender can fail is marked seen and its fetch done, so nothing
+    // unchecked ever blocks the genuine body, and only then is it kept as a
+    // candidate and relayed.
     const uint256 hash = block->GetHash();
     // A body arriving for a block we hold a quorum certificate for (3A): it
     // is not a round candidate — attach the certificate and connect it. The
@@ -2315,6 +2325,20 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
                 const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
                 if (pindex && (pindex->nStatus & BLOCK_HAVE_DATA)) return PosGossipAction::Ignore;
             }
+            // The same check as for a proposal: a body its header does not bind is
+            // its sender's fault, and costs no block-acceptance attempt.
+            bool segwit_active;
+            {
+                LOCK(cs_main);
+                const CBlockIndex* parent = m_chainman.m_blockman.LookupBlockIndex(block->hashPrevBlock);
+                segwit_active = DeploymentActiveAfter(parent ? parent : m_chainman.ActiveChain().Tip(),
+                                                      m_chainparams.GetConsensus(), Consensus::DEPLOYMENT_SEGWIT);
+            }
+            if (const std::optional<std::string> fault = PosProposalBodyFault(*block, segwit_active)) {
+                LogPrintf("PoS gossip: body for certified block %s refused: it does not match its header (%s); the sender is at fault\n",
+                          hash.GetHex(), *fault);
+                return PosGossipAction::Invalid;
+            }
             auto full = std::make_shared<CBlock>(*block);
             full->proof.solution = cert_header.proof.solution;
             if (m_chainman.ProcessNewBlock(m_chainparams, full, /*force_processing=*/true, nullptr)) {
@@ -2324,19 +2348,25 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             return PosGossipAction::Ignore;
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (m_seen_proposals.count(PosGossipContentId(*block))) return PosGossipAction::Ignore; // already seen
+    }
+    CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = m_chainman.ActiveChain().Tip();
+    }
+    if (!tip) return PosGossipAction::Ignore;
+    if (block->hashPrevBlock != tip->GetBlockHash()) return PosGossipAction::Ignore; // not on our tip (benign race)
     // SEQUENTIA: a body that does not match its own signed header is its
     // sender's fault, never the leader's: the leader signed the header, which
     // binds the body through the merkle root and, through the coinbase, the
-    // witness commitment. Checked before the proposal is marked seen or kept as
-    // a candidate, so such a body excludes nobody and leaves the genuine one,
-    // which has the same content id, to be taken when it arrives.
+    // witness commitment. Its parent is the tip, so the activation state is the
+    // one the block is judged under.
     {
-        bool segwit_active;
-        {
-            LOCK(cs_main);
-            segwit_active = DeploymentActiveAfter(m_chainman.ActiveChain().Tip(), m_chainparams.GetConsensus(),
-                                                  Consensus::DEPLOYMENT_SEGWIT);
-        }
+        const bool segwit_active = WITH_LOCK(cs_main, return DeploymentActiveAfter(tip, m_chainparams.GetConsensus(),
+                                                                                Consensus::DEPLOYMENT_SEGWIT));
         // -posgossipnobodycheck (tests only) skips this check, so that the second
         // lock on the same door, in DriveRound, can be shown to hold alone.
         static const bool skip_body_check = gArgs.GetBoolArg("-posgossipnobodycheck", false);
@@ -2346,26 +2376,10 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
             return PosGossipAction::Invalid;
         }
     }
-    {
-        std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (auto f = m_fetches.find(hash); f != m_fetches.end()) {
-            f->second.done = true;
-            f->second.pending.reset();
-        }
-        if (!m_seen_proposals.insert(PosGossipContentId(*block)).second) return PosGossipAction::Ignore; // already seen
-        if (m_seen_proposals.size() > 20000) m_seen_proposals.clear();
-    }
     // A posproposal that is not even the BLS committee form is malformed: no
     // honest node would originate or relay it.
     auto parts = ParsePosBlockChallenge(block->proof.challenge);
     if (!parts || !parts->is_bls) return PosGossipAction::Invalid;
-    CBlockIndex* tip;
-    {
-        LOCK(cs_main);
-        tip = m_chainman.ActiveChain().Tip();
-    }
-    if (!tip) return PosGossipAction::Ignore;
-    if (block->hashPrevBlock != tip->GetBlockHash()) return PosGossipAction::Ignore; // not on our tip (benign race)
     const int height = tip->nHeight + 1;
     // The leader must be a registered staker and its VRF proof must verify
     // (objective: an honest relayer checked this, so a failure means the sender
@@ -2404,9 +2418,24 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
         CScript::const_iterator pc = block->proof.solution.begin();
         opcodetype op;
         std::vector<unsigned char> leader_sig;
+        // SEQUENTIA: exactly that one push, nothing after it. The solution is
+        // outside the block hash but inside its weight, so bytes a relay appended
+        // could otherwise push the leader's block past the weight limit.
         if (!block->proof.solution.GetOp(pc, op, leader_sig) || leader_sig.empty() ||
-            !parts->leader.Verify(hash, leader_sig)) {
+            pc != block->proof.solution.end() || !parts->leader.Verify(hash, leader_sig)) {
             return PosGossipAction::Invalid;
+        }
+    }
+    // Every check a sender can fail is behind it: the proposal is the leader's,
+    // as the leader signed it. Marked seen, so a copy costs nothing more, and its
+    // fetch done, so no announcer is asked for it again.
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (!m_seen_proposals.insert(PosGossipContentId(*block)).second) return PosGossipAction::Ignore; // a copy, meanwhile
+        if (m_seen_proposals.size() > 20000) m_seen_proposals.clear();
+        if (auto f = m_fetches.find(hash); f != m_fetches.end()) {
+            f->second.done = true;
+            f->second.pending.reset();
         }
     }
     // Equivocation handling BEFORE the costly full validation (the leader's
