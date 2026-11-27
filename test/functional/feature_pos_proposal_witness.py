@@ -25,6 +25,11 @@ first_announcer_lies: a cut-off member holding the other witness hears the compa
   it rebuilds a body that does not match, asks the first relay, which answers with an altered body, and then
   asks the second at once, which answers with the genuine one: the member signs the leader's block within
   seconds, not after the 10 s a request to the same peer waits.
+flood_keeps_the_fetch_book: a cut-off member holding the other witness hears the compact proposal from a
+  silent announcer and an honest one, and then a third peer floods it with 1,001 compact proposals with
+  distinct made-up parents. The flood removes nothing the other two announced: when the silent announcer's
+  second is up, the member asks the honest one and signs. Before, a clear-all at 1,000 entries left it nobody
+  to ask.
 stale_parent: a member about to sign the leader's proposal finds its parent is no longer the tip (forced with
   -posgossipstaleonce): nothing was judged, so it drops the proposal as stale and excludes nobody, and with the
   third node cut off the height is certified on a block the same leader proposed, signed by that member.
@@ -177,7 +182,8 @@ class PosProposalWitnessTest(BitcoinTestFramework):
         self.script = CScript([OP_DROP, OP_TRUE])
         only = os.environ.get("POS_CASES")
         for case in only.split(",") if only else ["mempool_variant", "forged_witness", "forged_transactions",
-                                                  "second_lock", "first_announcer_lies", "stale_parent"]:
+                                                  "second_lock", "first_announcer_lies", "stale_parent",
+                                                  "flood_keeps_the_fetch_book"]:
             self.log.info(case)
             getattr(self, case)()
 
@@ -405,6 +411,82 @@ class PosProposalWitnessTest(BitcoinTestFramework):
         assert stale, "the forced stale path was not taken"
         assert_equal(excluded, [])
         assert got in proposed, "the block at %d is not one the leader proposed" % height
+
+    def flood_keeps_the_fetch_book(self):
+        attempts = []
+        for attempt in range(3):
+            v1, v2 = self.variants(*self.fund())
+            h0 = self.nodes[0].getblockcount()
+            self.wait_height(h0 + 1)          # just after a block: SPACING seconds before the next one
+            leader, height = self.leader_of_next()
+            cut = [i for i in range(3) if i != leader][0]
+            pairs = [(min(cut, j), max(cut, j)) for j in range(3) if j != cut]
+            for a, b in pairs:
+                self.disconnect_nodes(a, b)
+            relay_in = self.nodes[leader].add_p2p_connection(PosRelay())
+            silent = self.nodes[cut].add_p2p_connection(PosRelay())
+            honest = self.nodes[cut].add_p2p_connection(PosRelay())
+            flooder = self.nodes[cut].add_p2p_connection(PosRelay())
+            self.nodes[leader].sendrawtransaction(v1.serialize().hex())
+            self.nodes[cut].sendrawtransaction(v2.serialize().hex())   # its rebuild will not match
+            logs = [len(self.log_lines(i)) for i in range(3)]
+
+            def proposed():
+                for line in self.log_lines(leader)[logs[leader]:]:
+                    m = re.search(r"proposing block ([0-9a-f]{64}) at height %d" % height, line)
+                    if m:
+                        return m.group(1)
+                return None
+            self.wait_until(lambda: proposed() is not None, timeout=60)
+            bhash = proposed()
+            relay_in.send_message(RAW["getposprop"](bytes.fromhex(bhash)[::-1]))
+            self.wait_until(lambda: relay_in.got.get("posproposal"), timeout=30)
+            genuine = relay_in.got["posproposal"][-1]
+            self.wait_until(lambda: any(genuine[36:68] in c for c in relay_in.got.get("poscmpctprop", [])), timeout=30)
+            compact = [c for c in relay_in.got["poscmpctprop"] if genuine[36:68] in c][-1]
+            honest.answer = genuine
+            placed = v1.serialize() in genuine and self.nodes[cut].getmempoolentry(v1.hash)["wtxid"] == v2.getwtxid()
+            t0 = time.time()
+            silent.send_message(RAW["poscmpctprop"](compact))
+            silent.sync_with_ping()
+            honest.send_message(RAW["poscmpctprop"](compact))
+            honest.sync_with_ping()
+            # Compacts with made-up parents (bytes 4 to 36): not on the tip, so ignored without a penalty, but each
+            # announces a hash of its own before anything is checked.
+            for k in range(1001):
+                flooder.send_message(RAW["poscmpctprop"](compact[:4] + hashlib.sha256(b"%d" % k).digest() + compact[36:]))
+            flooder.sync_with_ping(timeout=120)
+            t_flood = time.time() - t0
+
+            def new_lines():
+                return self.log_lines(cut)[logs[cut]:]
+
+            def signed():
+                return any("signed %s at height %d" % (bhash, height) in line for line in new_lines())
+            try:
+                self.wait_until(signed, timeout=8)
+                took = time.time() - t0
+            except AssertionError:
+                took = None
+            excluded = [line for line in new_lines() if "excluding its leader" in line]
+            row = (attempt, leader, cut, height, placed, round(t_flood, 2), len(silent.got.get("getposprop", [])),
+                   len(honest.got.get("getposprop", [])), len(excluded), took)
+            attempts.append(row)
+            self.log.info("    attempt %d: leader node %d, cut-off member node %d, height %d, placed %s; flood sent in %s s; "
+                          "body asked of the silent announcer %d, of the honest one %d; exclusions %d; signed after %s s",
+                          *row)
+            for peer in (relay_in, silent, honest, flooder):
+                peer.peer_disconnect()
+            for a, b in pairs:
+                self.connect_nodes(a, b)
+            self.wait_height(height)
+            self.sync_blocks()
+            if not placed:
+                continue
+            assert_equal(excluded, [])
+            assert took is not None, "the member did not sign the leader's block after the flood: %s" % (row,)
+            return
+        raise AssertionError("the case was not reached: %s" % attempts)
 
 
 if __name__ == '__main__':

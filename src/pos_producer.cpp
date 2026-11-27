@@ -1323,6 +1323,17 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
     if (height < m_round_height) return; // stale
     if (height > m_round_height) {
         m_round_height = height;
+        // SEQUENTIA: the fetch book's entries for proposals that no longer build
+        // on the tip go (their collection is over), with the marks pointing at them.
+        for (auto it = m_fetches.begin(); it != m_fetches.end();) {
+            it = it->second.parent != block->hashPrevBlock ? m_fetches.erase(it) : std::next(it);
+        }
+        for (auto it = m_source_marks.begin(); it != m_source_marks.end();) {
+            std::deque<uint256>& marks = it->second;
+            marks.erase(std::remove_if(marks.begin(), marks.end(), [&](const uint256& h) { return !m_fetches.count(h); }),
+                        marks.end());
+            it = marks.empty() ? m_source_marks.erase(it) : std::next(it);
+        }
         m_candidates.clear();
         m_excluded.clear();
         m_anchor_deferred.clear();
@@ -2162,12 +2173,62 @@ bool PosProducer::ProposalSeen(const CBlockHeader& header)
     return m_seen_proposals.count(PosGossipContentId(header)) > 0;
 }
 
-void PosProducer::NoteProposalSource(const uint256& hash, int64_t peer)
+//! How many proposals one peer may be a source for at once. A height can honestly
+//! have one proposal per committee member in a collection, and a second collection
+//! (a restart, or proposals again after a replaced anchor) as many more: twice the
+//! committee size for a height, and the book holds the current height and the next.
+static size_t PosFetchMarksPerPeer()
 {
+    return std::max<size_t>(16, 4 * (size_t)std::max(1, g_pos_committee_size));
+}
+
+void PosProducer::DropProposalMark(int64_t peer, const uint256& hash)
+{
+    // m_gossip_mutex held.
+    auto it = m_fetches.find(hash);
+    if (it == m_fetches.end()) return;
+    ProposalFetch& f = it->second;
+    f.sources.erase(std::remove(f.sources.begin(), f.sources.end(), peer), f.sources.end());
+    f.asked.erase(peer);
+    if (f.pending == peer) f.pending.reset();
+    if (f.sources.empty()) m_fetches.erase(it);
+}
+
+void PosProducer::NoteProposalSource(const uint256& hash, const uint256& parent, int64_t peer)
+{
+    // Called before anything about the message is checked, so a peer can only
+    // ever add marks of its own and push out its own oldest ones: one that floods
+    // announcements removes nothing another peer announced.
     std::lock_guard<std::mutex> lock(m_gossip_mutex);
-    if (m_fetches.size() > 1000) m_fetches.clear();
-    ProposalFetch& f = m_fetches[hash];
-    if (std::find(f.sources.begin(), f.sources.end(), peer) == f.sources.end()) f.sources.push_back(peer);
+    auto [it, inserted] = m_fetches.try_emplace(hash);
+    ProposalFetch& f = it->second;
+    if (inserted) f.parent = parent;
+    if (std::find(f.sources.begin(), f.sources.end(), peer) != f.sources.end()) return;
+    f.sources.push_back(peer);
+    std::deque<uint256>& marks = m_source_marks[peer];
+    marks.push_back(hash);
+    while (marks.size() > PosFetchMarksPerPeer()) {
+        const uint256 oldest = marks.front();
+        marks.pop_front();
+        DropProposalMark(peer, oldest);
+    }
+}
+
+void PosProducer::ForgetProposalPeer(int64_t peer)
+{
+    std::vector<uint256> moved;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        auto marks = m_source_marks.find(peer);
+        if (marks == m_source_marks.end()) return;
+        for (const uint256& hash : marks->second) {
+            auto it = m_fetches.find(hash);
+            if (it != m_fetches.end() && it->second.pending == peer && !it->second.done) moved.push_back(hash);
+            DropProposalMark(peer, hash);
+        }
+        m_source_marks.erase(marks);
+    }
+    for (const uint256& hash : moved) FetchProposal(hash);
 }
 
 void PosProducer::FetchProposal(const uint256& hash)

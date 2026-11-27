@@ -1287,6 +1287,8 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 void PeerManagerImpl::FinalizeNode(const CNode& node)
 {
     NodeId nodeid = node.GetId();
+    // SEQUENTIA: a peer that leaves is no source of proposal bodies any more.
+    if (const std::shared_ptr<PosProducer> prod = GetActivePosProducer()) prod->ForgetProposalPeer(nodeid);
     int misbehavior{0};
     {
     LOCK(cs_main);
@@ -4294,7 +4296,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         const std::shared_ptr<PosProducer> prod = GetActivePosProducer();
         if (!prod) return; // not participating; do not relay committee traffic
         // SEQUENTIA: whoever sent a body is a peer it may be fetched from again.
-        prod->NoteProposalSource(pblock->GetHash(), pfrom.GetId());
+        prod->NoteProposalSource(pblock->GetHash(), pblock->hashPrevBlock, pfrom.GetId());
         switch (prod->OnProposal(pblock)) {
         case PosGossipAction::Invalid:
             Misbehaving(pfrom.GetId(), 10, "invalid posproposal");
@@ -4318,7 +4320,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!prod) return;
         // Reconstruction walks the mempool; a proposal already processed is
         // not worth that again, however many peers relay it.
-        prod->NoteProposalSource(compact.header.GetHash(), pfrom.GetId());
+        prod->NoteProposalSource(compact.header.GetHash(), compact.header.hashPrevBlock, pfrom.GetId());
         if (prod->ProposalSeen(compact.header)) return;
         const bool segwit_active = WITH_LOCK(cs_main, return DeploymentActiveAfter(m_chainman.ActiveChain().Tip(),
                                                                                     m_chainparams.GetConsensus(),
@@ -4473,7 +4475,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 have_body = pindex && (pindex->nStatus & BLOCK_HAVE_DATA);
             }
             if (!have_body) {
-                prod->NoteProposalSource(hash, pfrom.GetId());
+                prod->NoteProposalSource(hash, header.hashPrevBlock, pfrom.GetId());
                 prod->FetchProposal(hash);
             }
             m_connman.ForEachNode([&](CNode* pnode) {

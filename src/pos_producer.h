@@ -30,6 +30,7 @@
 #include <validationinterface.h>
 
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -230,7 +231,7 @@ public:
     bool ProposalSeen(const CBlockHeader& header);
     //! SEQUENTIA: a peer announced proposal `hash` (a compact proposal, a full
     //! one, or a certificate): it is one the body may be fetched from.
-    void NoteProposalSource(const uint256& hash, int64_t peer);
+    void NoteProposalSource(const uint256& hash, const uint256& parent, int64_t peer);
     //! Ask for the body of `hash` from the first announcer that may be asked
     //! (each at most once per POS_PROPOSAL_FETCH_RETRY_SECONDS), unless the body
     //! is in or a request made less than POS_PROPOSAL_FETCH_ANSWER_MS ago is
@@ -238,6 +239,9 @@ public:
     void FetchProposal(const uint256& hash);
     //! The body `peer` sent for `hash` was refused: ask the next announcer now.
     void ProposalFetchFailed(const uint256& hash, int64_t peer);
+    //! `peer` disconnected: it is no source any more, and a request pending on it
+    //! moves on to the next announcer.
+    void ForgetProposalPeer(int64_t peer);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -420,8 +424,14 @@ private:
         std::optional<int64_t> pending;                //!< the announcer asked last, while unanswered
         int64_t pending_ms{0};
         bool done{false};                              //!< a body that passed the header check is in
+        uint256 parent;                                //!< the block the proposal builds on
     };
     std::map<uint256, ProposalFetch> m_fetches;
+    //! Per peer, the proposals it is a source for, oldest first: a peer can only
+    //! ever remove its own marks (at most PosFetchMarksPerPeer()).
+    std::map<int64_t, std::deque<uint256>> m_source_marks;
+    //! Remove `peer` as a source of `hash`; the entry goes when no source is left.
+    void DropProposalMark(int64_t peer, const uint256& hash);
     //! Ask the due announcers again whose answers are late (the thread loop).
     void RetryProposalFetches();
     std::set<uint256> m_seen_shares;                   //!< share dedup, by hash of the whole share
