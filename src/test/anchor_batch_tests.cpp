@@ -18,6 +18,9 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <map>
+#include <set>
+
 BOOST_FIXTURE_TEST_SUITE(anchor_batch_tests, BasicTestingSetup)
 
 namespace {
@@ -225,48 +228,100 @@ BOOST_AUTO_TEST_CASE(chain_tips_parse_only_whole_replies)
     BOOST_CHECK(untouched.empty());
 }
 
-BOOST_AUTO_TEST_CASE(a_branch_new_since_the_last_tick_lowers_what_is_kept)
+BOOST_AUTO_TEST_CASE(a_branch_the_daemon_may_have_stood_on_is_evidence_and_a_mere_fork_is_not)
 {
+    // The old tip has chainwork 100. Tips never connected are judged by theirs.
+    const std::optional<arith_uint256> old_work = arith_uint256(100);
+    std::map<uint256, arith_uint256> work;
+    std::set<uint256> asked;
+    const auto work_of = [&](const uint256& h) -> std::optional<arith_uint256> {
+        asked.insert(h);
+        const auto it = work.find(h);
+        if (it == work.end()) return std::nullopt;
+        return it->second;
+    };
+
     MainchainChainTips before;
     before[uint256S(H_A2)] = {100, 0, "active"};
     before[uint256S(H_C)] = {60, 10, "valid-fork"};
 
-    // Nothing new: the old fork at 50 was there at the last tick already, and
-    // the active tip moved on (that move is the tip comparison's to judge).
+    // Nothing new: the old fork at 50 was there already, and the active tip
+    // moved on (that move is the tip comparison's to judge).
     MainchainChainTips same = before;
     same[uint256S(H_A2)] = {101, 0, "active"};
-    BOOST_CHECK(!LowestForkOfNewBranches(before, same));
+    ChangedBranches c = ClassifyChangedBranches(before, same, old_work, work_of);
+    BOOST_CHECK(!c.recheck_above && !c.moved_below);
 
-    // A branch the daemon stood on and left: its fork point.
+    // A branch the daemon stood on and left: re-check above its fork, and it
+    // is evidence that Bitcoin moved off something.
     MainchainChainTips flipped = same;
     flipped[uint256S(H_B1)] = {100, 1, "valid-fork"};
-    BOOST_CHECK_EQUAL(LowestForkOfNewBranches(before, flipped).value_or(-2), 99);
-
-    // The same branch grown by a block that was never connected reads
-    // valid-headers or headers-only: it still counts, because the status
-    // describes only the tip block.
-    for (const char* status : {"valid-headers", "headers-only", "invalid", "unknown"}) {
-        MainchainChainTips grown = same;
-        grown[uint256S(H_B2)] = {101, 2, status};
-        BOOST_CHECK_EQUAL(LowestForkOfNewBranches(before, grown).value_or(-2), 99);
-    }
+    c = ClassifyChangedBranches(before, flipped, old_work, work_of);
+    BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 99);
+    BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 99);
 
     // A tip already there whose status changed: an old branch revisited.
     MainchainChainTips revisited = same;
     revisited[uint256S(H_C)] = {60, 10, "invalid"};
-    BOOST_CHECK_EQUAL(LowestForkOfNewBranches(before, revisited).value_or(-2), 50);
+    c = ClassifyChangedBranches(before, revisited, old_work, work_of);
+    BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 50);
+    BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 50);
+
+    // The same branch grown by a block never connected, with more work than
+    // the old tip: evidence, whether its tip is new or was there already (the
+    // daemon held its last block as a header before the branch went active).
+    for (const char* status : {"valid-headers", "headers-only"}) {
+        work[uint256S(H_B2)] = arith_uint256(150);
+        MainchainChainTips grown = same;
+        grown[uint256S(H_B2)] = {101, 2, status};
+        c = ClassifyChangedBranches(before, grown, old_work, work_of);
+        BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 99);
+        BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 99);
+        MainchainChainTips held_before = before;
+        held_before[uint256S(H_B2)] = {101, 2, status};
+        c = ClassifyChangedBranches(held_before, grown, old_work, work_of);
+        BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 99);
+        BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 99);
+    }
+
+    // A header-only fork with no more work than the old tip: nobody's best
+    // chain was there. New, it is asked about again and is no evidence; seen
+    // before, it is nothing at all.
+    work[uint256S(H_B2)] = arith_uint256(100);
+    MainchainChainTips light = same;
+    light[uint256S(H_B2)] = {101, 2, "headers-only"};
+    c = ClassifyChangedBranches(before, light, old_work, work_of);
+    BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 99);
+    BOOST_CHECK(!c.moved_below);
+    MainchainChainTips light_before = before;
+    light_before[uint256S(H_B2)] = {101, 2, "headers-only"};
+    c = ClassifyChangedBranches(light_before, light, old_work, work_of);
+    BOOST_CHECK(!c.recheck_above && !c.moved_below);
+
+    // An unknown chainwork, the tip's or the old tip's, counts as more.
+    work.erase(uint256S(H_B2));
+    c = ClassifyChangedBranches(light_before, light, old_work, work_of);
+    BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 99);
+    work[uint256S(H_B2)] = arith_uint256(1);
+    c = ClassifyChangedBranches(light_before, light, std::nullopt, work_of);
+    BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 99);
 
     // The lowest of several.
     MainchainChainTips both = flipped;
     both[uint256S(H_C)] = {60, 10, "invalid"};
-    BOOST_CHECK_EQUAL(LowestForkOfNewBranches(before, both).value_or(-2), 50);
+    c = ClassifyChangedBranches(before, both, old_work, work_of);
+    BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 50);
+    BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 50);
 
-    // The active tip is never a branch, whatever it was before.
+    // Chainwork is asked only of tips never connected, and the active tip is
+    // never a branch, whatever it was before.
+    BOOST_CHECK(!asked.count(uint256S(H_B1)) && !asked.count(uint256S(H_C)));
     MainchainChainTips was_fork;
     was_fork[uint256S(H_C)] = {60, 10, "valid-fork"};
     MainchainChainTips returned;
     returned[uint256S(H_C)] = {60, 0, "active"};
-    BOOST_CHECK(!LowestForkOfNewBranches(was_fork, returned));
+    c = ClassifyChangedBranches(was_fork, returned, old_work, work_of);
+    BOOST_CHECK(!c.recheck_above && !c.moved_below);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

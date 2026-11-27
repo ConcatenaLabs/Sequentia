@@ -15,6 +15,7 @@
 #ifndef BITCOIN_ANCHOR_H
 #define BITCOIN_ANCHOR_H
 
+#include <arith_uint256.h>
 #include <uint256.h>
 #include <primitives/bitcoin/block.h>
 #include <univalue.h>
@@ -160,12 +161,15 @@ struct MainchainSyncSnapshot {
 };
 MainchainSyncSnapshot GetMainchainSyncSnapshot();
 
-/** Called by the anchor watcher whenever it sees the parent chain reorganize,
- *  in its tip or in a branch new since the last tick, with the height below
- *  which nothing changed (the lowest fork point), or -1 when it could not tell
- *  how the tip moved. A plain extension, where the old tip is still on the best
- *  chain and no branch is new, calls nothing: it replaced no block, even one
- *  newer than the watcher's last poll. Set once at the start; the signing check
+/** Called by the anchor watcher whenever it has evidence that the parent chain
+ *  moved off a block: a tip move that is not an extension, or a branch the
+ *  daemon may have stood on since the last tick where its tip moved
+ *  (ClassifyChangedBranches), with the height below which nothing changed (the
+ *  lowest fork point), or -1 when it could not tell how the tip moved. A plain
+ *  extension calls nothing: it replaced no block, even one newer than the
+ *  watcher's last poll. Nor does a branch merely observed, such as a
+ *  header-only fork with less work than the tip: nobody's best chain can have
+ *  been there. Set once at the start; the signing check
  *  (pos_signing_record.h) uses it to void the escape of a block whose anchor
  *  may have changed side. */
 void SetMainchainMoveListener(std::function<void(int unchanged_height)> listener);
@@ -202,14 +206,36 @@ using MainchainChainTips = std::map<uint256, MainchainChainTip>;
  *  that cannot be judged. Pure. */
 bool ParseMainchainChainTips(const UniValue& result, MainchainChainTips& out);
 
-/** The lowest fork height (height - branchlen) among the non-active tips of
- *  `current` that are new since `previous` (by hash) or whose status changed:
- *  each is a branch the daemon may have stood on since `previous` was read,
- *  whatever its status says now, because the status describes only the tip
- *  block and a branch that was the active chain can have grown a block that
- *  never was. nullopt when no branch is new or changed. Pure; see
- *  AnchorWatchTask for why this is what the anchor verdicts need. */
-std::optional<int> LowestForkOfNewBranches(const MainchainChainTips& previous, const MainchainChainTips& current);
+/** What the parent daemon's branch tips say happened between two readings of
+ *  them, taken on two ticks where its tip moved, the older tip being `old_tip`
+ *  (whose chainwork is `old_tip_work`, absent when unknown).
+ *
+ *  A branch the daemon stood on since the older reading shows in `current` in
+ *  one of two ways. If the branch's last block was connected, its tip is new or
+ *  its status changed, and the status says it was connected ("valid-fork", or
+ *  "invalid" for one that failed). If its last block was never connected (the
+ *  daemon holds it as a header, "headers-only", or holds its data without having
+ *  connected it, "valid-headers"), the part that was active had to outwork the
+ *  old tip, so the tip has more chainwork than `old_tip`, new or not.
+ *
+ *  `recheck_above`: the lowest fork height (height - branchlen) of every tip of
+ *  either kind, and of every other non-active tip that is new or changed: a
+ *  branch merely observed is a reason to ask again about what lies above it.
+ *  `moved_below`: the lowest fork height of the tips of the two kinds above
+ *  only, the evidence that Bitcoin moved off something. A header-only fork with
+ *  no more work than the old tip, which nobody's best chain can have been, is
+ *  never in it. Each is nullopt when nothing qualifies.
+ *
+ *  `work_of` gives a tip's chainwork, or nullopt when it cannot be had; an
+ *  unknown chainwork, here or for the old tip, counts as more. Called only for
+ *  tips that are not connected. */
+struct ChangedBranches {
+    std::optional<int> recheck_above;
+    std::optional<int> moved_below;
+};
+ChangedBranches ClassifyChangedBranches(const MainchainChainTips& previous, const MainchainChainTips& current,
+                                        const std::optional<arith_uint256>& old_tip_work,
+                                        const std::function<std::optional<arith_uint256>(const uint256&)>& work_of);
 
 /** Fill the verdict caches for many anchors in a few round trips.
  *
