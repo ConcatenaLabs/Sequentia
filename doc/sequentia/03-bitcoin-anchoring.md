@@ -305,8 +305,8 @@ as the tip (within 144 blocks of it: `GetAntiDoSWorkThreshold` in its
 valid header at about the tip's difficulty, and its fork is at most about 144
 blocks down. On testnet4, minimum-difficulty blocks make a new tip nearly free.
 Tips stay in the daemon's list for good, and each makes every `getchaintips`
-reply about 135 bytes longer and costs it about 9 µs, at every tick where the
-tip moves.
+reply about 135 bytes longer and about 7 µs slower, at every tick where the tip
+moves; a tick where it stands still never reads the list.
 
 A Bitcoin endpoint that answers `getbestblockhash` but refuses `getchaintips`
 cannot show those branches, so nothing it said can be kept across a tip move:
