@@ -130,8 +130,23 @@ static constexpr size_t DUMMY_NESTED_P2WPKH_INPUT_SIZE = 91;
 //! How often the wallet re-asks the node about unconfirmed transactions missing
 //! from its mempool. Short enough that a refusal is on screen while the user is
 //! still looking at the send they just made, and costless on a quiet wallet:
-//! there is normally nothing in that state to ask about.
+//! a transaction is asked about again only when something its answer depends
+//! on has moved (TxRecheckStamp).
 static constexpr int64_t REJECTION_RECHECK_SECONDS = 20;
+//! How long an answer stands when nothing the wallet tracks has moved. It
+//! bounds the delay for what is not tracked: a change deeper in the mempool
+//! than a transaction's own inputs (an ancestor's other descendants, the
+//! descendants of a conflicting transaction), which can lift a chain-limit or
+//! replacement refusal. The node itself offers again a transaction no peer has
+//! fetched on the same scale (10 to 15 minutes).
+static constexpr int64_t RECHECK_UNCHANGED_SECONDS = 10 * 60;
+//! How long one slice of a recheck may hold the wallet and the scheduler
+//! thread before it yields; at least one transaction is asked per slice. The
+//! scheduler thread also delivers validation callbacks, and InvalidateBlock,
+//! through which the anchor watcher follows a Bitcoin reorganization, waits for
+//! them: a callback queued during a pass waits at most one slice and one
+//! validation.
+static constexpr int64_t RECHECK_SLICE_MICROS = 50 * 1000;
 
 class CCoinControl;
 class COutput;
@@ -350,6 +365,17 @@ private:
      *  Starts at zero so the first sweep runs as soon as the node is caught up:
      *  no refusal survives a restart, so until then the wallet knows of none. */
     mutable std::atomic<int64_t> m_next_rejection_check{0};
+    /** A recheck pass in progress, asked about a slice at a time: the
+     *  transactions still to ask about, parents first, and what the pass has
+     *  done so far. Only the scheduler thread runs a pass. */
+    std::atomic<bool> m_recheck_in_pass{false};
+    std::vector<uint256> m_recheck_queue GUARDED_BY(cs_wallet);
+    size_t m_recheck_next GUARDED_BY(cs_wallet){0};
+    size_t m_recheck_asked GUARDED_BY(cs_wallet){0};
+    size_t m_recheck_handed_back GUARDED_BY(cs_wallet){0};
+    size_t m_recheck_unchanged GUARDED_BY(cs_wallet){0};
+    size_t m_recheck_slices GUARDED_BY(cs_wallet){0};
+    int64_t m_recheck_longest_slice GUARDED_BY(cs_wallet){0};
     /** Whether this wallet will submit newly created transactions to the node's mempool and
      * prompt rebroadcasts (see ResendWalletTransactions()). */
     bool fBroadcastTransactions = false;
@@ -674,11 +700,18 @@ public:
     bool UpdateTxRejection(CWalletTx& wtx, bool* accepted = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /** Ask the node about every transaction that is unconfirmed and not in its
-     *  mempool. Rate-limited: this is how a refusal is noticed, and equally how
+     *  mempool, and whose last answer was taken under facts that have moved
+     *  since. Rate-limited: this is how a refusal is noticed, and equally how
      *  it stops being one once the chain no longer justifies it. A payment of
      *  our own that the node would take, and one whose refusal just lifted, are
-     *  handed back to the mempool, parents first. */
+     *  handed back to the mempool, parents first. A pass runs in slices of at
+     *  most RECHECK_SLICE_MICROS, one per scheduler tick. */
     void RecheckRejectedTransactions();
+
+    /** Forget the node's last answer about every wallet transaction that tx
+     *  touches: tx itself, those spending what tx spends, and those spending
+     *  tx's outputs. Called as tx enters or leaves the mempool. */
+    void MarkRecheckTouched(const CTransaction& tx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     OutputType TransactionChangeType(const std::optional<OutputType>& change_type, const std::vector<CRecipient>& vecSend) const;
 

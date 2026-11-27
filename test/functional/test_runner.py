@@ -370,6 +370,8 @@ BASE_SCRIPTS = [
     'wallet_watchonly.py --usecli --legacy-wallet',
     'wallet_reorgsrestore.py',
     'wallet_resubmit_trimmed.py',
+    'wallet_recheck_unchanged.py',
+    'wallet_recheck_unchanged.py --checkmempool=0',
     'interface_http.py',
     'interface_rpc.py',
     'rpc_psbt.py --legacy-wallet',

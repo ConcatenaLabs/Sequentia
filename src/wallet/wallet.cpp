@@ -10,6 +10,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <exchangerates.h>
 #include <external_signer.h>
 #include <fs.h>
 #include <interfaces/chain.h>
@@ -1304,6 +1305,7 @@ void CWallet::SyncTransaction(const CTransactionRef& ptx, const SyncTxState& sta
 
 void CWallet::transactionAddedToMempool(const CTransactionRef& tx, uint64_t mempool_sequence) {
     LOCK(cs_wallet);
+    MarkRecheckTouched(*tx);
     SyncTransaction(tx, TxStateInMempool{});
 
     auto it = mapWallet.find(tx->GetHash());
@@ -1314,6 +1316,7 @@ void CWallet::transactionAddedToMempool(const CTransactionRef& tx, uint64_t memp
 
 void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t mempool_sequence) {
     LOCK(cs_wallet);
+    MarkRecheckTouched(*tx);
     auto it = mapWallet.find(tx->GetHash());
     if (it != mapWallet.end()) {
         RefreshMempoolStatus(it->second, chain());
@@ -1858,41 +1861,123 @@ bool CWallet::UpdateTxRejection(CWalletTx& wtx, bool* accepted)
     return true;
 }
 
+void CWallet::MarkRecheckTouched(const CTransaction& tx)
+{
+    AssertLockHeld(cs_wallet);
+    const uint256& txid = tx.GetHash();
+    if (auto it = mapWallet.find(txid); it != mapWallet.end()) {
+        it->second.m_recheck_stamp.reset();
+    }
+    const auto forget = [&](const COutPoint& outpoint) {
+        const auto range = mapTxSpends.equal_range(outpoint);
+        for (auto spend = range.first; spend != range.second; ++spend) {
+            if (spend->second == txid) continue;
+            if (auto it = mapWallet.find(spend->second); it != mapWallet.end()) {
+                it->second.m_recheck_stamp.reset();
+            }
+        }
+    };
+    // Its rivals for the same coins: a conflict arrived or went away.
+    for (const CTxIn& txin : tx.vin) forget(txin.prevout);
+    // Its children: their parent arrived or went away.
+    for (uint32_t i = 0; i < tx.vout.size(); ++i) forget(COutPoint(txid, i));
+}
+
+namespace {
+//! The facts a recheck answer is taken under, read once per slice.
+struct RecheckFacts {
+    uint256 tip;
+    CAmount mempool_min_fee;
+    int64_t time;
+};
+
+CAmount FeeAssetRate(const CTransaction& tx)
+{
+    return ExchangeRateMap::GetInstance().ConvertAmountToValue(exchange_rate_scale, tx.GetFeeAsset(::policyAsset)).GetValue();
+}
+
+bool StampStands(const CWalletTx& wtx, const RecheckFacts& now)
+{
+    const std::optional<TxRecheckStamp>& stamp = wtx.m_recheck_stamp;
+    return stamp && stamp->tip == now.tip && stamp->mempool_min_fee == now.mempool_min_fee &&
+           now.time - stamp->time < RECHECK_UNCHANGED_SECONDS &&
+           stamp->fee_asset_rate == FeeAssetRate(*wtx.tx);
+}
+} // namespace
+
 void CWallet::RecheckRejectedTransactions()
 {
-    // Never while the node's own view is still forming. During IBD, and before
-    // the tip is current, an honest transaction can look impossible; a refusal
-    // invented out of our own ignorance is worse than reporting none at all.
-    if (!chain().isReadyToBroadcast()) return;
+    if (!m_recheck_in_pass) {
+        if (GetTime() < m_next_rejection_check) return;
+        // Never while the node's own view is still forming. During IBD, and
+        // before the tip is current, an honest transaction can look impossible;
+        // a refusal invented out of our own ignorance is worse than reporting
+        // none at all.
+        if (!chain().isReadyToBroadcast()) return;
 
-    const int64_t now = GetTime();
-    if (now < m_next_rejection_check) return;
-    m_next_rejection_check = now + REJECTION_RECHECK_SECONDS;
+        LOCK(cs_wallet);
+        const RecheckFacts facts{GetLastBlockHash(), chain().mempoolMinFee().GetFeePerK(), GetTime()};
+        // Everything unconfirmed that the mempool lacks, or that the node
+        // refused last time, and whose last answer no longer stands. A
+        // transaction in a block or in the mempool is passed over without a
+        // validation, and so is one asked about under the same facts, so a
+        // wallet costs nothing however many payments it holds while nothing
+        // they depend on moves.
+        std::vector<std::tuple<bool, int64_t, uint256>> candidates;
+        size_t unchanged{0};
+        for (auto& item : mapWallet) {
+            CWalletTx& wtx = item.second;
+            if (wtx.IsCoinBase() || wtx.isAbandoned()) continue;
+            if (GetTxDepthInMainChain(wtx) != 0) continue;
+            if (!wtx.isRejected() && wtx.InMempool()) continue;
+            if (StampStands(wtx, facts)) {
+                ++unchanged;
+                continue;
+            }
+            candidates.emplace_back(!IsFromMe(*wtx.tx), wtx.nOrderPos, item.first);
+        }
+        // Our own payments first, so a large set of received ones cannot hold
+        // back what the balance trusts; within each, parents first, in the
+        // order they were made, each handed back before the next is asked
+        // about: a child's test accept then finds its parent in the mempool,
+        // and a whole chain comes back in one pass.
+        std::sort(candidates.begin(), candidates.end());
+        m_recheck_queue.clear();
+        for (const auto& candidate : candidates) m_recheck_queue.push_back(std::get<2>(candidate));
+        m_recheck_next = 0;
+        m_recheck_asked = 0;
+        m_recheck_handed_back = 0;
+        m_recheck_unchanged = unchanged;
+        m_recheck_slices = 0;
+        m_recheck_longest_slice = 0;
+        // Anything that asks for a recheck while this pass runs (a payment
+        // just sent) sets this to zero, and the pass leaves it there.
+        m_next_rejection_check = facts.time + REJECTION_RECHECK_SECONDS;
+        m_recheck_in_pass = true;
+    }
 
     LOCK(cs_wallet);
-    // Everything unconfirmed that the mempool lacks, or that the node refused
-    // last time. The candidates are few, and normally none: a transaction in a
-    // block or in the mempool is skipped without a validation, so the sweep
-    // costs nothing on a quiet wallet however many payments it has pending.
-    std::vector<std::pair<int64_t, CWalletTx*>> candidates;
-    for (auto& item : mapWallet) {
-        CWalletTx& wtx = item.second;
-        if (wtx.IsCoinBase() || wtx.isAbandoned()) continue;
-        if (GetTxDepthInMainChain(wtx) != 0) continue;
-        if (!wtx.isRejected() && wtx.InMempool()) continue;
-        candidates.emplace_back(wtx.nOrderPos, &wtx);
-    }
-    // Parents first, in the order they were made, and each handed back before
-    // the next is asked about: a child's test accept then finds its parent in
-    // the mempool, so a whole chain comes back in one sweep.
-    std::sort(candidates.begin(), candidates.end());
+    const int64_t slice_start = GetTimeMicros();
+    const RecheckFacts facts{GetLastBlockHash(), chain().mempoolMinFee().GetFeePerK(), GetTime()};
+    size_t asked_here{0};
+    while (m_recheck_next < m_recheck_queue.size()) {
+        if (asked_here > 0 && GetTimeMicros() - slice_start >= RECHECK_SLICE_MICROS) break;
+        const auto it = mapWallet.find(m_recheck_queue[m_recheck_next++]);
+        if (it == mapWallet.end()) continue;
+        CWalletTx* wtx = &it->second;
+        // Between slices the wallet runs on: a candidate may have been
+        // confirmed, abandoned or pooled since the pass began.
+        if (wtx->IsCoinBase() || wtx->isAbandoned()) continue;
+        if (GetTxDepthInMainChain(*wtx) != 0) continue;
+        if (!wtx->isRejected() && wtx->InMempool()) continue;
 
-    size_t asked{0};
-    size_t handed_back{0};
-    for (const auto& [pos, wtx] : candidates) {
-        if (!wtx->InMempool()) ++asked;
+        if (!wtx->InMempool()) ++m_recheck_asked;
+        ++asked_here;
         bool accepted{false};
         const bool changed = UpdateTxRejection(*wtx, &accepted);
+        // Whatever the answer -- taken, refused, a parent missing, a conflict
+        // -- it stands until something it depends on moves.
+        wtx->m_recheck_stamp = TxRecheckStamp{facts.tip, FeeAssetRate(*wtx->tx), facts.mempool_min_fee, facts.time};
         if (!accepted) continue;
         // The node would take it now, and its mempool lacks it. Two kinds go
         // back at once rather than waiting for the periodic resend:
@@ -1911,17 +1996,51 @@ void CWallet::RecheckRejectedTransactions()
         // back first it would be announced and then evicted by the bump.
         if (wtx->mapValue.count("replaced_by_txid")) continue;
         if (!changed && !IsFromMe(*wtx->tx)) continue;
+        // A submission asks for a recheck on the next tick. Our own must not:
+        // what follows a hand-back is decided below, and a hand-back that the
+        // node turns away (a fee over -maxtxfee at today's rate) changed
+        // nothing, so its stamp keeps it from being tried again.
+        const int64_t next_check = m_next_rejection_check;
         std::string err_string;
-        if (SubmitTxMemoryPoolAndRelay(*wtx, err_string, /*relay=*/true)) ++handed_back;
+        const bool handed_back = SubmitTxMemoryPoolAndRelay(*wtx, err_string, /*relay=*/true);
+        m_next_rejection_check = next_check;
+        if (handed_back) {
+            ++m_recheck_handed_back;
+            // Its children's answers change now, not when the mempool's
+            // notification reaches us, and they are asked in this pass, after
+            // it: a chain whose answers all stood comes back whole once its
+            // first payment does.
+            MarkRecheckTouched(*wtx->tx);
+            const uint256& txid = wtx->GetHash();
+            for (uint32_t i = 0; i < wtx->tx->vout.size(); ++i) {
+                const auto range = mapTxSpends.equal_range(COutPoint(txid, i));
+                for (auto spend = range.first; spend != range.second; ++spend) {
+                    const auto pending = m_recheck_queue.begin() + m_recheck_next;
+                    if (std::find(pending, m_recheck_queue.end(), spend->second) == m_recheck_queue.end()) {
+                        m_recheck_queue.push_back(spend->second);
+                    }
+                }
+            }
+        }
     }
-    // A hand-back asks for another sweep on the next tick, which catches a
-    // child made before its parent was known to the wallet. A submission that
-    // failed must not: nothing changed, and asking again every second would
-    // turn a lasting failure (a fee over -maxtxfee at today's rate) into a loop.
-    if (handed_back == 0) m_next_rejection_check = now + REJECTION_RECHECK_SECONDS;
+    const int64_t held = GetTimeMicros() - slice_start;
+    ++m_recheck_slices;
+    m_recheck_longest_slice = std::max(m_recheck_longest_slice, held);
+    if (m_recheck_next < m_recheck_queue.size()) return; // the next tick goes on
 
+    // A hand-back asks for another pass on the next tick, which catches a child
+    // made before its parent was known to the wallet.
+    if (m_recheck_handed_back > 0) {
+        m_next_rejection_check = 0;
+    } else if (m_next_rejection_check != 0) {
+        m_next_rejection_check = GetTime() + REJECTION_RECHECK_SECONDS;
+    }
+    m_recheck_queue.clear();
+    m_recheck_in_pass = false;
     LogPrint(BCLog::MEMPOOL, "%s Mempool recheck: asked about %u missing from the mempool, handed back %u\n",
-             GetDisplayName(), asked, handed_back);
+             GetDisplayName(), m_recheck_asked, m_recheck_handed_back);
+    LogPrint(BCLog::MEMPOOL, "%s Mempool recheck took %u slices, longest %d us; %u unchanged since their last answer\n",
+             GetDisplayName(), m_recheck_slices, m_recheck_longest_slice, m_recheck_unchanged);
 }
 
 std::set<uint256> CWallet::GetTxConflicts(const CWalletTx& wtx) const
