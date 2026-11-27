@@ -45,7 +45,13 @@ the replacement, and asserts what the node holds after the next poll:
      getchaintips, and a question answered from the cache costs nothing;
   8. a replacing branch whose last block the daemon held only as a header
      before the replacement: the list of tips reads the same before and after,
-     and only the branch's work, more than the old tip's, shows it.
+     and only the branch's work, more than the old tip's, shows it;
+  9. a proxy that caches getchaintips for 10 s, as the testnet's shared
+     endpoint does, answers the moving poll with a list from before the
+     branch: the reading once more than 12 s after the move finds it, with no
+     Bitcoin block;
+ 10. more tips than the node reads (-anchortipsmax), counted and by the length
+     of the reply: nothing is kept across a move, and the node says so once.
 
 Topology:
   node0: the parent chain (stands in for Bitcoin): proof of work, so that its
@@ -58,8 +64,10 @@ Topology:
          parent must learn as headers or as blocks it does not connect.
 """
 
+import base64
 import http.server
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -86,29 +94,54 @@ def make_staker():
     return byte_to_base58(k.get_bytes() + b'\x01', 239), k.get_pubkey().get_bytes().hex()
 
 
-class NoChainTipsProxy:
-    """Forwards JSON-RPC to the parent and refuses getchaintips: a Bitcoin
-    endpoint that answers for its tip but not for its branches."""
+class TipsProxy:
+    """Forwards JSON-RPC to the parent, and does one thing to getchaintips:
 
-    def __init__(self, port, target_port):
+      refuse: answers it with an error (an endpoint that answers for its tip
+              but not for its branches);
+      pad:    pads its reply with `pad` bytes of whitespace (a long list);
+      cache:  serves it from a cache for `ttl` seconds after a reply, as the
+              testnet's shared endpoint does; prime() loads the cache."""
+
+    def __init__(self, port, target_port, mode, pad=0, ttl=10.0, auth=None):
         target = "http://127.0.0.1:%d/" % target_port
+        self.port, self.mode, self.cache, self.hits, self.auth = port, mode, {}, 0, auth
+        proxy = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 req = json.loads(body)
-                if isinstance(req, dict) and req.get("method") == "getchaintips":
-                    out = json.dumps({"result": None, "id": req.get("id"),
-                                      "error": {"code": -32601, "message": "Method not found"}}).encode()
-                else:
-                    fwd = urllib.request.Request(target, data=body, headers={
-                        "Authorization": self.headers.get("Authorization", ""),
-                        "Content-Type": "application/json"})
-                    try:
-                        with urllib.request.urlopen(fwd, timeout=30) as r:
-                            out = r.read()
-                    except urllib.error.HTTPError as e:
-                        out = e.read()
+                tips = isinstance(req, dict) and req.get("method") == "getchaintips"
+                if tips and proxy.mode == "refuse":
+                    self.reply(json.dumps({"result": None, "id": req.get("id"),
+                                           "error": {"code": -32601, "message": "Method not found"}}).encode())
+                    return
+                if tips and proxy.mode == "cache":
+                    hit = proxy.cache.get("tips")
+                    if hit and hit[0] > time.time():
+                        proxy.hits += 1
+                        obj = dict(hit[1])
+                        obj["id"] = req.get("id")
+                        self.reply(json.dumps(obj).encode())
+                        return
+                fwd = urllib.request.Request(target, data=body, headers={
+                    "Authorization": self.headers.get("Authorization", ""),
+                    "Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(fwd, timeout=30) as r:
+                        out = r.read()
+                except urllib.error.HTTPError as e:
+                    out = e.read()
+                if tips and proxy.mode == "cache":
+                    obj = json.loads(out)
+                    if obj.get("error") is None:
+                        proxy.cache["tips"] = (time.time() + ttl, obj)
+                if tips and proxy.mode == "pad":
+                    out = out[:-1] + b" " * pad + out[-1:]
+                self.reply(out)
+
+            def reply(self, out):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(out)))
@@ -121,6 +154,16 @@ class NoChainTipsProxy:
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+
+    def prime(self):
+        """Someone else's getchaintips through the proxy: loads its cache
+        afresh, for the next `ttl` seconds."""
+        self.cache.clear()
+        req = urllib.request.Request("http://127.0.0.1:%d/" % self.port,
+                                     data=json.dumps({"method": "getchaintips", "params": [], "id": 1}).encode())
+        req.add_header("Authorization", "Basic " + base64.b64encode(self.auth.encode()).decode())
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())["result"]
 
     def stop(self):
         self.server.shutdown()
@@ -264,7 +307,12 @@ class UnseenBranchTest(BitcoinTestFramework):
         """Give the never-connected parent node3 node0's blocks up to `height`."""
         p, q = self.nodes[0], self.nodes[3]
         for h in range(1, height + 1):
-            q.submitblock(p.getblock(p.getblockhash(h), 0))
+            hh = p.getblockhash(h)
+            try:
+                q.reconsiderblock(hh)              # an earlier case may have invalidated it there
+            except Exception:
+                pass                               # not known to node3 yet
+            q.submitblock(p.getblock(hh, 0))
         self.node3_to(p.getblockhash(height))
 
     def node3_to(self, target):
@@ -465,11 +513,11 @@ class UnseenBranchTest(BitcoinTestFramework):
         self.log.info("one parent extension, 3 polls: %r" % ext)
         # Beyond the poll's getbestblockhash: one header read that finds the
         # move was an extension, the checkpoint scan's read of the new block (a
-        # header and the block), and the branch tips. Nothing scales with the
-        # chain.
+        # header and the block), and the branch tips, at the move and once
+        # more at the first poll 12 s after it. Nothing scales with the chain.
         polls = ext.pop("getbestblockhash", 0)
-        self.record("cost: a plain extension adds the extension check, the checkpoint scan and getchaintips",
-                    ext == {"getblockheader": 2, "getblock": 1, "getchaintips": 1},
+        self.record("cost: a plain extension adds the extension check, the checkpoint scan and two readings of the tips",
+                    ext == {"getblockheader": 2, "getblock": 1, "getchaintips": 2},
                     "%r beyond %d polls" % (ext, polls))
         # A question the cache answers: the tip's anchor, via getanchorstatus.
         s0 = self.stats()
@@ -511,7 +559,7 @@ class UnseenBranchTest(BitcoinTestFramework):
         """Case 6."""
         v = self.nodes[2]
         port = rpc_port(5)
-        proxy = NoChainTipsProxy(port, rpc_port(0))
+        proxy = TipsProxy(port, rpc_port(0), "refuse")
         try:
             args = self.seq_args(2, self.options.poll, parent_port=port)
             self.restart_node(2, extra_args=args)
@@ -526,11 +574,12 @@ class UnseenBranchTest(BitcoinTestFramework):
                 warnings = f.read().count("does not answer getchaintips")
             self.record("getchaintips refused: quiet polls cost nothing more",
                         set(quiet) == {"getbestblockhash"}, "%r" % quiet)
-            # Per getchaintips call (one per move): the extension check and the
-            # checkpoint scan, and every distinct anchor asked again.
+            # Per getchaintips call (at the move, and at the poll 12 s after
+            # it): every distinct anchor asked again, beyond the extension
+            # check and the checkpoint scan.
             per_call = [(m.get("getblockheader", 0) - 2) / max(m.get("getchaintips", 0), 1) for m, _ in moves]
             self.record("getchaintips refused: every verdict is asked again at every move",
-                        all(m.get("getchaintips", 0) == 1 for m, _ in moves) and all(pc >= n for pc, (_, n) in zip(per_call, moves)),
+                        all(m.get("getchaintips", 0) >= 1 for m, _ in moves) and all(pc >= n for pc, (_, n) in zip(per_call, moves)),
                         "%s re-asked per getchaintips call, %s distinct anchors" % (per_call, [n for _, n in moves]))
             self.record("getchaintips refused: said once in the log", warnings == 1, "%d warning(s)" % warnings)
         finally:
@@ -589,6 +638,108 @@ class UnseenBranchTest(BitcoinTestFramework):
         self.record(name + ": the block on the restored anchor is accepted", after_x is None, "submitblock %r" % after_x)
         self.record(name + ": the active block anchored on the replacing branch is dropped",
                     y_dropped, "dropped" if y_dropped else "still on the active chain")
+        prod.reconsiderblock(x)
+        self.wait_until(lambda: prod.getbestblockhash() == x, timeout=60)
+
+    def log_from(self, pos):
+        with open(self.nodes[2].debug_log_path, encoding="utf-8", errors="replace") as f:
+            f.seek(pos)
+            return f.read()
+
+    def cached_tips(self):
+        """Case 9."""
+        p, prod, v, q = self.nodes[0], self.nodes[1], self.nodes[2], self.nodes[3]
+        name = "tips cached by a proxy at the move"
+        poll = self.options.poll
+        proxy = TipsProxy(rpc_port(5), rpc_port(0), "cache", ttl=10.0, auth="%s:%s" % (self.rpc_u, self.rpc_p))
+        direct = self.validator_args
+        try:
+            self.validator_args = self.seq_args(2, poll, parent_port=rpc_port(5))
+            self.settle()
+            f = p.getblockcount()
+            self.sync_node3(f)
+            a1, a2 = self.mine(2)
+            x, x_hex = self.produce(a1)
+            prod.invalidateblock(x)
+            for h in (a1, a2):
+                q.submitblock(p.getblock(h, 0))
+            a3, a4 = self.mine(2, node=q)
+            a_raw = [q.getblock(h, 0) for h in (a3, a4)]
+            q.invalidateblock(a1)
+            self.node3_to(p.getblockhash(f))
+            bs = self.generatetoaddress(q, 3, p.getnewaddress(), sync_fun=self.no_op)
+            b_raw = [q.getblock(h, 0) for h in bs]
+            assert_equal(p.getbestblockhash(), a2)
+            self.settle()
+
+            opened = self.open_window()
+            # Someone else's reading loads the cache 7 s before the next poll,
+            # which it then answers: from before the branch.
+            time.sleep(max(0, poll - 8))
+            cached = proxy.prime()
+            for raw in b_raw:
+                p.submitblock(raw)
+            assert_equal(p.getbestblockhash(), bs[2])
+            y, y_hex = self.produce(bs[1])
+            during = (v.submitblock(x_hex), v.submitblock(y_hex))
+            for raw in a_raw:
+                p.submitblock(raw)
+            assert_equal(p.getbestblockhash(), a4)
+            self.close_window(opened)
+            assert_equal(during, ("anchor-stale", None))
+            assert bs[2] not in {t["hash"] for t in cached}
+            hits = proxy.hits
+            self.tick_done()                       # the moving poll
+            hit = proxy.hits - hits
+            # The first poll that begins more than 12 s after the move.
+            polls = 12 // poll + 1
+            for _ in range(polls):
+                self.tick_done()
+            after_x = v.submitblock(x_hex)
+            y_dropped = not self.on_active_chain(y)
+            self.record(name + ": the moving poll read the cached list", hit >= 1, "%d cache hit(s)" % hit)
+            self.record(name + ": %d poll(s) later, with no Bitcoin block, the block on the restored anchor is accepted" % polls,
+                        after_x is None, "submitblock %r" % after_x)
+            self.record(name + ": and the active block anchored on the replacing branch is dropped",
+                        y_dropped, "dropped" if y_dropped else "still on the active chain")
+            prod.reconsiderblock(x)
+            self.wait_until(lambda: prod.getbestblockhash() == x, timeout=60)
+        finally:
+            self.validator_args = direct
+            self.restart_node(2, extra_args=self.validator_args)
+            proxy.stop()
+
+    def bounds(self):
+        """Case 10."""
+        p, v = self.nodes[0], self.nodes[2]
+        tips = len(p.getchaintips())
+        warning = "branch tips exceed what this node reads"
+        proxy = None
+        try:
+            for label, args, make in (
+                ("more tips than the bound", self.validator_args + ["-anchortipsmax=%d" % (tips - 1)], None),
+                ("a reply longer than the bound", self.seq_args(2, self.options.poll, parent_port=rpc_port(5))
+                 + ["-anchortipsmax=%d" % (tips + 10)], (tips + 10) * 256 + 4096 + 10000)):
+                if make:
+                    proxy = TipsProxy(rpc_port(5), rpc_port(0), "pad", pad=make)
+                pos = os.path.getsize(v.debug_log_path)
+                self.restart_node(2, extra_args=args)
+                self.wait_ticks(2)
+                moves = []
+                for _ in range(2):
+                    n = self.anchors_above(-1)
+                    moves.append((self.measure(2, between=self.mine), n))
+                said = self.log_from(pos).count(warning)
+                self.log.info("%s (%d tips): %r at two moves (distinct anchors); %d warning(s)" % (label, tips, moves, said))
+                per_call = [(m.get("getblockheader", 0) - 2) / max(m.get("getchaintips", 0), 1) for m, _ in moves]
+                self.record("bounds, %s: every verdict is asked again at each move" % label,
+                            all(m.get("getchaintips", 0) >= 1 for m, _ in moves) and all(pc >= n for pc, (_, n) in zip(per_call, moves)),
+                            "%s re-asked per getchaintips call, %s distinct anchors" % (per_call, [n for _, n in moves]))
+                self.record("bounds, %s: said once in the log" % label, said == 1, "%d warning(s)" % said)
+        finally:
+            self.restart_node(2, extra_args=self.validator_args)
+            if proxy:
+                proxy.stop()
 
     def run_test(self):
         p = self.nodes[0]
@@ -606,6 +757,8 @@ class UnseenBranchTest(BitcoinTestFramework):
         self.two_deep()
         self.grown_branch()
         self.withheld_tip()
+        self.cached_tips()
+        self.bounds()
 
         wrong = [name for name, (ok, _) in self.results.items() if not ok]
         for name, (ok, detail) in self.results.items():
