@@ -178,4 +178,95 @@ BOOST_AUTO_TEST_CASE(an_answer_asked_before_a_parent_move_is_not_cached_after_it
     BOOST_CHECK(CacheAnchorOkForTesting(800000, anchor, [] {}));
 }
 
+namespace {
+UniValue Tip(const std::string& hash, int height, int branchlen, const std::string& status)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("height", height);
+    o.pushKV("hash", hash);
+    o.pushKV("branchlen", branchlen);
+    o.pushKV("status", status);
+    return o;
+}
+const std::string H_A2 = std::string(63, '0') + "1"; // the active tip
+const std::string H_B1 = std::string(63, '0') + "2"; // a branch forking at 99
+const std::string H_B2 = std::string(63, '0') + "3"; // B1 extended by one block
+const std::string H_C = std::string(63, '0') + "4";  // an old fork at 50
+} // namespace
+
+BOOST_AUTO_TEST_CASE(chain_tips_parse_only_whole_replies)
+{
+    UniValue arr(UniValue::VARR);
+    arr.push_back(Tip(H_A2, 101, 0, "active"));
+    arr.push_back(Tip(H_B1, 100, 1, "valid-fork"));
+    MainchainChainTips tips;
+    BOOST_CHECK(ParseMainchainChainTips(arr, tips));
+    BOOST_CHECK_EQUAL(tips.size(), 2U);
+    BOOST_CHECK_EQUAL(tips[uint256S(H_B1)].height - tips[uint256S(H_B1)].branchlen, 99);
+
+    // One unreadable tip makes the whole reply unreadable: a branch that cannot
+    // be judged must not be passed over as if it were not there.
+    MainchainChainTips untouched;
+    UniValue bad = arr;
+    bad.push_back(Tip("zz", 100, 1, "valid-fork"));
+    BOOST_CHECK(!ParseMainchainChainTips(bad, untouched));
+    BOOST_CHECK(untouched.empty());
+    UniValue too_long(UniValue::VARR);
+    too_long.push_back(Tip(H_B1, 5, 6, "valid-fork"));
+    BOOST_CHECK(!ParseMainchainChainTips(too_long, untouched));
+    UniValue no_status(UniValue::VARR);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("height", 100);
+    o.pushKV("hash", H_B1);
+    o.pushKV("branchlen", 1);
+    no_status.push_back(o);
+    BOOST_CHECK(!ParseMainchainChainTips(no_status, untouched));
+    BOOST_CHECK(!ParseMainchainChainTips(UniValue(UniValue::VOBJ), untouched));
+    BOOST_CHECK(untouched.empty());
+}
+
+BOOST_AUTO_TEST_CASE(a_branch_new_since_the_last_tick_lowers_what_is_kept)
+{
+    MainchainChainTips before;
+    before[uint256S(H_A2)] = {100, 0, "active"};
+    before[uint256S(H_C)] = {60, 10, "valid-fork"};
+
+    // Nothing new: the old fork at 50 was there at the last tick already, and
+    // the active tip moved on (that move is the tip comparison's to judge).
+    MainchainChainTips same = before;
+    same[uint256S(H_A2)] = {101, 0, "active"};
+    BOOST_CHECK(!LowestForkOfNewBranches(before, same));
+
+    // A branch the daemon stood on and left: its fork point.
+    MainchainChainTips flipped = same;
+    flipped[uint256S(H_B1)] = {100, 1, "valid-fork"};
+    BOOST_CHECK_EQUAL(LowestForkOfNewBranches(before, flipped).value_or(-2), 99);
+
+    // The same branch grown by a block that was never connected reads
+    // valid-headers or headers-only: it still counts, because the status
+    // describes only the tip block.
+    for (const char* status : {"valid-headers", "headers-only", "invalid", "unknown"}) {
+        MainchainChainTips grown = same;
+        grown[uint256S(H_B2)] = {101, 2, status};
+        BOOST_CHECK_EQUAL(LowestForkOfNewBranches(before, grown).value_or(-2), 99);
+    }
+
+    // A tip already there whose status changed: an old branch revisited.
+    MainchainChainTips revisited = same;
+    revisited[uint256S(H_C)] = {60, 10, "invalid"};
+    BOOST_CHECK_EQUAL(LowestForkOfNewBranches(before, revisited).value_or(-2), 50);
+
+    // The lowest of several.
+    MainchainChainTips both = flipped;
+    both[uint256S(H_C)] = {60, 10, "invalid"};
+    BOOST_CHECK_EQUAL(LowestForkOfNewBranches(before, both).value_or(-2), 50);
+
+    // The active tip is never a branch, whatever it was before.
+    MainchainChainTips was_fork;
+    was_fork[uint256S(H_C)] = {60, 10, "valid-fork"};
+    MainchainChainTips returned;
+    returned[uint256S(H_C)] = {60, 0, "active"};
+    BOOST_CHECK(!LowestForkOfNewBranches(was_fork, returned));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

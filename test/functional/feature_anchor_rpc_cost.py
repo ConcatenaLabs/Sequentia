@@ -24,7 +24,8 @@ extension cannot alter the best chain below the old tip.
 The fix keeps the verdicts a parent move provably cannot have touched, so:
 
   - a tick where the parent stood still costs NO parent-chain call beyond the
-    poll itself;
+    poll itself and the read of the parent's branches (`getbestblockhash` and
+    `getchaintips`, one each);
   - a tick where the parent appended a block costs a small constant;
   - and neither depends on how many distinct anchors the chain carries.
 
@@ -33,9 +34,10 @@ change could quietly take away. getmainchainrpcstats breaks its count down by
 method, which gives both halves of the measurement exactly:
 
   - `getblockheader` is how an anchor is checked against the parent chain, and
-    on this setup nothing else issues it, so its count IS the anchor-verification
-    cost — cleanly separated from the checkpoint scanner's `getblock` and the
-    block producer's `getblockcount`/`getchaintips`;
+    on this setup the only other caller is the checkpoint scanner, with one read
+    per new parent block, so its count IS the anchor-verification cost plus that
+    constant — cleanly separated from the scanner's `getblock`, the watcher's
+    `getchaintips` and the block producer's `getblockcount`/`getchaintips`;
   - `getbestblockhash` is issued once per watcher tick and by nothing else, so
     its count IS the tick count, and the test can wait for exact numbers of ticks
     instead of guessing at sleeps.
@@ -68,10 +70,11 @@ BLOCKS_PER_ANCHOR = 2    # Sequentia blocks produced per parent block
 ANCHORS_FIRST = 20       # distinct anchors for the first measurement
 ANCHORS_MORE = 40        # anchors added before the second measurement
 
-# Absorbing a parent-chain extension costs exactly one header read: the one that
-# establishes it WAS an extension. Nothing on the chain needs re-checking. This
-# bound leaves room for a stray extra read; what it does not leave room for is a
-# cost that scales with ANCHORS_FIRST or ANCHORS_MORE.
+# Absorbing a parent-chain extension costs two header reads: the one that
+# establishes it WAS an extension, and the checkpoint scanner's read of the new
+# parent block. Nothing on the chain needs re-checking. This bound leaves room
+# for a stray extra read; what it does not leave room for is a cost that scales
+# with ANCHORS_FIRST or ANCHORS_MORE.
 MAX_EXTENSION_COST = 6
 # How much the same measurement may grow when the chain carries ANCHORS_MORE
 # additional distinct anchors. Zero is the honest expectation; the slack absorbs
@@ -138,9 +141,10 @@ class AnchorRpcCostTest(BitcoinTestFramework):
     def stats(self):
         """(anchor checks, watcher ticks) as counted inside node1.
 
-        On this setup `getblockheader` is issued only to judge an anchor against
-        the parent chain, and `getbestblockhash` only once per watcher tick, so
-        the two counts are exactly the cost and the clock. getmainchainrpcstats
+        On this setup `getblockheader` is issued to judge an anchor against the
+        parent chain and once per new parent block by the checkpoint scanner,
+        and `getbestblockhash` only once per watcher tick, so the two counts are
+        the cost (plus that constant) and the clock. getmainchainrpcstats
         itself makes no parent-chain call, so sampling does not perturb what it
         measures."""
         m = self.nodes[1].getmainchainrpcstats()['bymethod']

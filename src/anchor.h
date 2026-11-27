@@ -122,9 +122,11 @@ enum class AnchorCheckResult {
 
 /** Check that the parent-chain block (height, hash) is on the parent chain's
  *  best chain. Definitive verdicts (OK, and off-the-best-chain — never
- *  NO_CONNECTION) are cached, and a cached verdict is discarded exactly when the
- *  parent chain does something that could have changed it: a reorganization at
- *  or below that height. A parent-chain extension changes no verdict and
+ *  NO_CONNECTION) are cached, and a cached verdict is discarded at the anchor
+ *  watcher's first tick after the parent chain did something that could have
+ *  changed it: a reorganization forking below that height, seen either in the
+ *  daemon's tip or in its branches (a branch the daemon moved onto and back
+ *  from between two ticks). A parent-chain extension changes no verdict and
  *  discards none, which is what keeps the watcher's every-tick, no-depth-floor
  *  walk from costing one RPC per anchor per parent block. See AnchorWatchTask
  *  and MainchainUnchangedHeight in anchor.cpp. */
@@ -159,10 +161,11 @@ struct MainchainSyncSnapshot {
 MainchainSyncSnapshot GetMainchainSyncSnapshot();
 
 /** Called by the anchor watcher whenever it sees the parent chain reorganize,
- *  with the height below which nothing changed (the fork point), or -1 when it
- *  could not tell how the tip moved. A plain extension, where the old tip is
- *  still on the best chain, calls nothing: it replaced no block, even one newer
- *  than the watcher's last poll. Set once at the start; the signing check
+ *  in its tip or in a branch new since the last tick, with the height below
+ *  which nothing changed (the lowest fork point), or -1 when it could not tell
+ *  how the tip moved. A plain extension, where the old tip is still on the best
+ *  chain and no branch is new, calls nothing: it replaced no block, even one
+ *  newer than the watcher's last poll. Set once at the start; the signing check
  *  (pos_signing_record.h) uses it to void the escape of a block whose anchor
  *  may have changed side. */
 void SetMainchainMoveListener(std::function<void(int unchanged_height)> listener);
@@ -185,6 +188,28 @@ void NoteAnchorDeferredBlock(uint32_t anchor_height);
  *  Shared by the single-call and batched paths, so the two cannot reach
  *  different conclusions about the same reply. Pure: no network, no caches. */
 AnchorCheckResult InterpretAnchorHeaderReply(const UniValue& reply, uint32_t height);
+
+/** One branch tip of the parent chain, as the daemon's `getchaintips` lists it. */
+struct MainchainChainTip {
+    int height{-1};
+    int branchlen{0};     //!< blocks from the tip back to the daemon's active chain
+    std::string status;   //!< "active", "valid-fork", "valid-headers", "headers-only", "invalid", ...
+};
+using MainchainChainTips = std::map<uint256, MainchainChainTip>;
+
+/** Parse the result of a `getchaintips` call. False (and `out` untouched)
+ *  unless every entry is well formed: a tip that cannot be read is a branch
+ *  that cannot be judged. Pure. */
+bool ParseMainchainChainTips(const UniValue& result, MainchainChainTips& out);
+
+/** The lowest fork height (height - branchlen) among the non-active tips of
+ *  `current` that are new since `previous` (by hash) or whose status changed:
+ *  each is a branch the daemon may have stood on since `previous` was read,
+ *  whatever its status says now, because the status describes only the tip
+ *  block and a branch that was the active chain can have grown a block that
+ *  never was. nullopt when no branch is new or changed. Pure; see
+ *  AnchorWatchTask for why this is what the anchor verdicts need. */
+std::optional<int> LowestForkOfNewBranches(const MainchainChainTips& previous, const MainchainChainTips& current);
 
 /** Fill the verdict caches for many anchors in a few round trips.
  *

@@ -225,6 +225,7 @@ BASE_SCRIPTS = [
     'feature_max_block_weight.py',
     'feature_bitcoin_anchoring.py',
     'feature_bitcoin_anchoring_reconsider.py',
+    'feature_bitcoin_anchoring_unseen_branch.py',
     'feature_anchor_stale_parent.py',
     'feature_parent_coin_record.py',
     'feature_anchor_unreachable_parent.py',

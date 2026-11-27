@@ -252,34 +252,83 @@ of which there is roughly one per Bitcoin block the chain spans.
 
 **Verdicts survive what cannot invalidate them.** Each distinct anchor's verdict
 — canonical, or definitively off the best chain — is cached, and a cached verdict
-is discarded exactly when Bitcoin does something that could have changed it.
-Extending Bitcoin cannot: appending blocks leaves the best chain below the old
-tip untouched, so every verdict already held is still correct. A reorganization
-can, but only above its fork point. So on each Bitcoin tip change the watcher
-spends one `getblockheader` asking whether its previous Bitcoin tip is still on
-the best chain: if it is, the move was an extension and nothing is re-checked; if
-it is not, it walks back to the fork point (one call per block of reorg depth)
-and drops only the verdicts above it.
+is discarded at the first tick after Bitcoin did something that could have
+changed it. Extending Bitcoin cannot: appending blocks leaves the best chain
+below the old tip untouched, so every verdict already held is still correct. A
+reorganization can, but only above its fork point. So on each Bitcoin tip
+change the watcher spends one `getblockheader` asking whether its previous
+Bitcoin tip is still on the best chain: if it is, the move was an extension and
+nothing is re-checked; if it is not, it walks back to the fork point (one call
+per block of reorg depth) and drops only the verdicts above it.
 
-The result: a tick where Bitcoin stood still costs one `getbestblockhash`, and a
-tick where Bitcoin produced a block costs a small constant more — regardless of
-whether the chain is a day or a decade old.
+**Branches Bitcoin left between two ticks.** Comparing two tips cannot show a
+branch the daemon moved onto and back from between them: a tip that was
+replaced and then restored reads as an extension, or as no move at all. A
+verdict taken during the replacement describes the replacing branch, and would
+otherwise outlive it: the node would refuse every block anchored on the
+restored Bitcoin block, or keep a block anchored on the branch Bitcoin left. So
+each tick also reads the daemon's `getchaintips` and compares it with the list
+from the tick before. Every tip that is not the active one and is new, or whose
+status changed, is a branch the daemon may have stood on since, and the
+verdicts above its fork point (`height - branchlen`) are dropped as well. Its
+status is not consulted. It describes only the tip block: a branch that was
+the active chain reads `valid-fork` only until a block it never connected is
+found on top of it, and then reads `valid-headers` or `headers-only`. A branch
+cannot become active without a block the daemon did not have before, and stops
+being active only when another branch outworks it or it fails, which changes
+its status; either way the list changes.
+
+What that costs: one `getchaintips` per tick, and for each new tip one re-check
+of the anchors above its fork point, once, then nothing at later ticks. Several
+new tips in one tick cost what the lowest of them costs. Bitcoin Core stores a
+header fork only if its chain carries nearly as much work as the tip (within
+144 blocks of it: `GetAntiDoSWorkThreshold` in its `net_processing.cpp`), so on
+Bitcoin a new tip costs whoever announces it a valid header at about the tip's
+difficulty, and its fork is at most about 144 blocks down. On testnet4,
+minimum-difficulty blocks make a new tip nearly free, so anyone can cost a node
+the re-check of the anchors above a fork up to that depth, at most once per
+tick: about one call per Bitcoin block above the fork, since a Sequentia anchor
+sits on roughly every Bitcoin block.
+
+A Bitcoin endpoint that answers `getbestblockhash` but refuses `getchaintips`
+cannot show those branches, so nothing it said can be kept from one tick to the
+next: every tick re-asks every distinct anchor on the chain, one call each, and
+the node logs a warning naming `getchaintips` the first time. On the testnet's
+settings that is one call per testnet4 block since the chain's genesis, every
+15 seconds, so such an endpoint is not fit to serve a node.
+
+Two limits remain. A round trip that leaves the daemon's list of tips exactly as
+it was is invisible: only the daemon's own operator can make one, with
+`invalidateblock` and `reconsiderblock` or with `preciousblock`, because a branch
+that wins and then loses under the consensus rules always leaves a new tip. And
+between two ticks a verdict taken on a branch the daemon then left is used until
+the next tick, at most one `anchorpollinterval`: for that long a block anchored
+on the restored block can be refused, or one anchored on the branch Bitcoin left
+can be kept; the tick then corrects both.
+
+The result: a tick where Bitcoin stood still costs one `getbestblockhash` and
+one `getchaintips`, and a tick where Bitcoin produced a block costs a small
+constant more (the extension check, and the checkpoint scan's read of the new
+block) — regardless of whether the chain is a day or a decade old.
 
 This matters more than it looks. Every call opens a **fresh TCP connection**
 (`mainchainrpc.cpp` sends `Connection: close`), and on testnet every node that
-has not configured `-mainchainrpchost` points at the same shared gateway. Before
-this was fixed the watcher discarded all its verdicts on every Bitcoin block,
-extension included, and re-asked about every distinct anchor on the chain: some
-three thousand calls per Bitcoin block on a chain a few weeks old, growing with
-every day the chain lived, from every node, forever.
+has not configured `-mainchainrpchost` points at the same shared gateway. A
+watcher that discarded its verdicts on every Bitcoin block, extension included,
+would re-ask about every distinct anchor on the chain each time: thousands of
+calls per Bitcoin block on a chain a few weeks old, growing with every day the
+chain lives, from every node.
 
 `getmainchainrpcstats` reports the calls this node has made to the Bitcoin
 daemon since startup, in total and per method. Sample it twice around a known
 interval to see the standing load; `getbestblockhash` is issued once per watcher
-tick and by nothing else, so its count is also the tick count and the difference
-between the two is everything the anchor walk actually cost.
-`feature_anchor_rpc_cost.py` asserts that difference does not grow with the
-number of distinct anchors on the chain.
+tick and by nothing else, so its count is also the tick count, and what the
+anchor walk cost is everything else less one `getchaintips` per tick (a block
+producer also calls `getchaintips` when it chooses an anchor).
+`feature_anchor_rpc_cost.py` asserts that this cost does not grow with the
+number of distinct anchors on the chain, and
+`feature_bitcoin_anchoring_unseen_branch.py` that a branch left between two
+ticks leaves no verdict behind.
 
 ### `validateanchor=0` is a master switch, not a single check
 
