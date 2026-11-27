@@ -14,32 +14,42 @@ direction the node refuses, for good, every block anchored on the restored
 Bitcoin block; in the other it keeps a block anchored on a Bitcoin block that
 is no longer on the best chain, and accepts more.
 
-The watcher reads the daemon's chain tips (getchaintips) at every poll: a branch
-the daemon stood on since the last poll is a tip that is new, or whose status
-changed, and every verdict above its fork point is dropped. This test makes
-the daemon move onto a branch and back between two polls of the node under
-test, with checks during the replacement, and asserts what the node holds
-after the next poll:
+The watcher reads the daemon's chain tips (getchaintips) at every poll where
+the tip moved, and compares them with the list read at the previous such poll.
+A branch the daemon stood on in between is a connected tip that is new or
+whose status changed, or a tip whose last block was never connected and that
+has more work than the old tip; every verdict above its fork point is dropped.
+A branch merely observed (a new header-only fork with less work) only has the
+verdicts above its fork asked again. This test makes the daemon move onto a
+branch and back between two polls of the node under test, with checks during
+the replacement, and asserts what the node holds after the next poll:
 
   1. one block replaced and restored, then extended (the case of #467), with
      the mirror: a block anchored on the replacing branch is accepted during
      the replacement and is dropped after the poll, and another is refused;
-  2. the same, restored without an extension: the watcher's tip comparison sees
-     no move at all;
+  2. the same, restored without an extension, which only the daemon's
+     operator can do: the tip does not move, the wrong verdicts stay until the
+     next Bitcoin block, and that poll corrects them;
   3. two blocks replaced and restored: no wrong verdict at either height;
   4. one block replaced, the daemon returns, and the replacing branch grows by a
      block the daemon does not connect before the poll: the branch's tip then
      reads "valid-headers", which hides that the branch was active;
-  5. a header-only fork announced from below the tip: the verdicts above its
-     fork are asked again once, and not at the polls after;
+  5. a header-only fork with less work announced from below the tip: at the
+     next poll where the tip moves, the verdicts above its fork are asked again
+     once, and nothing at the moves after;
   6. a daemon that answers its best hash but refuses getchaintips: nothing is
-     kept from one poll to the next, and the node says so once in its log;
-  7. the cost: a poll where Bitcoin stood still costs one getbestblockhash and
-     one getchaintips, a plain extension adds one getblockheader, and a
-     question answered from the cache costs nothing.
+     kept across a tip move, quiet polls cost nothing more, and the node says
+     so once in its log;
+  7. the cost: a poll where Bitcoin stood still costs one getbestblockhash, a
+     plain extension adds the extension check, the checkpoint scan and one
+     getchaintips, and a question answered from the cache costs nothing;
+  8. a replacing branch whose last block the daemon held only as a header
+     before the replacement: the list of tips reads the same before and after,
+     and only the branch's work, more than the old tip's, shows it.
 
 Topology:
-  node0: the parent chain (stands in for Bitcoin).
+  node0: the parent chain (stands in for Bitcoin): proof of work, so that its
+         headers carry their chainwork.
   node1: the producer: a single genesis-configured staker, so every
          generateposblock block is certified on its own; polls every second.
   node2: the node under test: no stake, polls every POLL seconds, and gets
@@ -132,9 +142,12 @@ class UnseenBranchTest(BitcoinTestFramework):
         self.skip_if_no_wallet()
 
     def parent_args(self, i):
+        # Proof of work, as on Bitcoin: a signed-blocks parent reports no
+        # chainwork, and the watcher then counts every unconnected tip as a
+        # branch it may have stood on.
         return ["-port=%d" % p2p_port(i), "-rpcport=%d" % rpc_port(i),
                 "-validatepegin=0", "-initialfreecoins=0", "-con_blocksubsidy=5000000000",
-                "-anyonecanspendaremine=1", "-signblockscript=51", "-blindedaddresses=0"]
+                "-anyonecanspendaremine=1", "-con_signed_blocks=0", "-blindedaddresses=0"]
 
     def seq_args(self, i, poll, parent_port=None):
         return ["-port=%d" % p2p_port(i), "-rpcport=%d" % rpc_port(i),
@@ -195,13 +208,33 @@ class UnseenBranchTest(BitcoinTestFramework):
         start = self.ticks()
         self.wait_until(lambda: self.ticks() >= start + n, timeout=self.options.poll * (n + 4))
 
-    def open_window(self):
-        """Wait for a poll of the node under test to begin, give it a moment to
-        finish, and return its tick count: what follows happens before the next."""
+    def tick_done(self):
+        """Wait for a poll of the node under test to begin, then give it a
+        moment to finish (its work takes milliseconds); return its stats."""
         start = self.ticks()
         self.wait_until(lambda: self.ticks() > start, timeout=self.options.poll * 3)
         time.sleep(1)
-        return self.ticks()
+        return self.stats()
+
+    def open_window(self):
+        """Return the tick count just after a poll finished: what follows
+        happens before the next."""
+        return self.tick_done()["getbestblockhash"]
+
+    @staticmethod
+    def delta(s0, s1):
+        return {m: s1.get(m, 0) - s0.get(m, 0) for m in s1 if s1.get(m, 0) != s0.get(m, 0)}
+
+    def measure(self, polls, between=None):
+        """Calls per method over `polls` whole polls, sampled after each end
+        poll has finished; `between` runs right after the first sample."""
+        s0 = self.tick_done()
+        if between:
+            between()
+        for _ in range(polls - 1):
+            self.wait_ticks(1)
+        s1 = self.tick_done()
+        return self.delta(s0, s1)
 
     def close_window(self, opened):
         assert_equal(self.ticks(), opened)  # a poll fell inside the flip: rerun
@@ -232,7 +265,19 @@ class UnseenBranchTest(BitcoinTestFramework):
         p, q = self.nodes[0], self.nodes[3]
         for h in range(1, height + 1):
             q.submitblock(p.getblock(p.getblockhash(h), 0))
-        assert_equal(q.getbestblockhash(), p.getblockhash(height))
+        self.node3_to(p.getblockhash(height))
+
+    def node3_to(self, target):
+        """Make `target` node3's tip: node3 may hold forks of earlier cases
+        with as much work or more."""
+        q = self.nodes[3]
+        for _ in range(20):
+            if q.getbestblockhash() == target:
+                break
+            q.preciousblock(target)
+            if q.getbestblockhash() != target:
+                q.invalidateblock(q.getbestblockhash())
+        assert_equal(q.getbestblockhash(), target)
 
     def record(self, name, ok, detail):
         self.results[name] = (ok, detail)
@@ -243,7 +288,7 @@ class UnseenBranchTest(BitcoinTestFramework):
     def one_deep(self, extend):
         """Cases 1 and 2."""
         p, prod, v = self.nodes[0], self.nodes[1], self.nodes[2]
-        name = "one deep, %s" % ("restored and extended" if extend else "restored, no extension")
+        name = "one deep, %s" % ("restored and extended" if extend else "restored, no extension, then a block")
         a = self.mine()[0]
         x, x_hex = self.produce(a)
         prod.invalidateblock(x)
@@ -270,6 +315,15 @@ class UnseenBranchTest(BitcoinTestFramework):
         assert_equal(tips[b], "valid-fork")
 
         self.after_next_poll()
+        if not extend:
+            # The tip did not move, so the branches were not read: the stated
+            # limit, which only the daemon's operator can reach. It lasts until
+            # the next Bitcoin block.
+            held = (v.submitblock(x_hex), self.on_active_chain(y))
+            self.record(name + ": until the next Bitcoin block the wrong verdicts stay (operator-only limit)",
+                        held == ("anchor-stale", True), "X %r, Y on the active chain %r" % held)
+            self.mine()
+            self.after_next_poll()
         y_dropped = not self.on_active_chain(y)
         after_x = v.submitblock(x_hex)
         after_y2 = v.submitblock(y2_hex)
@@ -385,11 +439,18 @@ class UnseenBranchTest(BitcoinTestFramework):
 
     def quiet_cost(self, ticks=4):
         """Calls per method over `ticks` polls with the parent standing still."""
-        self.wait_ticks(1)
-        s0 = self.stats()
-        self.wait_ticks(ticks)
-        s1 = self.stats()
-        return {m: s1.get(m, 0) - s0.get(m, 0) for m in s1 if s1.get(m, 0) != s0.get(m, 0)}
+        return self.measure(ticks)
+
+    def anchors_above(self, height):
+        """Distinct anchors above `height` the node under test would ask about
+        again: on its active chain and in its recovery set."""
+        v = self.nodes[2]
+        out = self.distinct_anchors(height)
+        for h in v.getanchorstatus()["recoveryset"]:
+            hdr = v.getblockheader(h)
+            if hdr["anchorheight"] > height:
+                out.add((hdr["anchorheight"], hdr["anchorhash"]))
+        return len(out)
 
     def cost(self):
         """Case 7."""
@@ -397,31 +458,25 @@ class UnseenBranchTest(BitcoinTestFramework):
         self.settle()
         n = len(self.distinct_anchors())
         quiet = self.quiet_cost()
-        ticks = quiet.get("getbestblockhash", 0)
         self.log.info("quiet polls, %d distinct anchors on the chain: %r" % (n, quiet))
-        self.record("cost: a quiet poll costs getbestblockhash and getchaintips only",
-                    set(quiet) == {"getbestblockhash", "getchaintips"} and quiet["getchaintips"] == ticks,
-                    "%r over %d polls" % (quiet, ticks))
-        s0 = self.stats()
-        self.mine()
-        self.wait_ticks(3)
-        s1 = self.stats()
-        ext = {m: s1.get(m, 0) - s0.get(m, 0) for m in s1 if s1.get(m, 0) != s0.get(m, 0)}
+        self.record("cost: a quiet poll costs one getbestblockhash only",
+                    set(quiet) == {"getbestblockhash"}, "%r" % quiet)
+        ext = self.measure(3, between=self.mine)
         self.log.info("one parent extension, 3 polls: %r" % ext)
-        # Beyond the two calls of every poll: one header read that finds the
-        # move was an extension, and the checkpoint scan's read of the new
-        # block (a header and the block). Nothing scales with the chain.
+        # Beyond the poll's getbestblockhash: one header read that finds the
+        # move was an extension, the checkpoint scan's read of the new block (a
+        # header and the block), and the branch tips. Nothing scales with the
+        # chain.
         polls = ext.pop("getbestblockhash", 0)
-        self.record("cost: a plain extension adds the extension check and the checkpoint scan only",
-                    ext.pop("getchaintips", 0) == polls and ext == {"getblockheader": 2, "getblock": 1},
+        self.record("cost: a plain extension adds the extension check, the checkpoint scan and getchaintips",
+                    ext == {"getblockheader": 2, "getblock": 1, "getchaintips": 1},
                     "%r beyond %d polls" % (ext, polls))
         # A question the cache answers: the tip's anchor, via getanchorstatus.
         s0 = self.stats()
         for _ in range(5):
             assert_equal(self.nodes[2].getanchorstatus()["anchorstatus"], "ok")
         s1 = self.stats()
-        asked = {m: s1.get(m, 0) - s0.get(m, 0) for m in s1 if m != "getbestblockhash" and m != "getchaintips"
-                 and s1.get(m, 0) != s0.get(m, 0)}
+        asked = {m: d for m, d in self.delta(s0, s1).items() if m != "getbestblockhash"}
         self.record("cost: a question answered from the cache costs nothing", asked == {}, "%r" % asked)
 
     def header_fork(self):
@@ -432,22 +487,25 @@ class UnseenBranchTest(BitcoinTestFramework):
         fork_height = p.getblockcount() - 3
         self.sync_node3(fork_height)
         h = self.mine(1, node=q)[0]
-        above = len(self.distinct_anchors(fork_height))
-        recovery = len(self.nodes[2].getanchorstatus()["recoveryset"])
-        self.wait_ticks(1)
-        s0 = self.stats()
-        assert p.submitheader(q.getblockheader(h, False)) is None
+        above = self.anchors_above(fork_height)
+
+        def announce():
+            assert p.submitheader(q.getblockheader(h, False)) is None
+        quiet = self.measure(2, between=announce)
         tips = {t["hash"]: t for t in p.getchaintips()}
         assert_equal((tips[h]["status"], tips[h]["height"] - tips[h]["branchlen"]), ("headers-only", fork_height))
-        self.after_next_poll()
-        s1 = self.stats()
-        first = s1.get("getblockheader", 0) - s0.get("getblockheader", 0)
-        later = self.quiet_cost(3).get("getblockheader", 0)
-        self.log.info("header-only fork at %d: %d anchors above it (and %d in the recovery set); "
-                      "re-asked %d at the poll after it, %d over the next 3" % (fork_height, above, recovery, first, later))
-        self.record("header-only fork: the verdicts above its fork are asked again once",
-                    1 <= first <= above + recovery, "%d re-asked, %d anchors above the fork" % (first, above))
-        self.record("header-only fork: and nothing at the polls after", later == 0, "%d" % later)
+        first = self.measure(2, between=self.mine)
+        later = self.measure(2, between=self.mine)
+        self.log.info("header-only fork at %d, %d anchors above it: %r while the tip stood still, %r at the move after, "
+                      "%r at the next move" % (fork_height, above, quiet, first, later))
+        self.record("header-only fork: nothing while the tip stands still", set(quiet) == {"getbestblockhash"}, "%r" % quiet)
+        # The move: its extension check and checkpoint scan (2 headers, 1
+        # block), the fork's chainwork (1 header), and the anchors above it.
+        self.record("header-only fork: at the next move, the verdicts above its fork are asked again once",
+                    first.get("getblockheader", 0) == 3 + above,
+                    "%d header reads, %d anchors above the fork" % (first.get("getblockheader", 0), above))
+        self.record("header-only fork: and nothing at the moves after",
+                    later.get("getblockheader", 0) == 2, "%d header reads" % later.get("getblockheader", 0))
 
     def refused_chaintips(self):
         """Case 6."""
@@ -458,19 +516,79 @@ class UnseenBranchTest(BitcoinTestFramework):
             args = self.seq_args(2, self.options.poll, parent_port=port)
             self.restart_node(2, extra_args=args)
             self.wait_ticks(2)
-            n = len(self.distinct_anchors()) + len(v.getanchorstatus()["recoveryset"])
-            cost = self.quiet_cost(3)
-            ticks = cost.get("getbestblockhash", 0)
-            per_poll = cost.get("getblockheader", 0) / max(ticks, 1)
-            self.log.info("getchaintips refused: %r over %d polls, %d distinct anchors (with the recovery set)" % (cost, ticks, n))
+            quiet = self.quiet_cost(3)
+            moves = []
+            for _ in range(2):
+                n = self.anchors_above(-1)
+                moves.append((self.measure(2, between=self.mine), n))
+            self.log.info("getchaintips refused: %r over quiet polls; %r at two moves (distinct anchors)" % (quiet, moves))
             with open(v.debug_log_path, encoding="utf-8") as f:
                 warnings = f.read().count("does not answer getchaintips")
-            self.record("getchaintips refused: every verdict is asked again at every poll",
-                        per_poll >= len(self.distinct_anchors()) - 1, "%.1f getblockheader per poll" % per_poll)
+            self.record("getchaintips refused: quiet polls cost nothing more",
+                        set(quiet) == {"getbestblockhash"}, "%r" % quiet)
+            # Per getchaintips call (one per move): the extension check and the
+            # checkpoint scan, and every distinct anchor asked again.
+            per_call = [(m.get("getblockheader", 0) - 2) / max(m.get("getchaintips", 0), 1) for m, _ in moves]
+            self.record("getchaintips refused: every verdict is asked again at every move",
+                        all(m.get("getchaintips", 0) == 1 for m, _ in moves) and all(pc >= n for pc, (_, n) in zip(per_call, moves)),
+                        "%s re-asked per getchaintips call, %s distinct anchors" % (per_call, [n for _, n in moves]))
             self.record("getchaintips refused: said once in the log", warnings == 1, "%d warning(s)" % warnings)
         finally:
             self.restart_node(2, extra_args=self.validator_args)
             proxy.stop()
+
+    def withheld_tip(self):
+        """Case 8: the replacing branch's last block was held as a header."""
+        p, prod, v, q = self.nodes[0], self.nodes[1], self.nodes[2], self.nodes[3]
+        name = "replacing branch held as a header before"
+        # The producer anchors one block below the parent's tip, so that the
+        # blocks of this case sit at a height a plain extension keeps.
+        self.restart_node(1, extra_args=self.seq_args(1, 1) + ["-anchoravoidcontested=0", "-anchorminconf=2"])
+        self.settle()
+        f = p.getblockcount()
+        self.sync_node3(f)
+        a1, a2 = self.mine(2)
+        x, x_hex = self.produce(a1)
+        prod.invalidateblock(x)
+        # On node3: A3, A4 on A2, and B1..B4 on the fork point.
+        for h in (a1, a2):
+            q.submitblock(p.getblock(h, 0))
+        a3, a4 = self.mine(2, node=q)
+        a_raw = [q.getblock(h, 0) for h in (a3, a4)]
+        q.invalidateblock(a1)
+        self.node3_to(p.getblockhash(f))
+        # To a fresh address: B1 must not be the A1 just invalidated.
+        bs = self.generatetoaddress(q, 4, p.getnewaddress(), sync_fun=self.no_op)
+        b_raw = [q.getblock(h, 0) for h in bs]
+        # The parent learns B's headers only, before the window.
+        for h in bs:
+            assert p.submitheader(q.getblockheader(h, False)) is None
+        assert_equal(p.getbestblockhash(), a2)
+        self.settle()
+
+        def side_tips():
+            return sorted((t["hash"], t["status"]) for t in p.getchaintips() if t["status"] != "active")
+        before = side_tips()
+        opened = self.open_window()
+        for raw in b_raw[:3]:
+            p.submitblock(raw)
+        assert_equal(p.getbestblockhash(), bs[2])
+        y, y_hex = self.produce(bs[1])
+        during = (v.submitblock(x_hex), v.submitblock(y_hex))
+        for raw in a_raw:
+            p.submitblock(raw)
+        assert_equal(p.getbestblockhash(), a4)
+        self.close_window(opened)
+        assert_equal(during, ("anchor-stale", None))
+        assert_equal(side_tips(), before)          # the list reads the same
+        assert (bs[3], "headers-only") in before
+
+        self.after_next_poll()
+        y_dropped = not self.on_active_chain(y)
+        after_x = v.submitblock(x_hex)
+        self.record(name + ": the block on the restored anchor is accepted", after_x is None, "submitblock %r" % after_x)
+        self.record(name + ": the active block anchored on the replacing branch is dropped",
+                    y_dropped, "dropped" if y_dropped else "still on the active chain")
 
     def run_test(self):
         p = self.nodes[0]
@@ -487,6 +605,7 @@ class UnseenBranchTest(BitcoinTestFramework):
         self.one_deep(extend=False)
         self.two_deep()
         self.grown_branch()
+        self.withheld_tip()
 
         wrong = [name for name, (ok, _) in self.results.items() if not ok]
         for name, (ok, detail) in self.results.items():
