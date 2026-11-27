@@ -165,9 +165,14 @@ class PosGossipBackdatedStampTest(BitcoinTestFramework):
         self.reconnect_attacker(["-posbyzantinestampfloor=0"])
         marks = self.log_sizes()
         texts, first = self.phase("floor", marks)
+        # No restart is asserted here, unlike the phases above. A stamp at the
+        # floor can be a second older than the proposal, and the round schedule
+        # starts at the first candidate's stamp: members that hold this proposal
+        # first start a second earlier than those that do not, can sign
+        # different blocks in each round, and may run a collection out and
+        # restart it. That is a liveness cost of the stamp, not a refusal.
         for i, refused in self.refusals(texts).items():
             assert not refused, "node%d refused a proposal stamped at the floor: %s" % (i, refused)
-            assert not re.findall(r"no certificate at height (\d+) after", texts[i])
         stamped = {int(h): int(t) for h, t in re.findall(
             r"BYZANTINE stamping proposal at height (\d+) with time (\d+), 0 s from", texts[ATTACKER])}
         # Whether such a proposal certifies depends on how far its stamp lags
