@@ -313,9 +313,21 @@ BOOST_AUTO_TEST_CASE(a_branch_the_daemon_may_have_stood_on_is_evidence_and_a_mer
     BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 50);
     BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 50);
 
-    // Chainwork is asked only of tips never connected, and the active tip is
-    // never a branch, whatever it was before.
-    BOOST_CHECK(!asked.count(uint256S(H_B1)) && !asked.count(uint256S(H_C)));
+    // An invalid tip with no more work than the old tip proves no move: a
+    // block with valid proof of work and a bad body is marked failed without
+    // ever being connected. It is asked about again, and voids nothing; with
+    // more work it is evidence.
+    work[uint256S(H_C)] = arith_uint256(100);
+    c = ClassifyChangedBranches(before, revisited, old_work, work_of);
+    BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 50);
+    BOOST_CHECK(!c.moved_below);
+    work[uint256S(H_C)] = arith_uint256(101);
+    c = ClassifyChangedBranches(before, revisited, old_work, work_of);
+    BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 50);
+
+    // Chainwork is asked of tips never connected and of new invalid ones only,
+    // and the active tip is never a branch, whatever it was before.
+    BOOST_CHECK(!asked.count(uint256S(H_B1)) && asked.count(uint256S(H_C)));
     MainchainChainTips was_fork;
     was_fork[uint256S(H_C)] = {60, 10, "valid-fork"};
     MainchainChainTips returned;

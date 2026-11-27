@@ -112,7 +112,9 @@ static void http_error_cb(enum evhttp_request_error err, void *ctx)
 //! Split out so that the single-call and batch paths share one piece of
 //! transport, authentication and error handling. Two copies of this would drift
 //! the first time somebody fixed a bug in one of them.
-static UniValue MainChainHttpJson(const std::string& strRequest, int64_t deadline_ms = 0)
+//! `max_body_bytes`, when not 0, bounds the reply as it is read: a longer one
+//! is abandoned and throws MainchainReplyTooLarge.
+static UniValue MainChainHttpJson(const std::string& strRequest, int64_t deadline_ms = 0, size_t max_body_bytes = 0)
 {
     std::string host = gArgs.GetArg("-mainchainrpchost", DEFAULT_RPCCONNECT);
     int port = gArgs.GetIntArg("-mainchainrpcport", BaseParams().MainchainRPCPort());
@@ -139,6 +141,7 @@ static UniValue MainChainHttpJson(const std::string& strRequest, int64_t deadlin
         // Never 0: libevent reads that as "use my own defaults", not "no timeout".
         evhttp_connection_set_timeout(evcon.get(), timeout_s);
     }
+    if (max_body_bytes > 0) evhttp_connection_set_max_body_size(evcon.get(), max_body_bytes);
 
     HTTPReply response;
     if (deadline) response.base = base.get();
@@ -190,6 +193,14 @@ static UniValue MainChainHttpJson(const std::string& strRequest, int64_t deadlin
     }
     event_base_dispatch(base.get());
 
+#if LIBEVENT_VERSION_NUMBER >= 0x02010300
+    if (response.status == 0 && response.error == EVREQ_HTTP_DATA_TOO_LONG) {
+        throw MainchainReplyTooLarge(strprintf("the reply is longer than %u bytes", (unsigned)max_body_bytes));
+    }
+#endif
+    if (max_body_bytes > 0 && response.body.size() > max_body_bytes) {
+        throw MainchainReplyTooLarge(strprintf("the reply is longer than %u bytes", (unsigned)max_body_bytes));
+    }
     if (response.status == 0)
         throw CConnectionFailed(strprintf("couldn't connect to server: %s (code %d)\n(make sure server is running and you are connecting to the correct RPC port)", http_errorstring(response.error), response.error));
     else if (response.status == HTTP_UNAUTHORIZED)
@@ -207,7 +218,7 @@ static UniValue MainChainHttpJson(const std::string& strRequest, int64_t deadlin
     return valReply;
 }
 
-UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params)
+UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params, size_t max_reply_bytes)
 {
     // Count at entry, before anything can throw: a call that fails still cost a
     // connection attempt to the parent daemon, and the point of the counter is
@@ -218,7 +229,7 @@ UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params)
         ++g_mainchain_rpc_bymethod[strMethod];
     }
 
-    const UniValue valReply = MainChainHttpJson(JSONRPCRequestObj(strMethod, params, 1).write() + "\n");
+    const UniValue valReply = MainChainHttpJson(JSONRPCRequestObj(strMethod, params, 1).write() + "\n", 0, max_reply_bytes);
     const UniValue& reply = valReply.get_obj();
     if (reply.empty())
         throw std::runtime_error("expected reply to have result, error and id properties");

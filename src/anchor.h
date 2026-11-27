@@ -39,6 +39,13 @@ static const int DEFAULT_ANCHOR_MIN_CONF = 1;
 /** Default seconds between polls of the parent chain daemon for new blocks
  *  and reorganizations. */
 static const int DEFAULT_ANCHOR_POLL_INTERVAL = 5;
+/** The most parent-chain branch tips the anchor watcher reads in one tick
+ *  (-anchortipsmax); a daemon listing more counts as one that gave no list. */
+static const int64_t DEFAULT_ANCHOR_TIPS_MAX = 50000;
+/** Seconds after a tip move at which the anchor watcher reads the daemon's
+ *  branch tips once more: longer than a caching proxy keeps a reply (the
+ *  testnet's keeps one 10 s), so that reading was answered after the move. */
+static const int64_t ANCHOR_TIPS_SETTLE_SECONDS = 12;
 /** Whether the block producer avoids anchoring a new block onto a parent-chain
  *  height that a competing branch is currently contesting (-anchoravoidcontested).
  *  Pure producer-side policy; see GetAnchorForNewBlock. */
@@ -211,12 +218,16 @@ bool ParseMainchainChainTips(const UniValue& result, MainchainChainTips& out);
  *  (whose chainwork is `old_tip_work`, absent when unknown).
  *
  *  A branch the daemon stood on since the older reading shows in `current` in
- *  one of two ways. If the branch's last block was connected, its tip is new or
- *  its status changed, and the status says it was connected ("valid-fork", or
- *  "invalid" for one that failed). If its last block was never connected (the
- *  daemon holds it as a header, "headers-only", or holds its data without having
- *  connected it, "valid-headers"), the part that was active had to outwork the
- *  old tip, so the tip has more chainwork than `old_tip`, new or not.
+ *  one of three ways. If the branch's last block was connected, its tip is new
+ *  or its status changed, and the status says it was connected ("valid-fork").
+ *  If the branch then failed, its tip is new or changed, "invalid", and has
+ *  more chainwork than `old_tip`: the daemon switches only to more work, and a
+ *  block with valid proof of work and a bad body is marked failed without ever
+ *  being connected, so an invalid tip with no more work proves nothing. If its
+ *  last block was never connected (the daemon holds it as a header,
+ *  "headers-only", or holds its data without having connected it,
+ *  "valid-headers"), the part that was active had to outwork the old tip, so
+ *  the tip has more chainwork than `old_tip`, new or not.
  *
  *  `recheck_above`: the lowest fork height (height - branchlen) of every tip of
  *  either kind, and of every other non-active tip that is new or changed: a
@@ -228,7 +239,7 @@ bool ParseMainchainChainTips(const UniValue& result, MainchainChainTips& out);
  *
  *  `work_of` gives a tip's chainwork, or nullopt when it cannot be had; an
  *  unknown chainwork, here or for the old tip, counts as more. Called only for
- *  tips that are not connected. */
+ *  tips that are not connected, and for invalid ones that are new or changed. */
 struct ChangedBranches {
     std::optional<int> recheck_above;
     std::optional<int> moved_below;
