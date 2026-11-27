@@ -110,6 +110,11 @@ class PosGossipBackdatedStampTest(BitcoinTestFramework):
             return len(self.attacker_first(texts)) >= want_first
         self.wait_until(enough, timeout=300)
         first = self.attacker_first(texts)
+        # The honest members log their verdict on the last of those heights as
+        # they settle it: read the logs again once every one of them is past it.
+        self.wait_until(lambda: all(self.nodes[i].getblockcount() > max(first) for i in HONEST), timeout=120)
+        texts.update({i: self.log_from(i, marks[i]) for i in range(COMMITTEE)})
+        first = [h for h in self.attacker_first(texts) if h <= max(first)]
         self.log.info("%s: node%d ranked first at heights %s" % (name, ATTACKER, first))
         return texts, first
 
@@ -160,9 +165,14 @@ class PosGossipBackdatedStampTest(BitcoinTestFramework):
         self.reconnect_attacker(["-posbyzantinestampfloor=0"])
         marks = self.log_sizes()
         texts, first = self.phase("floor", marks)
+        # No restart is asserted here, unlike the phases above. A stamp at the
+        # floor can be a second older than the proposal, and the round schedule
+        # starts at the first candidate's stamp: members that hold this proposal
+        # first start a second earlier than those that do not, can sign
+        # different blocks in each round, and may run a collection out and
+        # restart it. That is a liveness cost of the stamp, not a refusal.
         for i, refused in self.refusals(texts).items():
             assert not refused, "node%d refused a proposal stamped at the floor: %s" % (i, refused)
-            assert not re.findall(r"no certificate at height (\d+) after", texts[i])
         stamped = {int(h): int(t) for h, t in re.findall(
             r"BYZANTINE stamping proposal at height (\d+) with time (\d+), 0 s from", texts[ATTACKER])}
         # Whether such a proposal certifies depends on how far its stamp lags
@@ -174,3 +184,7 @@ class PosGossipBackdatedStampTest(BitcoinTestFramework):
                honest[0].getblock(honest[0].getblockhash(h))["time"] == stamped[h]]
         self.log.info("floor: %d proposals stamped at the floor, none refused; node%d's certified at %s of %s" %
                       (len(stamped), ATTACKER, won, first))
+
+
+if __name__ == '__main__':
+    PosGossipBackdatedStampTest().main()

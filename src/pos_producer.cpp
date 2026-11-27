@@ -12,6 +12,7 @@
 #include <hash.h>
 #include <logging.h>
 #include <consensus/merkle.h>
+#include <deploymentstatus.h>
 #include <musig.h>
 #include <net.h>
 #include <netmessagemaker.h>
@@ -282,7 +283,7 @@ PosCompactProposal MakePosCompactProposal(const CBlock& block)
     return c;
 }
 
-std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact, CTxMemPool& mempool)
+std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact, CTxMemPool& mempool, bool segwit_active)
 {
     if (!compact.coinbase) return nullptr;
     auto block = std::make_shared<CBlock>();
@@ -298,9 +299,72 @@ std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact
     }
     // The header's merkle root verifies the reconstruction: if it matches, the
     // looked-up transactions are exactly the ones the proposer committed to.
-    bool mutated = false;
-    if (BlockMerkleRoot(*block, &mutated) != block->hashMerkleRoot || mutated) return nullptr;
+    // SEQUENTIA: but only their txids. A transaction with the same txid and
+    // another witness (any witness item a script leaves unconstrained can be
+    // changed by anyone who relays it) passes that root, and a block rebuilt
+    // with it fails `bad-witness-merkle-match`, which would make this member
+    // exclude an honest leader. So the whole body is checked against the header
+    // (PosProposalBodyFault), and on a mismatch the caller fetches the full
+    // proposal instead.
+    if (PosProposalBodyFault(*block, segwit_active)) return nullptr;
     return block;
+}
+
+static CScript PosLargestCertificatePlaceholder(const Consensus::Params& params)
+{
+    // One push, as large as a solution of at most max_block_signature_size
+    // bytes can hold (the push's own opcode and length count).
+    size_t n = params.max_block_signature_size;
+    CScript placeholder;
+    while (true) {
+        placeholder = CScript() << std::vector<unsigned char>(n, 0);
+        if (placeholder.size() <= params.max_block_signature_size || n == 0) break;
+        --n;
+    }
+    return placeholder;
+}
+
+std::optional<std::string> PosProposalBodyFault(const CBlock& block, bool segwit_active)
+{
+    if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) return std::string{"bad-cb-missing"};
+    // The transactions' non-witness data: bound by the header's merkle root.
+    bool mutated = false;
+    if (BlockMerkleRoot(block, &mutated) != block.hashMerkleRoot) return std::string{"bad-txnmrklroot"};
+    if (mutated) return std::string{"bad-txns-duplicate"};
+    // The coinbase input's witness is outside both trees, so the rules leave it
+    // nothing a relay could add (ContextualCheckBlock's bad-cb-witness).
+    for (const auto& inwit : block.vtx[0]->witness.vtxinwit) {
+        if (!inwit.vchIssuanceAmountRangeproof.empty() || !inwit.vchInflationKeysRangeproof.empty() ||
+            !inwit.m_pegin_witness.IsNull()) {
+            return std::string{"bad-cb-witness"};
+        }
+    }
+    // Every other witness: bound by the coinbase's witness commitment.
+    if (!PosProposalWitnessesMatch(block, segwit_active)) return std::string{"bad-witness-merkle-match"};
+    return std::nullopt;
+}
+
+bool PosProposalWitnessesMatch(const CBlock& block, bool segwit_active)
+{
+    if (block.vtx.empty()) return false;
+    // Before segwit is active a block may carry a commitment without its nonce,
+    // and no witness at all: ContextualCheckBlock checks only the latter then.
+    const int commitpos = segwit_active ? GetWitnessCommitmentIndex(block) : NO_WITNESS_COMMITMENT;
+    if (commitpos == NO_WITNESS_COMMITMENT) {
+        // A block without a commitment carries no witness at all.
+        for (const CTransactionRef& tx : block.vtx) {
+            if (tx->HasWitness()) return false;
+        }
+        return true;
+    }
+    const CTransaction& coinbase = *block.vtx[0];
+    if (coinbase.witness.vtxinwit.empty() || coinbase.witness.vtxinwit[0].scriptWitness.stack.size() != 1 ||
+        coinbase.witness.vtxinwit[0].scriptWitness.stack[0].size() != 32) {
+        return false;
+    }
+    uint256 root = BlockWitnessMerkleRoot(block);
+    CHash256().Write(root).Write(coinbase.witness.vtxinwit[0].scriptWitness.stack[0]).Finalize(root);
+    return memcmp(root.begin(), &coinbase.vout[commitpos].scriptPubKey[6], 32) == 0;
 }
 
 bool ProducePosBlock(ChainstateManager& chainman, CTxMemPool& mempool,
@@ -779,12 +843,23 @@ void PosProducer::ThreadLoop()
 {
     while (true) {
         int64_t sleep_ms = Step();
-        std::unique_lock<std::mutex> lock(m_mutex);
-        if (m_stop) break;
-        m_cv.wait_for(lock, std::chrono::milliseconds(sleep_ms),
-                      [this] { return m_stop || m_wake; });
-        if (m_stop) break;
-        m_wake = false;
+        // SEQUENTIA: the wait is cut into slices, so that a body request whose
+        // answer is late moves on to the next announcer within a slice; Step
+        // still runs only when its own wait is over or the producer is woken.
+        const int64_t until = GetTimeMillis() + sleep_ms;
+        bool stop = false;
+        while (true) {
+            RetryProposalFetches();
+            const int64_t left = until - GetTimeMillis();
+            if (left <= 0) break;
+            std::unique_lock<std::mutex> lock(m_mutex);
+            if (m_stop) { stop = true; break; }
+            m_cv.wait_for(lock, std::chrono::milliseconds(std::min<int64_t>(left, AnswerMs() / 4)),
+                          [this] { return m_stop || m_wake; });
+            if (m_stop) { stop = true; break; }
+            if (m_wake) { m_wake = false; break; }
+        }
+        if (stop) break;
     }
 }
 
@@ -1262,6 +1337,17 @@ void PosProducer::RecordCandidate(const std::shared_ptr<const CBlock>& block, co
     if (height < m_round_height) return; // stale
     if (height > m_round_height) {
         m_round_height = height;
+        // SEQUENTIA: the fetch book's entries for proposals that no longer build
+        // on the tip go (their collection is over), with the marks pointing at them.
+        for (auto it = m_fetches.begin(); it != m_fetches.end();) {
+            it = it->second.parent != block->hashPrevBlock ? m_fetches.erase(it) : std::next(it);
+        }
+        for (auto it = m_source_marks.begin(); it != m_source_marks.end();) {
+            std::deque<uint256>& marks = it->second;
+            marks.erase(std::remove_if(marks.begin(), marks.end(), [&](const uint256& h) { return !m_fetches.count(h); }),
+                        marks.end());
+            it = marks.empty() ? m_source_marks.erase(it) : std::next(it);
+        }
         m_candidates.clear();
         m_excluded.clear();
         m_anchor_deferred.clear();
@@ -1351,6 +1437,15 @@ std::vector<const PosProducer::RoundCandidate*> PosProducer::RankedCandidates(bo
 int64_t PosProducer::WindowMs() const
 {
     return m_window_override_ms > 0 ? m_window_override_ms : 500 + 25 * (int64_t)g_pos_committee_size;
+}
+
+int64_t PosProducer::AnswerMs() const
+{
+    // A quarter of the collection window, so that a silent first announcer
+    // leaves time to ask the next one, and at least three more, before the
+    // window closes; never under 150 ms (a round trip across the network) nor
+    // over 1,000 ms.
+    return std::clamp<int64_t>(WindowMs() / 4, POS_PROPOSAL_FETCH_ANSWER_MIN_MS, POS_PROPOSAL_FETCH_ANSWER_MAX_MS);
 }
 
 int64_t PosProducer::RoundMs() const
@@ -1607,14 +1702,30 @@ bool PosProducer::ProposeGossip(const CKey& leader_key)
         // bad-cb-multiple). Cheap checks (VRF, leader signature) pass, so it is
         // recorded as a candidate; lazy validation must reject it at sign time and
         // exclude the leader.
+        // The second coinbase differs from the first and the commitments are
+        // made again, so the body matches its header: the block is invalid in
+        // its content (bad-cb-multiple), the leader's fault, not a body its
+        // header does not bind. It replaces the genuine one among this node's
+        // candidates, so the node serves it to members that ask for its body.
         auto bad = std::make_shared<CBlock>(*block);
-        bad->vtx.push_back(bad->vtx[0]);
-        bad->hashMerkleRoot = BlockMerkleRoot(*bad);
+        CMutableTransaction second{*bad->vtx[0]};
+        second.vin[0].scriptSig << OP_TRUE;
+        bad->vtx.push_back(MakeTransactionRef(std::move(second)));
+        if (GetWitnessCommitmentIndex(*bad) != NO_WITNESS_COMMITMENT) {
+            node::RegenerateCommitments(*bad, m_chainman);
+        } else {
+            bad->hashMerkleRoot = BlockMerkleRoot(*bad);
+        }
         bad->proof.solution = CScript();
         std::vector<unsigned char> sig_bad;
         if (leader_key.Sign(bad->GetHash(), sig_bad)) {
             bad->proof.solution = CScript() << sig_bad;
             if (!record(*bad)) return true;
+            {
+                std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                m_candidates.erase(leader_key.GetPubKey());
+                RecordCandidate(bad, leader_key.GetPubKey(), own_beta, height);
+            }
             LogPrintf("PoS gossip: BYZANTINE proposing invalid block %s at height %d\n", bad->GetHash().GetHex(), height);
             FloodCompactProposal(*bad);
             return true;
@@ -1625,6 +1736,8 @@ bool PosProducer::ProposeGossip(const CKey& leader_key)
     FloodCompactProposal(*block);
     return true;
 }
+
+static uint256 PosGossipContentId(const CBlockHeader& header);
 
 int64_t PosProducer::DriveRound()
 {
@@ -1831,16 +1944,75 @@ int64_t PosProducer::DriveRound()
         // An invalid block excludes its leader; next pass we back the next-lowest
         // valid candidate.
         bool valid = false;
+        bool mutated = false;
         std::string reject_reason;
+        // -posgossipstaleonce (tests only): the first proposal this node is about
+        // to sign is judged as though the tip had just moved to another block,
+        // the race in which its parent is no longer the tip by the time it is
+        // signed (a certified sibling, a reorganization at the same height).
+        static const bool stale_once = gArgs.GetBoolArg("-posgossipstaleonce", false);
+        static bool stale_used = false;
+        bool stale = false;
         {
             LOCK(cs_main);
             CBlockIndex* tip2 = m_chainman.ActiveChain().Tip();
-            if (tip2 && backed->hashPrevBlock == tip2->GetBlockHash()) {
+            if (stale_once && !stale_used) {
+                stale_used = true;
+                stale = true;
+            } else if (!tip2 || backed->hashPrevBlock != tip2->GetBlockHash()) {
+                stale = true;
+            } else {
+                // SEQUENTIA: judged with the staging solution replaced by a
+                // placeholder of the largest certificate the chain allows, the
+                // room the block builder reserves for it (node/miner.cpp). The
+                // solution is not content the leader signed (it is outside the
+                // block hash, and the final block carries the certificate
+                // instead), so the bytes a relay delivered there never decide
+                // the verdict: bad-blk-weight then means the leader's own content
+                // is too heavy.
+                CBlock judged = *backed;
+                judged.proof.solution = PosLargestCertificatePlaceholder(m_chainparams.GetConsensus());
                 BlockValidationState state;
-                valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *backed, tip2,
+                valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), judged, tip2,
                                           /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
-                if (!valid) reject_reason = state.GetRejectReason();
+                if (!valid) {
+                    reject_reason = state.GetRejectReason();
+                    mutated = state.GetResult() == BlockValidationResult::BLOCK_MUTATED;
+                }
             }
+        }
+        if (stale) {
+            // SEQUENTIA: its parent is not the tip any more, so nothing was
+            // judged: the proposal is dropped as stale, its leader is not
+            // excluded, and the pass picks again (on the new tip, the leader
+            // may propose again and be signed).
+            std::lock_guard<std::mutex> lock(m_gossip_mutex);
+            LogPrintf("PoS gossip: proposal %s at height %d no longer builds on the tip; dropped as stale\n",
+                      backed->GetHash().GetHex(), height);
+            if (auto parts = ParsePosBlockChallenge(backed->proof.challenge)) m_candidates.erase(parts->leader);
+            return 150;
+        }
+        if (!valid && mutated) {
+            // SEQUENTIA: the body does not match the header the leader signed
+            // (merkle root, witness commitment, coinbase witness): whoever sent
+            // it altered it, and the leader is not at fault. OnProposal refuses
+            // such a body before it gets here; should one get here all the same,
+            // it is dropped and the body fetched again, and nobody is excluded.
+            const uint256 bhash = backed->GetHash();
+            {
+                std::lock_guard<std::mutex> lock(m_gossip_mutex);
+                LogPrintf("PoS gossip: proposal %s at height %d has a body its header does not bind (%s); dropped, to be fetched again\n",
+                          bhash.GetHex(), height, reject_reason);
+                if (auto parts = ParsePosBlockChallenge(backed->proof.challenge)) m_candidates.erase(parts->leader);
+                m_seen_proposals.erase(PosGossipContentId(*backed));
+                if (auto f = m_fetches.find(bhash); f != m_fetches.end()) {
+                    f->second.done = false;
+                    f->second.pending.reset();
+                    f->second.asked.clear();
+                }
+            }
+            FetchProposal(bhash);
+            return 150;
         }
         if (!valid) {
             std::lock_guard<std::mutex> lock(m_gossip_mutex);
@@ -1855,6 +2027,13 @@ int64_t PosProducer::DriveRound()
                               backed->GetHash().GetHex(), height, reject_reason);
                     m_anchor_deferred[parts->leader] = m_parent_tip_seen;
                 } else {
+                    // A leader is excluded only on a verdict about content the
+                    // leader signed, reached by validating it on the parent it
+                    // was built on: a body its header does not bind, and a
+                    // parent that is no longer the tip, are handled above and
+                    // exclude nobody.
+                    LogPrintf("PoS gossip: proposal %s at height %d is invalid (%s); excluding its leader\n",
+                              backed->GetHash().GetHex(), height, reject_reason);
                     m_excluded.insert(parts->leader);
                     m_candidates.erase(parts->leader);
                 }
@@ -2043,22 +2222,141 @@ bool PosProducer::ProposalSeen(const CBlockHeader& header)
     return m_seen_proposals.count(PosGossipContentId(header)) > 0;
 }
 
-bool PosProducer::ShouldFetchProposal(const uint256& hash)
+//! How many proposals one peer may be a source for at once. A height can honestly
+//! have one proposal per committee member in a collection, and a second collection
+//! (a restart, or proposals again after a replaced anchor) as many more: twice the
+//! committee size for a height, and the book holds the current height and the next.
+static size_t PosFetchMarksPerPeer()
 {
-    // One body request per block hash at a time, whoever announced it. Every
-    // compact proposal and every certificate otherwise sent its own request
-    // for a body of up to a full block, on every mesh edge it crossed.
-    const int64_t now = GetTime();
-    std::lock_guard<std::mutex> lock(m_gossip_mutex);
-    auto it = m_proposal_fetches.find(hash);
-    if (it != m_proposal_fetches.end() && now - it->second < POS_PROPOSAL_FETCH_RETRY_SECONDS) return false;
-    if (m_proposal_fetches.size() > 1000) m_proposal_fetches.clear();
-    m_proposal_fetches[hash] = now;
-    return true;
+    return std::max<size_t>(16, 4 * (size_t)std::max(1, g_pos_committee_size));
+}
+
+bool PosProducer::DropProposalMark(int64_t peer, const uint256& hash)
+{
+    // m_gossip_mutex held.
+    auto it = m_fetches.find(hash);
+    if (it == m_fetches.end()) return false;
+    ProposalFetch& f = it->second;
+    f.sources.erase(std::remove(f.sources.begin(), f.sources.end(), peer), f.sources.end());
+    f.asked.erase(peer);
+    const bool was_pending = f.pending == peer && !f.done;
+    if (f.pending == peer) f.pending.reset();
+    if (f.sources.empty()) {
+        m_fetches.erase(it);
+        return false;
+    }
+    return was_pending;
+}
+
+void PosProducer::NoteProposalSource(const uint256& hash, const uint256& parent, int64_t peer)
+{
+    // Called before anything about the message is checked, so a peer can only
+    // ever add marks of its own and push out its own oldest ones: one that floods
+    // announcements removes nothing another peer announced.
+    // A request pending on a mark the peer pushes out moves on to the next
+    // announcer, as when the peer disconnects (ForgetProposalPeer).
+    std::vector<uint256> moved;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        auto [it, inserted] = m_fetches.try_emplace(hash);
+        ProposalFetch& f = it->second;
+        if (inserted) f.parent = parent;
+        if (std::find(f.sources.begin(), f.sources.end(), peer) != f.sources.end()) return;
+        f.sources.push_back(peer);
+        std::deque<uint256>& marks = m_source_marks[peer];
+        marks.push_back(hash);
+        while (marks.size() > PosFetchMarksPerPeer()) {
+            const uint256 oldest = marks.front();
+            marks.pop_front();
+            if (DropProposalMark(peer, oldest)) moved.push_back(oldest);
+        }
+    }
+    for (const uint256& h : moved) FetchProposal(h);
+}
+
+void PosProducer::ForgetProposalPeer(int64_t peer)
+{
+    std::vector<uint256> moved;
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        auto marks = m_source_marks.find(peer);
+        if (marks == m_source_marks.end()) return;
+        for (const uint256& hash : marks->second) {
+            if (DropProposalMark(peer, hash)) moved.push_back(hash);
+        }
+        m_source_marks.erase(marks);
+    }
+    for (const uint256& hash : moved) FetchProposal(hash);
+}
+
+void PosProducer::FetchProposal(const uint256& hash)
+{
+    std::optional<int64_t> ask;
+    {
+        const int64_t now_ms = GetTimeMillis();
+        const int64_t now = now_ms / 1000;
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        auto it = m_fetches.find(hash);
+        if (it == m_fetches.end()) return;
+        ProposalFetch& f = it->second;
+        if (f.done) return;
+        if (f.pending && now_ms - f.pending_ms < AnswerMs()) return;
+        f.pending.reset();
+        for (const int64_t s : f.sources) {
+            const auto a = f.asked.find(s);
+            if (a != f.asked.end() && now - a->second < POS_PROPOSAL_FETCH_RETRY_SECONDS) continue;
+            f.asked[s] = now;
+            f.pending = s;
+            f.pending_ms = now_ms;
+            ask = s;
+            break;
+        }
+        LogPrint(BCLog::NET, "PoS gossip: body of %s: %u announcer(s), %u asked; asking %s\n", hash.GetHex(),
+                 (unsigned)f.sources.size(), (unsigned)f.asked.size(), ask ? strprintf("peer=%d", *ask) : "nobody");
+    }
+    if (!ask || !m_connman) return;
+    m_connman->ForNode(*ask, [&](CNode* pnode) {
+        m_connman->PushMessage(pnode, CNetMsgMaker(pnode->GetCommonVersion()).Make(NetMsgType::GETPOSPROPOSAL, hash));
+        return true;
+    });
+}
+
+void PosProducer::ProposalFetchFailed(const uint256& hash, int64_t peer)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        auto it = m_fetches.find(hash);
+        if (it == m_fetches.end()) return;
+        if (it->second.pending == peer) it->second.pending.reset();
+    }
+    FetchProposal(hash);
+}
+
+void PosProducer::RetryProposalFetches()
+{
+    std::vector<uint256> late;
+    {
+        const int64_t now_ms = GetTimeMillis();
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        for (const auto& [hash, f] : m_fetches) {
+            if (!f.done && f.pending && now_ms - f.pending_ms >= AnswerMs()) late.push_back(hash);
+        }
+    }
+    for (const uint256& hash : late) FetchProposal(hash);
 }
 
 PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& block)
 {
+    // SEQUENTIA: the order of what follows. A body for a certified hash is
+    // checked against its header and connected. Otherwise: a proposal already
+    // seen is ignored; one that does not build on the tip is ignored; then every
+    // check of what a sender can alter (the body against the header, the
+    // staging solution's form, the challenge's form, the staker, the VRF, the
+    // leader's signature), each failure the sender's fault (Invalid); then the
+    // leader's own content (equivocation, timestamp). Only a proposal that passed
+    // every check a sender can fail is marked seen and its fetch done, so nothing
+    // unchecked ever blocks the genuine body, and only then is it kept as a
+    // candidate and relayed.
     const uint256 hash = block->GetHash();
     // A body arriving for a block we hold a quorum certificate for (3A): it
     // is not a round candidate — attach the certificate and connect it. The
@@ -2085,6 +2383,20 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
                 const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
                 if (pindex && (pindex->nStatus & BLOCK_HAVE_DATA)) return PosGossipAction::Ignore;
             }
+            // The same check as for a proposal: a body its header does not bind is
+            // its sender's fault, and costs no block-acceptance attempt.
+            bool segwit_active;
+            {
+                LOCK(cs_main);
+                const CBlockIndex* parent = m_chainman.m_blockman.LookupBlockIndex(block->hashPrevBlock);
+                segwit_active = DeploymentActiveAfter(parent ? parent : m_chainman.ActiveChain().Tip(),
+                                                      m_chainparams.GetConsensus(), Consensus::DEPLOYMENT_SEGWIT);
+            }
+            if (const std::optional<std::string> fault = PosProposalBodyFault(*block, segwit_active)) {
+                LogPrintf("PoS gossip: body for certified block %s refused: it does not match its header (%s); the sender is at fault\n",
+                          hash.GetHex(), *fault);
+                return PosGossipAction::Invalid;
+            }
             auto full = std::make_shared<CBlock>(*block);
             full->proof.solution = cert_header.proof.solution;
             if (m_chainman.ProcessNewBlock(m_chainparams, full, /*force_processing=*/true, nullptr)) {
@@ -2096,13 +2408,8 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     }
     {
         std::lock_guard<std::mutex> lock(m_gossip_mutex);
-        if (!m_seen_proposals.insert(PosGossipContentId(*block)).second) return PosGossipAction::Ignore; // already seen
-        if (m_seen_proposals.size() > 20000) m_seen_proposals.clear();
+        if (m_seen_proposals.count(PosGossipContentId(*block))) return PosGossipAction::Ignore; // already seen
     }
-    // A posproposal that is not even the BLS committee form is malformed: no
-    // honest node would originate or relay it.
-    auto parts = ParsePosBlockChallenge(block->proof.challenge);
-    if (!parts || !parts->is_bls) return PosGossipAction::Invalid;
     CBlockIndex* tip;
     {
         LOCK(cs_main);
@@ -2110,6 +2417,27 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
     }
     if (!tip) return PosGossipAction::Ignore;
     if (block->hashPrevBlock != tip->GetBlockHash()) return PosGossipAction::Ignore; // not on our tip (benign race)
+    // SEQUENTIA: a body that does not match its own signed header is its
+    // sender's fault, never the leader's: the leader signed the header, which
+    // binds the body through the merkle root and, through the coinbase, the
+    // witness commitment. Its parent is the tip, so the activation state is the
+    // one the block is judged under.
+    {
+        const bool segwit_active = WITH_LOCK(cs_main, return DeploymentActiveAfter(tip, m_chainparams.GetConsensus(),
+                                                                                Consensus::DEPLOYMENT_SEGWIT));
+        // -posgossipnobodycheck (tests only) skips this check, so that the second
+        // lock on the same door, in DriveRound, can be shown to hold alone.
+        static const bool skip_body_check = gArgs.GetBoolArg("-posgossipnobodycheck", false);
+        if (const std::optional<std::string> fault = skip_body_check ? std::nullopt : PosProposalBodyFault(*block, segwit_active)) {
+            LogPrintf("PoS gossip: proposal %s refused: its body does not match its header (%s); the sender is at fault, not the leader\n",
+                      hash.GetHex(), *fault);
+            return PosGossipAction::Invalid;
+        }
+    }
+    // A posproposal that is not even the BLS committee form is malformed: no
+    // honest node would originate or relay it.
+    auto parts = ParsePosBlockChallenge(block->proof.challenge);
+    if (!parts || !parts->is_bls) return PosGossipAction::Invalid;
     const int height = tip->nHeight + 1;
     // The leader must be a registered staker and its VRF proof must verify
     // (objective: an honest relayer checked this, so a failure means the sender
@@ -2148,9 +2476,36 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
         CScript::const_iterator pc = block->proof.solution.begin();
         opcodetype op;
         std::vector<unsigned char> leader_sig;
+        // SEQUENTIA: exactly that one push, nothing after it, holding the
+        // signature in the one encoding the leader's key produces. The solution
+        // is outside the block hash but inside its weight, and Verify parses
+        // DER laxly, so bytes a relay appended, or the leader's own signature
+        // re-encoded with padding, could otherwise push the leader's block past
+        // the weight limit. Checked before Verify and before anything is marked.
+        // (-posgossipnobodycheck, tests only, skips the encoding check too, so
+        // that DriveRound's judgement can be shown to hold alone.)
+        static const bool skip_encoding_check = gArgs.GetBoolArg("-posgossipnobodycheck", false);
         if (!block->proof.solution.GetOp(pc, op, leader_sig) || leader_sig.empty() ||
-            !parts->leader.Verify(hash, leader_sig)) {
+            pc != block->proof.solution.end()) {
             return PosGossipAction::Invalid;
+        }
+        if (!skip_encoding_check && !IsStrictLowSEcdsaSignature(leader_sig)) {
+            LogPrintf("PoS gossip: proposal %s refused: its leader signature is not in its one encoding (%u bytes); the sender is at fault, not the leader\n",
+                      hash.GetHex(), (unsigned)leader_sig.size());
+            return PosGossipAction::Invalid;
+        }
+        if (!parts->leader.Verify(hash, leader_sig)) return PosGossipAction::Invalid;
+    }
+    // Every check a sender can fail is behind it: the proposal is the leader's,
+    // as the leader signed it. Marked seen, so a copy costs nothing more, and its
+    // fetch done, so no announcer is asked for it again.
+    {
+        std::lock_guard<std::mutex> lock(m_gossip_mutex);
+        if (!m_seen_proposals.insert(PosGossipContentId(*block)).second) return PosGossipAction::Ignore; // a copy, meanwhile
+        if (m_seen_proposals.size() > 20000) m_seen_proposals.clear();
+        if (auto f = m_fetches.find(hash); f != m_fetches.end()) {
+            f->second.done = true;
+            f->second.pending.reset();
         }
     }
     // Equivocation handling BEFORE the costly full validation (the leader's

@@ -572,7 +572,9 @@ public:
                 throw std::runtime_error(strprintf("%s is a consensus rule of the Sequentia network and cannot be overridden; remove it from the configuration", flag));
             }
         }
-        for (const char* flag : {"-posbyzantineequivocate", "-posbyzantineinvalid", "-posdebugroundskewms", "-posdebugsharedelayms"}) {
+        for (const char* flag : {"-posbyzantineequivocate", "-posbyzantineinvalid", "-posbyzantinefakeanchor",
+                                 "-posbyzantinebackdate", "-posbyzantinestampfloor", "-posdebugroundskewms",
+                                 "-posdebugsharedelayms", "-posgossipnobodycheck", "-posgossipstaleonce"}) {
             if (args.IsArgSet(flag)) {
                 throw std::runtime_error(strprintf("%s is a test-only fault injection and is refused on the Sequentia network", flag));
             }
@@ -1198,7 +1200,9 @@ public:
         }
         // Fault injection for the functional tests. On a real network it turns
         // the node into an attacker of the network it serves.
-        for (const char* flag : {"-posbyzantineequivocate", "-posbyzantineinvalid", "-posdebugroundskewms", "-posdebugsharedelayms"}) {
+        for (const char* flag : {"-posbyzantineequivocate", "-posbyzantineinvalid", "-posbyzantinefakeanchor",
+                                 "-posbyzantinebackdate", "-posbyzantinestampfloor", "-posdebugroundskewms",
+                                 "-posdebugsharedelayms", "-posgossipnobodycheck", "-posgossipstaleonce"}) {
             if (args.IsArgSet(flag)) {
                 throw std::runtime_error(strprintf("%s is a test-only fault injection and is refused on the Sequentia testnet", flag));
             }

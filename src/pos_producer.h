@@ -30,6 +30,7 @@
 #include <validationinterface.h>
 
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -101,7 +102,18 @@ PosCompactProposal MakePosCompactProposal(const CBlock& block);
  *  block only if every referenced transaction is present AND the reconstructed
  *  merkle root matches the header; otherwise nullptr (the caller fetches the full
  *  block). */
-std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact, CTxMemPool& mempool);
+std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact, CTxMemPool& mempool,
+                                               bool segwit_active = true);
+//! SEQUENTIA: whether the block's witnesses match its coinbase's witness
+//! commitment (no witness at all when it has none, or before segwit is
+//! active), as ContextualCheckBlock checks them. A rebuilt proposal must pass
+//! it: the txid merkle root does not bind witnesses.
+bool PosProposalWitnessesMatch(const CBlock& block, bool segwit_active);
+//! SEQUENTIA: what in a proposal's body does not match its own signed header,
+//! or nothing: the txid merkle root (with duplicates), the coinbase input's
+//! unbound witness, the witness commitment. Such a body is its sender's fault,
+//! never the leader's, who signed only the header.
+std::optional<std::string> PosProposalBodyFault(const CBlock& block, bool segwit_active);
 
 /** The outcome of producing one PoS block, for RPC result formatting. */
 struct PosProduceResult {
@@ -217,9 +229,19 @@ public:
     //! Whether this exact proposal (hash and staging solution) was already
     //! processed, so a compact copy need not be reconstructed again.
     bool ProposalSeen(const CBlockHeader& header);
-    //! Whether to request the body of `hash` now: false while a request for it
-    //! made within the last POS_PROPOSAL_FETCH_RETRY_SECONDS may still answer.
-    bool ShouldFetchProposal(const uint256& hash);
+    //! SEQUENTIA: a peer announced proposal `hash` (a compact proposal, a full
+    //! one, or a certificate): it is one the body may be fetched from.
+    void NoteProposalSource(const uint256& hash, const uint256& parent, int64_t peer);
+    //! Ask for the body of `hash` from the first announcer that may be asked
+    //! (each at most once per POS_PROPOSAL_FETCH_RETRY_SECONDS), unless the body
+    //! is in or a request made less than AnswerMs() ago is
+    //! still unanswered.
+    void FetchProposal(const uint256& hash);
+    //! The body `peer` sent for `hash` was refused: ask the next announcer now.
+    void ProposalFetchFailed(const uint256& hash, int64_t peer);
+    //! `peer` disconnected: it is no source any more, and a request pending on it
+    //! moves on to the next announcer.
+    void ForgetProposalPeer(int64_t peer);
 
 protected:
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
@@ -271,6 +293,9 @@ private:
     //! Proposal collection window and round length (ms): local liveness timings
     //! scaled with the committee size, or the -poswindowms/-posroundms overrides.
     int64_t WindowMs() const;
+    //! How long a body request waits for its answer (ms): a quarter of the
+    //! collection window, at least 150 ms and at most 1,000 ms.
+    int64_t AnswerMs() const;
     int64_t RoundMs() const;
     //! How many rounds a collection runs before it is abandoned. m_gossip_mutex held.
     int RoundsPerCollection() const;
@@ -395,7 +420,25 @@ private:
     int64_t m_propose_at_ms{0};                        //!< whole-second instant to propose at once the slot is open (see Step)
     uint256 m_last_tip;                                //!< active tip last seen by Step(); detects parent-reorg rollbacks
     std::set<uint256> m_seen_proposals;                //!< proposal dedup, by hash and staging solution
-    std::map<uint256, int64_t> m_proposal_fetches;     //!< block hash -> when its body was last requested
+    //! SEQUENTIA: per proposal, who announced it and whom its body was asked of.
+    struct ProposalFetch {
+        std::vector<int64_t> sources;                  //!< announcers, in the order they announced
+        std::map<int64_t, int64_t> asked;              //!< announcer -> when asked (seconds)
+        std::optional<int64_t> pending;                //!< the announcer asked last, while unanswered
+        int64_t pending_ms{0};
+        bool done{false};                              //!< a body that passed the header check is in
+        uint256 parent;                                //!< the block the proposal builds on
+    };
+    std::map<uint256, ProposalFetch> m_fetches;
+    //! Per peer, the proposals it is a source for, oldest first: a peer can only
+    //! ever remove its own marks (at most PosFetchMarksPerPeer()).
+    std::map<int64_t, std::deque<uint256>> m_source_marks;
+    //! Remove `peer` as a source of `hash`; the entry goes when no source is left.
+    //! Whether a request pending on `peer` for `hash` was dropped with the mark,
+    //! so that the caller asks the next announcer. m_gossip_mutex held.
+    bool DropProposalMark(int64_t peer, const uint256& hash);
+    //! Ask the due announcers again whose answers are late (the thread loop).
+    void RetryProposalFetches();
     std::set<uint256> m_seen_shares;                   //!< share dedup, by hash of the whole share
 
     // Certificate gossip (honest-splits fix 3A, Tier 1). A verified quorum
@@ -464,6 +507,11 @@ private:
  *  hold its finality for a competing certificate (validation.h). */
 /** Seconds before a proposal body asked for and not received is asked for again. */
 static constexpr int64_t POS_PROPOSAL_FETCH_RETRY_SECONDS = 10;
+//! SEQUENTIA: how long a body request waits for its answer before the next
+//! announcer is asked: a quarter of the collection window, within these bounds
+//! (PosProducer::AnswerMs).
+static constexpr int64_t POS_PROPOSAL_FETCH_ANSWER_MIN_MS = 150;
+static constexpr int64_t POS_PROPOSAL_FETCH_ANSWER_MAX_MS = 1000;
 
 /** For a node without a producer: whether this exact certificate (block hash
  *  and certificate) was already judged, so it is not verified again. */
