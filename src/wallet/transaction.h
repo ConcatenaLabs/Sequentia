@@ -80,6 +80,24 @@ struct TxRejection {
     bool is_consensus{false};
 };
 
+//! What the node's last answer about a transaction was taken under. The answer
+//! is asked again only once one of these has moved, or once it is old enough
+//! that a fact not tracked here may have moved (see RECHECK_UNCHANGED_SECONDS).
+//! Memory only, like TxRejection.
+//!
+//! Each field stands for what decides an answer: the chain (the tip the wallet
+//! had processed), the value of the transaction's own fee asset, and the
+//! mempool's minimum fee, which rises when the mempool is full and decays with
+//! time alone. What the mempool holds around the transaction is not stamped:
+//! a transaction entering or leaving the mempool clears the stamp of every
+//! wallet transaction it touches (CWallet::MarkRecheckTouched).
+struct TxRecheckStamp {
+    uint256 tip;
+    CAmount fee_asset_rate{0};
+    CAmount mempool_min_fee{0};
+    int64_t time{0};
+};
+
 //! All possible CWalletTx states
 using TxState = std::variant<TxStateConfirmed, TxStateInMempool, TxStateConflicted, TxStateInactive, TxStateUnrecognized>;
 
@@ -218,6 +236,9 @@ public:
     /** Why the node currently refuses this transaction, if it does. Memory only:
      *  re-derived by asking the node, never read back from disk. */
     std::optional<TxRejection> m_rejection;
+    /** What the node's last answer about this transaction was taken under;
+     *  empty when it has not been asked since something it depends on moved. */
+    std::optional<TxRecheckStamp> m_recheck_stamp;
 
     CWalletTx(CTransactionRef tx, const TxState& state) : tx(std::move(tx)), m_state(state)
     {

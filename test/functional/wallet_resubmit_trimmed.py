@@ -214,11 +214,11 @@ class WalletResubmitTrimmedTest(BitcoinTestFramework):
         for t in c:
             assert "Submitting wtx {}".format(t) in log, t
         assert "Submitting wtx {}".format(replaced[0]) not in log
-        # Still refused (the bump holds its input), so it is asked about and
-        # never retried in the next tick: one sweep per recheck, not a loop.
+        # Still refused (the bump holds its input), and nothing its answer
+        # depends on has moved since: one sweep per recheck, asking nothing.
         offset = self.nodes[0].debug_log_bytes()
         self.recheck()
-        assert_equal(self.sweeps_since(offset), ["asked about 1 missing from the mempool, handed back 0"])
+        assert_equal(self.sweeps_since(offset), ["asked about 0 missing from the mempool, handed back 0"])
         self.close_round()
 
     def test_abandoned_payment_stays_out(self):
@@ -308,9 +308,11 @@ class WalletResubmitTrimmedTest(BitcoinTestFramework):
         # Turned away, so nothing changed and nothing is asked again on the
         # next tick: one sweep in this recheck, not one a second.
         assert_equal(self.sweeps_since(offset), ["asked about 5 missing from the mempool, handed back 0"])
+        # Nor at the next recheck: the tip, the fee asset's rate and the
+        # mempool around them are as they were, so the answers stand.
         offset = n.debug_log_bytes()
         self.recheck()
-        assert_equal(self.sweeps_since(offset), ["asked about 5 missing from the mempool, handed back 0"])
+        assert_equal(self.sweeps_since(offset), ["asked about 0 missing from the mempool, handed back 0"])
         # Sent again by hand, c1 brings the wallet's payments back with it.
         n.sendrawtransaction(first[0], 0)
         self.recheck()

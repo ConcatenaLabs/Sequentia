@@ -456,9 +456,10 @@ class WalletSendTest(BitcoinTestFramework):
         # It shouldn't be confirmed in the next block
         self.generate(self.nodes[0], 1)
         assert_equal(self.nodes[0].gettransaction(txid)["confirmations"], 0)
-        # The mempool should allow it now:
+        # The mempool should allow it now, unless the wallet has already handed
+        # it back, which its recheck does once the lock time has passed:
         res = self.nodes[0].testmempoolaccept([hex])
-        assert res[0]["allowed"]
+        assert res[0]["allowed"] or res[0]["reject-reason"] == "txn-already-in-mempool", res
         # Don't wait for wallet to add it to the mempool:
         res = self.nodes[0].sendrawtransaction(hex)
         self.generate(self.nodes[0], 1)
