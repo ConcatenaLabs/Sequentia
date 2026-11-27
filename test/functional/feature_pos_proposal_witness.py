@@ -33,6 +33,15 @@ flood_keeps_the_fetch_book: a cut-off member holding the other witness hears the
 solution_appended_small, solution_appended_large: the leader's full proposal with bytes appended to its staging
   solution (outside the block hash, inside its weight; the large one past the weight limit) is the sender's
   fault: refused and penalised, nobody excluded, the genuine one signed.
+padded_r, padded_s, signature_73_bytes, high_s: the leader's own signature re-encoded, still one push that
+  verifies under the lax DER parsing of signature checks: 420,000 zero bytes in front of R (or of S) with
+  indefinite lengths, a 73-byte encoding, the high S. Each is the sender's fault: refused before anything is
+  marked, the sender penalised, the genuine one signed.
+padded_signature_reaches_the_round: the padded R with the member's checks of a body switched off
+  (-posgossipnobodycheck): the round judges the block with a placeholder of the largest certificate in the
+  staging solution's place, so the relay's bytes decide nothing: nobody is excluded and the leader's block is
+  signed.
+heavy_block_signed: an honest block built to the weight limit is still signed.
 bad_signature_keeps_the_fetch_open: a body matching the header but with one byte of the staging signature
   changed is refused, and the member, which lacks the proposal's transaction, still fetches the body from an
   honest announcer and signs.
@@ -44,9 +53,11 @@ stale_parent: a member about to sign the leader's proposal finds its parent is n
 import hashlib
 import os
 import re
+import threading
 import time
 
 from test_framework.address import byte_to_base58
+from test_framework.authproxy import JSONRPCException
 from test_framework.key import ECKey
 from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, CTxOutWitness
 from test_framework.p2p import MESSAGEMAP, P2PInterface
@@ -54,6 +65,7 @@ from test_framework.script import CScript, OP_0, OP_DROP, OP_TRUE
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 
+SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 SPACING = 8   # -posblockspacing: the quiet seconds between blocks in which a case is set up
 POS_MESSAGES = ["posproposal", "poscmpctprop", "getposprop", "posshare", "poscert", "getposcert"]
 
@@ -191,7 +203,9 @@ class PosProposalWitnessTest(BitcoinTestFramework):
         for case in only.split(",") if only else ["mempool_variant", "forged_witness", "forged_transactions",
                                                   "second_lock", "first_announcer_lies", "stale_parent",
                                                   "flood_keeps_the_fetch_book", "solution_appended_small",
-                                                  "solution_appended_large", "bad_signature_keeps_the_fetch_open"]:
+                                                  "solution_appended_large", "padded_r", "padded_s", "signature_73_bytes",
+                                                  "high_s", "padded_signature_reaches_the_round",
+                                                  "heavy_block_signed", "bad_signature_keeps_the_fetch_open"]:
             self.log.info(case)
             getattr(self, case)()
 
@@ -534,9 +548,127 @@ class PosProposalWitnessTest(BitcoinTestFramework):
     def solution_appended_large(self):
         self.altered_header_body(lambda prefix, sol, rest: self.with_solution(prefix, sol + b"\x00" * 450_000, rest))
 
-    def altered_header_body(self, alter):
+    @staticmethod
+    def reencoded(sol, kind):
+        """The staging solution (one push of a DER signature) with the signature re-encoded as `kind`, still one
+        push and still a signature that CPubKey::Verify's lax DER parsing accepts."""
+        assert sol[0] <= 75 and len(sol) == 1 + sol[0], sol.hex()
+        sig = sol[1:]
+        rl = sig[3]
+        r = sig[4:4 + rl]
+        sl = sig[5 + rl]
+        s = sig[6 + rl:6 + rl + sl]
+        pad = 420_000
+        if kind == "padded_r":
+            new = b"\x30\x80" + b"\x02\x83" + (pad + rl).to_bytes(3, "big") + b"\x00" * pad + r + b"\x02" + bytes([sl]) + s
+        elif kind == "padded_s":
+            new = b"\x30\x80" + b"\x02" + bytes([rl]) + r + b"\x02\x83" + (pad + sl).to_bytes(3, "big") + b"\x00" * pad + s
+        elif kind == "signature_73_bytes":
+            r2 = b"\x00" * max(1, 73 - len(sig)) + r
+            inner = b"\x02" + bytes([len(r2)]) + r2 + b"\x02" + bytes([sl]) + s
+            new = b"\x30" + bytes([len(inner)]) + inner
+        elif kind == "high_s":
+            v = SECP256K1_ORDER - int.from_bytes(s, "big")
+            s2 = v.to_bytes((v.bit_length() + 7) // 8, "big")
+            s2 = b"\x00" + s2 if s2[0] & 0x80 else s2
+            inner = b"\x02" + bytes([rl]) + r + b"\x02" + bytes([len(s2)]) + s2
+            new = b"\x30" + bytes([len(inner)]) + inner
+        else:
+            raise AssertionError(kind)
+        return bytes(CScript([new]))
+
+    def padded_r(self):
+        self.altered_header_body(lambda prefix, sol, rest: self.with_solution(prefix, self.reencoded(sol, "padded_r"), rest),
+                                 encoding=True)
+
+    def padded_s(self):
+        self.altered_header_body(lambda prefix, sol, rest: self.with_solution(prefix, self.reencoded(sol, "padded_s"), rest),
+                                 encoding=True)
+
+    def signature_73_bytes(self):
+        self.altered_header_body(lambda prefix, sol, rest: self.with_solution(prefix, self.reencoded(sol, "signature_73_bytes"), rest),
+                                 encoding=True)
+
+    def high_s(self):
+        self.altered_header_body(lambda prefix, sol, rest: self.with_solution(prefix, self.reencoded(sol, "high_s"), rest),
+                                 encoding=True)
+
+    def padded_signature_reaches_the_round(self):
+        self.altered_header_body(lambda prefix, sol, rest: self.with_solution(prefix, self.reencoded(sol, "padded_r"), rest),
+                                 checks_off=True)
+
+    def heavy_block_signed(self):
+        """Transactions filling more than two blocks are sent: a block built from them is at the weight limit, its
+        leader's proposal, signed by the members, and nobody is excluded."""
+        # Independent transactions (a chain would pass the mempool's descendant limit), each spending one
+        # confirmed output of a fan-out: 30 of about 40,000 weight (215 outputs) and 40 of about 4,700 (25
+        # outputs) that fill what the large ones leave; 1.4 million weight in all.
+        sizes = [215] * 30 + [25] * 40
+        gtx, gn, gval = self.genesis_coin
+        fan = CTransaction()
+        fan.nVersion = 2
+        fan.vin = [CTxIn(COutPoint(int(gtx, 16), gn))]
+        part, fee, n = 10_000_000, 500_000, len(sizes)
+        fan.vout = [CTxOut(part, CScript([OP_TRUE])) for _ in range(n)]
+        fan.vout += [CTxOut(gval - n * part - fee, CScript([OP_TRUE])), CTxOut(fee)]
+        fan.rehash()
+        self.nodes[0].sendrawtransaction(fan.serialize().hex())
+        self.wait_until(lambda: all(node.gettxout(fan.hash, n, False) is not None for node in self.nodes), timeout=120)
+        self.genesis_coin = (fan.hash, n, gval - n * part - fee)
+        chain = []
+        for i, k in enumerate(sizes):
+            tx = CTransaction()
+            tx.nVersion = 2
+            tx.vin = [CTxIn(COutPoint(int(fan.hash, 16), i))]
+            each = 10_000
+            fee = 4 * k * 200   # the same fee rate for both sizes
+            tx.vout = [CTxOut(each, CScript([OP_TRUE])) for _ in range(k)]
+            tx.vout += [CTxOut(part - each * k - fee, CScript([OP_TRUE])), CTxOut(fee)]
+            tx.rehash()
+            chain.append(tx)
+        order = [t for pair in zip(chain[:30], chain[30:60]) for t in pair] + chain[60:]
+        logs = [len(self.log_lines(i)) for i in range(3)]
+
+        def send_all(node):   # to every node at once: relay would leave a leader building from part of them
+            for tx in order:
+                try:
+                    node.sendrawtransaction(tx.serialize().hex())
+                except JSONRPCException as e:
+                    assert e.error["code"] == -27, e.error   # already known or mined
+        threads = [threading.Thread(target=send_all, args=(node,)) for node in self.nodes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        hashes = {c.hash for c in chain}
+        h = self.nodes[0].getblockcount()
+        rows = []
+        for height in (h + 1, h + 2, h + 3):   # more than two blocks' worth after sending: one is full
+            self.wait_height(height)
+            self.sync_blocks()
+            blk = self.nodes[0].getblock(self.nodes[0].getblockhash(height), 1)
+            held = len([t for t in blk["tx"] if t in hashes])
+            leader = [i for i in range(3) if any("proposing block %s at height %d" % (blk["hash"], height) in line
+                                                 for line in self.log_lines(i)[logs[i]:])]
+            signed = [i for i in range(3) if i not in leader and any("signed %s at height %d" % (blk["hash"], height) in line
+                                                                      for line in self.log_lines(i)[logs[i]:])]
+            rows.append((height, blk["weight"], held, leader, signed))
+            self.log.info("    height %d: block weight %d with %d of the heavy transactions; proposed by %s; "
+                          "signed by members %s", *rows[-1])
+        excluded = [line for i in range(3) for line in self.log_lines(i)[logs[i]:] if "excluding its leader" in line]
+        self.wait_until(lambda: not self.nodes[0].getrawmempool(), timeout=180)
+        self.sync_blocks()
+        assert_equal(excluded, [])
+        full = [r for r in rows if r[1] > 385_000]
+        assert full, "no block at the weight limit: %s" % rows
+        assert all(r[3] and r[4] for r in full), rows
+
+    def altered_header_body(self, alter, encoding=False, checks_off=False):
         """The leader's full proposal with its staging solution altered, sent unasked to a cut-off member, then the
-        genuine one: the sender is penalised, nobody excluded, the genuine one signed."""
+        genuine one: the sender is penalised, nobody excluded, the genuine one signed. With `encoding`, the refusal
+        names the signature's encoding. With `checks_off` the member's checks of a body are switched off
+        (-posgossipnobodycheck): the altered body reaches the round, nobody is excluded and the leader's block is
+        signed."""
         attempts = []
         for attempt in range(3):
             v1, v2 = self.variants(*self.fund())
@@ -547,6 +679,8 @@ class PosProposalWitnessTest(BitcoinTestFramework):
             pairs = [(min(cut, j), max(cut, j)) for j in range(3) if j != cut]
             for a, b in pairs:
                 self.disconnect_nodes(a, b)
+            if checks_off:
+                self.restart_node(cut, self.extra_args[cut] + ["-posgossipnobodycheck"])
             relay_in = self.nodes[leader].add_p2p_connection(PosRelay())
             relay_out = self.nodes[cut].add_p2p_connection(PosRelay())
             self.nodes[leader].sendrawtransaction(v1.serialize().hex())
@@ -567,11 +701,14 @@ class PosProposalWitnessTest(BitcoinTestFramework):
             compact = [c for c in relay_in.got["poscmpctprop"] if genuine[36:68] in c][-1]
             prefix, sol, rest = self.header_parts(genuine, compact)
             altered = alter(prefix, sol, rest)
+            if checks_off:
+                relay_out.answer = altered   # asked again, the relay answers with the altered body too
             placed = altered != genuine
             relay_out.send_message(RAW["posproposal"](altered))
             relay_out.sync_with_ping(timeout=60)
-            relay_out.send_message(RAW["posproposal"](genuine))
-            relay_out.sync_with_ping()
+            if not checks_off:   # with the checks off only the altered body reaches the member, so it decides
+                relay_out.send_message(RAW["posproposal"](genuine))
+                relay_out.sync_with_ping()
 
             def new_lines():
                 return self.log_lines(cut)[logs[cut]:]
@@ -585,13 +722,17 @@ class PosProposalWitnessTest(BitcoinTestFramework):
             time.sleep(1)
             penalised = [line for line in new_lines() if "Misbehaving" in line and "invalid posproposal" in line]
             excluded = [line for line in new_lines() if "excluding its leader" in line]
-            row = (attempt, leader, cut, height, len(sol), len(altered) - len(genuine), len(penalised), len(excluded),
-                   signed())
+            by_encoding = [line for line in new_lines() if "its leader signature is not in its one encoding" in line]
+            row = (attempt, leader, cut, height, len(sol), len(altered) - len(genuine), len(penalised), len(by_encoding),
+                   len(excluded), signed())
             attempts.append(row)
-            self.log.info("    attempt %d: leader node %d, cut-off member node %d, height %d; solution of %d bytes, %d "
-                          "appended; sender penalised %d, exclusions %d, leader's block signed %s", *row)
+            self.log.info("    attempt %d: leader node %d, cut-off member node %d, height %d; solution of %d bytes, "
+                          "%+d bytes; sender penalised %d, refused for the encoding %d, exclusions %d, leader's block "
+                          "signed %s", *row)
             relay_in.peer_disconnect()
             relay_out.peer_disconnect()
+            if checks_off:
+                self.restart_node(cut, self.extra_args[cut])
             for a, b in pairs:
                 self.connect_nodes(a, b)
             self.wait_height(height)
@@ -599,8 +740,13 @@ class PosProposalWitnessTest(BitcoinTestFramework):
             if not placed:
                 continue
             assert_equal(excluded, [])
-            assert penalised, row
             assert signed(), row
+            if checks_off:
+                assert_equal(by_encoding, [])
+            else:
+                assert penalised, row
+            if encoding:
+                assert by_encoding, row
             return
         raise AssertionError("the case was not reached: %s" % attempts)
 

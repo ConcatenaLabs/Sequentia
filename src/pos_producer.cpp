@@ -310,6 +310,20 @@ std::shared_ptr<CBlock> ReconstructPosProposal(const PosCompactProposal& compact
     return block;
 }
 
+static CScript PosLargestCertificatePlaceholder(const Consensus::Params& params)
+{
+    // One push, as large as a solution of at most max_block_signature_size
+    // bytes can hold (the push's own opcode and length count).
+    size_t n = params.max_block_signature_size;
+    CScript placeholder;
+    while (true) {
+        placeholder = CScript() << std::vector<unsigned char>(n, 0);
+        if (placeholder.size() <= params.max_block_signature_size || n == 0) break;
+        --n;
+    }
+    return placeholder;
+}
+
 std::optional<std::string> PosProposalBodyFault(const CBlock& block, bool segwit_active)
 {
     if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) return std::string{"bad-cb-missing"};
@@ -1923,8 +1937,18 @@ int64_t PosProducer::DriveRound()
             } else if (!tip2 || backed->hashPrevBlock != tip2->GetBlockHash()) {
                 stale = true;
             } else {
+                // SEQUENTIA: judged with the staging solution replaced by a
+                // placeholder of the largest certificate the chain allows, the
+                // room the block builder reserves for it (node/miner.cpp). The
+                // solution is not content the leader signed (it is outside the
+                // block hash, and the final block carries the certificate
+                // instead), so the bytes a relay delivered there never decide
+                // the verdict: bad-blk-weight then means the leader's own content
+                // is too heavy.
+                CBlock judged = *backed;
+                judged.proof.solution = PosLargestCertificatePlaceholder(m_chainparams.GetConsensus());
                 BlockValidationState state;
-                valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), *backed, tip2,
+                valid = TestBlockValidity(state, m_chainparams, m_chainman.ActiveChainstate(), judged, tip2,
                                           /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true);
                 if (!valid) {
                     reject_reason = state.GetRejectReason();
@@ -2418,13 +2442,25 @@ PosGossipAction PosProducer::OnProposal(const std::shared_ptr<const CBlock>& blo
         CScript::const_iterator pc = block->proof.solution.begin();
         opcodetype op;
         std::vector<unsigned char> leader_sig;
-        // SEQUENTIA: exactly that one push, nothing after it. The solution is
-        // outside the block hash but inside its weight, so bytes a relay appended
-        // could otherwise push the leader's block past the weight limit.
+        // SEQUENTIA: exactly that one push, nothing after it, holding the
+        // signature in the one encoding the leader's key produces. The solution
+        // is outside the block hash but inside its weight, and Verify parses
+        // DER laxly, so bytes a relay appended, or the leader's own signature
+        // re-encoded with padding, could otherwise push the leader's block past
+        // the weight limit. Checked before Verify and before anything is marked.
+        // (-posgossipnobodycheck, tests only, skips the encoding check too, so
+        // that DriveRound's judgement can be shown to hold alone.)
+        static const bool skip_encoding_check = gArgs.GetBoolArg("-posgossipnobodycheck", false);
         if (!block->proof.solution.GetOp(pc, op, leader_sig) || leader_sig.empty() ||
-            pc != block->proof.solution.end() || !parts->leader.Verify(hash, leader_sig)) {
+            pc != block->proof.solution.end()) {
             return PosGossipAction::Invalid;
         }
+        if (!skip_encoding_check && !IsStrictLowSEcdsaSignature(leader_sig)) {
+            LogPrintf("PoS gossip: proposal %s refused: its leader signature is not in its one encoding (%u bytes); the sender is at fault, not the leader\n",
+                      hash.GetHex(), (unsigned)leader_sig.size());
+            return PosGossipAction::Invalid;
+        }
+        if (!parts->leader.Verify(hash, leader_sig)) return PosGossipAction::Invalid;
     }
     // Every check a sender can fail is behind it: the proposal is the leader's,
     // as the leader signed it. Marked seen, so a copy costs nothing more, and its

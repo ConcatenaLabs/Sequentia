@@ -10,6 +10,7 @@
 #include <logging.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
+#include <script/interpreter.h>
 #include <script/standard.h>
 #include <undo.h>
 #include <vrf.h>
@@ -2412,4 +2413,14 @@ std::map<int, uint256> GetConfiguredPosCheckpoints()
 {
     LOCK(g_pos_config_cp_mutex);
     return g_pos_config_checkpoints;
+}
+
+bool IsStrictLowSEcdsaSignature(const std::vector<unsigned char>& sig)
+{
+    // CheckSignatureEncoding allows the empty signature; this does not. With
+    // SCRIPT_NO_SIGHASH_BYTE it checks the bytes as a DER signature without a
+    // sighash byte: at most 72 of them, every length exact, no padding, and S
+    // at most half the curve order.
+    return !sig.empty() &&
+           CheckSignatureEncoding(sig, SCRIPT_VERIFY_DERSIG | SCRIPT_VERIFY_LOW_S | SCRIPT_NO_SIGHASH_BYTE, nullptr);
 }

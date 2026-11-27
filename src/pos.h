@@ -1570,6 +1570,13 @@ void ClearConfiguredPosCheckpoints();
  *  already configured with a different hash. */
 bool AddConfiguredPosCheckpoint(int height, const uint256& hash, std::string& error);
 
+/** An ECDSA signature in the one encoding CKey::Sign produces: strict DER, at
+ *  most 72 bytes, with a low S. CPubKey::Verify parses DER laxly, so a signature
+ *  it accepts can be re-encoded by anyone (padding R or S, a longer length, the
+ *  high S) into other bytes that verify too. Where the signature's bytes count
+ *  (a block's weight) or its form is a rule, only this one encoding is taken. */
+bool IsStrictLowSEcdsaSignature(const std::vector<unsigned char>& sig);
+
 /** All configured checkpoints, keyed by Sequentia height. */
 std::map<int, uint256> GetConfiguredPosCheckpoints();
 
