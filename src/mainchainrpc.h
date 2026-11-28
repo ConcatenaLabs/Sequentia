@@ -41,7 +41,17 @@ public:
 
 };
 
-UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params);
+/** Thrown when a reply is longer than the caller allowed: the reply was
+ *  abandoned as it was read, so its length never reached memory whole. */
+class MainchainReplyTooLarge : public std::runtime_error
+{
+public:
+    explicit MainchainReplyTooLarge(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+/** One call. `max_reply_bytes`, when not 0, bounds the reply as it is read
+ *  (MainchainReplyTooLarge beyond it). */
+UniValue CallMainChainRPC(const std::string& strMethod, const UniValue& params, size_t max_reply_bytes = 0);
 
 /** Many calls of one method, in a SINGLE HTTP round trip.
  *

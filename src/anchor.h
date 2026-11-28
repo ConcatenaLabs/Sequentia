@@ -15,6 +15,7 @@
 #ifndef BITCOIN_ANCHOR_H
 #define BITCOIN_ANCHOR_H
 
+#include <arith_uint256.h>
 #include <uint256.h>
 #include <primitives/bitcoin/block.h>
 #include <univalue.h>
@@ -38,6 +39,18 @@ static const int DEFAULT_ANCHOR_MIN_CONF = 1;
 /** Default seconds between polls of the parent chain daemon for new blocks
  *  and reorganizations. */
 static const int DEFAULT_ANCHOR_POLL_INTERVAL = 5;
+/** The most parent-chain branch tips the anchor watcher reads in one tick
+ *  (-anchortipsmax); a daemon listing more counts as one that gave no list. */
+static const int64_t DEFAULT_ANCHOR_TIPS_MAX = 50000;
+/** Seconds after the anchor watcher read the daemon's branch tips at a tip
+ *  move before it compares them once more (-anchortipssettle): longer than
+ *  any caching proxy between it and the daemon keeps a reply (the testnet's
+ *  shared endpoint keeps one 10 s), so that the second reading was answered
+ *  after the move. */
+static const int64_t DEFAULT_ANCHOR_TIPS_SETTLE = 12;
+/** Moves the anchor watcher keeps waiting for their second reading at once;
+ *  past it, nothing is kept. */
+static const size_t ANCHOR_TIPS_PENDING_MAX = 8;
 /** Whether the block producer avoids anchoring a new block onto a parent-chain
  *  height that a competing branch is currently contesting (-anchoravoidcontested).
  *  Pure producer-side policy; see GetAnchorForNewBlock. */
@@ -122,9 +135,11 @@ enum class AnchorCheckResult {
 
 /** Check that the parent-chain block (height, hash) is on the parent chain's
  *  best chain. Definitive verdicts (OK, and off-the-best-chain — never
- *  NO_CONNECTION) are cached, and a cached verdict is discarded exactly when the
- *  parent chain does something that could have changed it: a reorganization at
- *  or below that height. A parent-chain extension changes no verdict and
+ *  NO_CONNECTION) are cached, and a cached verdict is discarded at the anchor
+ *  watcher's first tick after the parent chain did something that could have
+ *  changed it: a reorganization forking below that height, seen either in the
+ *  daemon's tip or in its branches (a branch the daemon moved onto and back
+ *  from between two ticks). A parent-chain extension changes no verdict and
  *  discards none, which is what keeps the watcher's every-tick, no-depth-floor
  *  walk from costing one RPC per anchor per parent block. See AnchorWatchTask
  *  and MainchainUnchangedHeight in anchor.cpp. */
@@ -158,11 +173,15 @@ struct MainchainSyncSnapshot {
 };
 MainchainSyncSnapshot GetMainchainSyncSnapshot();
 
-/** Called by the anchor watcher whenever it sees the parent chain reorganize,
- *  with the height below which nothing changed (the fork point), or -1 when it
- *  could not tell how the tip moved. A plain extension, where the old tip is
- *  still on the best chain, calls nothing: it replaced no block, even one newer
- *  than the watcher's last poll. Set once at the start; the signing check
+/** Called by the anchor watcher whenever it has evidence that the parent chain
+ *  moved off a block: a tip move that is not an extension, or a branch the
+ *  daemon may have stood on since the last tick where its tip moved
+ *  (ClassifyChangedBranches), with the height below which nothing changed (the
+ *  lowest fork point), or -1 when it could not tell how the tip moved. A plain
+ *  extension calls nothing: it replaced no block, even one newer than the
+ *  watcher's last poll. Nor does a branch merely observed, such as a
+ *  header-only fork with less work than the tip: nobody's best chain can have
+ *  been there. Set once at the start; the signing check
  *  (pos_signing_record.h) uses it to void the escape of a block whose anchor
  *  may have changed side. */
 void SetMainchainMoveListener(std::function<void(int unchanged_height)> listener);
@@ -185,6 +204,58 @@ void NoteAnchorDeferredBlock(uint32_t anchor_height);
  *  Shared by the single-call and batched paths, so the two cannot reach
  *  different conclusions about the same reply. Pure: no network, no caches. */
 AnchorCheckResult InterpretAnchorHeaderReply(const UniValue& reply, uint32_t height);
+
+/** One branch tip of the parent chain, as the daemon's `getchaintips` lists it. */
+struct MainchainChainTip {
+    int height{-1};
+    int branchlen{0};     //!< blocks from the tip back to the daemon's active chain
+    std::string status;   //!< "active", "valid-fork", "valid-headers", "headers-only", "invalid", ...
+};
+using MainchainChainTips = std::map<uint256, MainchainChainTip>;
+
+/** Parse the result of a `getchaintips` call. False (and `out` untouched)
+ *  unless every entry is well formed: a tip that cannot be read is a branch
+ *  that cannot be judged. Pure. */
+bool ParseMainchainChainTips(const UniValue& result, MainchainChainTips& out);
+
+/** What the parent daemon's branch tips say happened between two readings of
+ *  them, taken on two ticks where its tip moved, the older tip being `old_tip`
+ *  (whose chainwork is `old_tip_work`, absent when unknown).
+ *
+ *  A branch the daemon stood on since the older reading shows in `current` in
+ *  one of three ways. If the branch's last block was connected, its tip is new
+ *  or its status changed, and the status says it was connected ("valid-fork").
+ *  If the branch then failed, its tip is new or changed, "invalid", and has
+ *  more chainwork than `old_tip`: the daemon switches only to more work, and a
+ *  block with valid proof of work and a bad body is marked failed without ever
+ *  being connected, so an invalid tip with no more work proves nothing. If its
+ *  last block was never connected (the daemon holds it as a header,
+ *  "headers-only", or holds its data without having connected it,
+ *  "valid-headers"), the part that was active had to outwork the old tip, so
+ *  the tip has more chainwork than `old_tip`, new or not. In the last two
+ *  cases the branch has a block above the fork besides its tip (branchlen of
+ *  at least 2): an unconnected or failed tip alone above the fork leaves
+ *  nothing of its branch that was ever connected.
+ *
+ *  `recheck_above`: the lowest fork height (height - branchlen) of every tip of
+ *  either kind, and of every other non-active tip that is new or changed: a
+ *  branch merely observed is a reason to ask again about what lies above it.
+ *  `moved_below`: the lowest fork height of the tips of the two kinds above
+ *  only, the evidence that Bitcoin moved off something. A header-only fork with
+ *  no more work than the old tip, which nobody's best chain can have been, is
+ *  never in it. Each is nullopt when nothing qualifies.
+ *
+ *  `work_of` gives a tip's chainwork, or nullopt when it cannot be had; an
+ *  unknown chainwork, here or for the old tip, counts as more. Called only for
+ *  tips that are not connected and invalid ones that are new or changed,
+ *  with a branchlen of at least 2. */
+struct ChangedBranches {
+    std::optional<int> recheck_above;
+    std::optional<int> moved_below;
+};
+ChangedBranches ClassifyChangedBranches(const MainchainChainTips& previous, const MainchainChainTips& current,
+                                        const std::optional<arith_uint256>& old_tip_work,
+                                        const std::function<std::optional<arith_uint256>(const uint256&)>& work_of);
 
 /** Fill the verdict caches for many anchors in a few round trips.
  *

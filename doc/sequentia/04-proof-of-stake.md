@@ -1208,7 +1208,9 @@ Bitcoin anchor, and judges it again whenever its view of Bitcoin moves:
   learns it, and any escape X had is void;
 - Bitcoin returns to it later: X binds again, so the next rival waits for a new
   query and a new round. An escape counts only while the anchor stood unbroken
-  (a Bitcoin block that only extends Bitcoin's chain breaks nothing);
+  (a Bitcoin block that only extends Bitcoin's chain breaks nothing, and nor
+  does a branch the node merely sees in its daemon's list of tips, such as a
+  header-only fork with less work than Bitcoin's tip);
 - the parent chain's daemon gives no verdict: the node signs nothing else at H
   until it does (see "The signing record" for what ends that wait).
 
