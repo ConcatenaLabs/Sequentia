@@ -325,6 +325,28 @@ BOOST_AUTO_TEST_CASE(a_branch_the_daemon_may_have_stood_on_is_evidence_and_a_mer
     c = ClassifyChangedBranches(before, revisited, old_work, work_of);
     BOOST_CHECK_EQUAL(c.moved_below.value_or(-2), 50);
 
+    // A tip alone above the fork (branchlen 1) that was never connected, or
+    // that failed, leaves nothing of its branch that was ever the daemon's
+    // tip: it is asked about again when new, and is never evidence, however
+    // much work it carries; its chainwork is not even asked.
+    const std::string H_S = std::string(63, '0') + "5";
+    work[uint256S(H_S)] = arith_uint256(1000);
+    for (const char* status : {"headers-only", "valid-headers", "invalid"}) {
+        MainchainChainTips lone = same;
+        lone[uint256S(H_S)] = {101, 1, status};
+        asked.clear();
+        c = ClassifyChangedBranches(before, lone, old_work, work_of);
+        BOOST_CHECK_EQUAL(c.recheck_above.value_or(-2), 100);
+        BOOST_CHECK(!c.moved_below);
+        BOOST_CHECK(!asked.count(uint256S(H_S)));
+        MainchainChainTips lone_before = before;
+        lone_before[uint256S(H_S)] = {101, 1, status};
+        c = ClassifyChangedBranches(lone_before, lone, old_work, work_of);
+        BOOST_CHECK(!c.recheck_above && !c.moved_below);
+    }
+    asked.clear();
+    c = ClassifyChangedBranches(before, revisited, old_work, work_of);
+
     // Chainwork is asked of tips never connected and of new invalid ones only,
     // and the active tip is never a branch, whatever it was before.
     BOOST_CHECK(!asked.count(uint256S(H_B1)) && asked.count(uint256S(H_C)));

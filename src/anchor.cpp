@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -803,8 +804,10 @@ ChangedBranches ClassifyChangedBranches(const MainchainChainTips& previous, cons
             // chain since the older reading only through a connected part
             // that outworked the old tip, so only a tip with more work than
             // the old tip is evidence, and it is evidence new or not.
-            const std::optional<arith_uint256> work = old_tip_work ? work_of(hash) : std::nullopt;
-            if (!old_tip_work || !work || *work > *old_tip_work) {
+            // With nothing above the fork but itself (branchlen 1), nothing of
+            // the branch was ever connected: no evidence, whatever its work.
+            const std::optional<arith_uint256> work = old_tip_work && tip.branchlen >= 2 ? work_of(hash) : std::nullopt;
+            if (tip.branchlen >= 2 && (!old_tip_work || !work || *work > *old_tip_work)) {
                 lower(out.recheck_above, fork);
                 lower(out.moved_below, fork);
             } else if (changed) {
@@ -817,9 +820,12 @@ ChangedBranches ClassifyChangedBranches(const MainchainChainTips& previous, cons
             // the failed tip carries at least the old tip's work in its
             // connected part, plus its own: only more work than the old tip
             // is evidence.
+            // A failed block alone above the fork was never connected either.
             lower(out.recheck_above, fork);
-            const std::optional<arith_uint256> work = old_tip_work ? work_of(hash) : std::nullopt;
-            if (!old_tip_work || !work || *work > *old_tip_work) lower(out.moved_below, fork);
+            if (tip.branchlen >= 2) {
+                const std::optional<arith_uint256> work = old_tip_work ? work_of(hash) : std::nullopt;
+                if (!old_tip_work || !work || *work > *old_tip_work) lower(out.moved_below, fork);
+            }
         } else if (changed) {
             // "valid-fork": connected once. Any other status is read the
             // same way.
@@ -843,6 +849,13 @@ enum class ChainTipsRead {
 int64_t AnchorTipsMax()
 {
     return std::max<int64_t>(1, gArgs.GetIntArg("-anchortipsmax", DEFAULT_ANCHOR_TIPS_MAX));
+}
+
+//! The wait before a move's reading of the tips is compared once more
+//! (-anchortipssettle), in milliseconds.
+int64_t AnchorTipsSettleMs()
+{
+    return std::max<int64_t>(1, gArgs.GetIntArg("-anchortipssettle", DEFAULT_ANCHOR_TIPS_SETTLE)) * 1000;
 }
 
 //! The daemon's branch tips (getchaintips), read with the reply bounded by
@@ -1534,9 +1547,6 @@ void AnchorWatchTask(ChainstateManager& chainman)
     // Whether the previous tick failed to reach the daemon: an answer now may
     // make a block left aside meanwhile verifiable even with the tip unchanged.
     static bool s_daemon_was_unreachable{false};
-    //! When this tick began, on the wall clock (not mock time): a caching
-    //! proxy's lifetime is real time.
-    const int64_t tick_start_ms = GetTimeMillis();
     uint256 best;
     if (!GetMainchainBestBlockHash(best)) {
         s_daemon_was_unreachable = true;
@@ -1585,10 +1595,12 @@ void AnchorWatchTask(ChainstateManager& chainman)
     // again: nobody's best chain can have been there.
     //
     // A proxy that caches the daemon's replies can answer a move's reading
-    // with a list from before a branch it hides. So the list is read once more
-    // at the first tick that begins more than ANCHOR_TIPS_SETTLE_SECONDS after
-    // a move, longer than such a proxy keeps a reply, and compared with the
-    // move's list the same way: one call more per Bitcoin block.
+    // with a list from before a branch it hides. So each move is compared
+    // once more, exactly as it was (its own list before, and the work of the
+    // tip it moved from), with a reading begun more than -anchortipssettle
+    // after the move's reading ended, longer than such a proxy keeps a reply:
+    // one call more per Bitcoin block. A later move keeps its own record and
+    // takes nothing from an earlier one's.
     //
     // The cost is bounded. A reading takes at most -anchortipsmax tips, the
     // reply bounded as it is read; a longer list counts as no list. Chainwork
@@ -1620,25 +1632,39 @@ void AnchorWatchTask(ChainstateManager& chainman)
     //! since the last such tick: a tip move that is not an extension, or a
     //! branch the daemon may have stood on. nullopt when there is no evidence.
     std::optional<int> moved_below;
-    //! When to read the tips again after a move (0: no reading due), and the
-    //! lowest old-tip chainwork of the moves since the last reading.
-    static int64_t s_settle_due_ms{0};
-    static std::optional<arith_uint256> s_settle_old_work;
+    //! A move whose reading of the tips a caching proxy may have answered from
+    //! before it: the list that move compared against, the chainwork of the
+    //! tip it moved from (the old-tip work belonging to that list), and when a
+    //! reading must be newer than any cached reply of the move's (the
+    //! completion of the move's reading plus -anchortipssettle, on the steady
+    //! clock). Oldest first. Each is compared once more, against a reading
+    //! begun after that time, exactly as the move was: a later move adds its
+    //! own and takes nothing from it. Only what the move's own reading did not
+    //! show is compared again: the rest was judged then, against the same pair.
+    struct PendingSettle {
+        MainchainChainTips baseline;
+        std::optional<arith_uint256> work;
+        MainchainChainTips seen;
+        int64_t due_ms;
+    };
+    static std::deque<PendingSettle> s_pending;
     static bool s_tips_too_many{false};
+    const auto steady_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const int64_t tick_start_steady_ms = steady_ms();
 
-    // Read the daemon's tips, compare them with the last list read, and
-    // record what they show in keep_up_to and moved_below. `base_work` is
-    // the chainwork of the tip the daemon stood on when that list was read.
-    const auto read_branches = [&](const std::optional<arith_uint256>& base_work) {
-        MainchainChainTips chain_tips;
-        const ChainTipsRead read = GetMainchainChainTips(chain_tips);
+    // One reading of the daemon's tips. False, with every verdict to be
+    // dropped and nothing kept to compare with, when it gives none: a daemon
+    // that cannot show its branches cannot show one it stood on since the last
+    // reading, so nothing it said before this tick can be kept; every verdict
+    // is asked again, at every tick where the tip moves, for as long as it
+    // lasts, which is why it is said once, loudly. The next list it gives
+    // starts afresh: what happened while it gave none is unknown.
+    const auto read_tips = [&](MainchainChainTips& out, int64_t& started_ms) -> bool {
+        started_ms = steady_ms();
+        const ChainTipsRead read = GetMainchainChainTips(out);
         if (read != ChainTipsRead::OK) {
-            // A daemon that cannot show its branches cannot show one it stood
-            // on since the last reading, so nothing it said before this tick
-            // can be kept: every verdict is asked again, at every tick where
-            // the tip moves, for as long as it lasts, which is why it is said
-            // once, loudly. The next list it gives starts afresh: what
-            // happened while it gave none is unknown.
             if (read == ChainTipsRead::TOO_MANY) {
                 if (!std::exchange(s_tips_too_many, true)) {
                     LogPrintf("WARNING: the parent chain daemon's branch tips exceed what this node reads in one tick (-anchortipsmax=%d: that many tips, and a reply of %d bytes); until they fit, every anchor verdict is asked again whenever its tip moves (one call per distinct anchor on the chain)\n",
@@ -1649,73 +1675,80 @@ void AnchorWatchTask(ChainstateManager& chainman)
             }
             keep_up_to = -1;
             s_have_chain_tips = false;
-            return;
+            s_pending.clear();
+            return false;
         }
         if (std::exchange(s_chain_tips_refused, false) | std::exchange(s_tips_too_many, false)) {
             LogPrintf("Anchor: the parent chain daemon gives its branch tips again; anchor verdicts are kept across ticks again\n");
         }
         // Chainwork is kept only for tips still listed: bounded by the list.
         for (auto it = s_tip_work.begin(); it != s_tip_work.end();) {
-            it = chain_tips.count(it->first) ? std::next(it) : s_tip_work.erase(it);
+            it = out.count(it->first) ? std::next(it) : s_tip_work.erase(it);
         }
-        if (!s_have_chain_tips) {
-            // No list to compare with: the first one since start, or since
-            // the daemon last failed to give one. Nothing is kept.
-            keep_up_to = -1;
-        } else {
-            // The chainwork the comparison needs (tips never connected, and
-            // invalid ones new since the last list), in one round trip for
-            // those not asked before; a daemon that refuses batches gets one
-            // call each, from work_of.
-            std::vector<uint256> unknown;
-            for (const auto& [hash, tip] : chain_tips) {
-                if (s_tip_work.count(hash)) continue;
-                const auto was = s_chain_tips.find(hash);
-                const bool changed = was == s_chain_tips.end() || was->second.status != tip.status;
-                if (tip.status == "headers-only" || tip.status == "valid-headers" || (tip.status == "invalid" && changed)) {
-                    unknown.push_back(hash);
-                }
-            }
-            if (base_work && unknown.size() >= 2) {
-                std::vector<UniValue> params_list;
-                for (const uint256& hash : unknown) {
-                    UniValue params(UniValue::VARR);
-                    params.push_back(hash.GetHex());
-                    params_list.push_back(params);
-                }
-                try {
-                    const std::vector<UniValue> replies = CallMainChainRPCBatch("getblockheader", params_list);
-                    for (size_t i = 0; i < unknown.size(); ++i) {
-                        const UniValue& result = find_value(replies[i], "result");
-                        if (!find_value(replies[i], "error").isNull() || !result.isObject()) continue;
-                        const UniValue& work = find_value(result.get_obj(), "chainwork");
-                        if (work.isStr() && IsHex(work.get_str())) s_tip_work.emplace(unknown[i], UintToArith256(uint256S(work.get_str())));
-                    }
-                } catch (const std::exception&) {
-                    // Asked one at a time by work_of.
-                }
-            }
-            const auto work_of = [](const uint256& hash) -> std::optional<arith_uint256> {
-                const auto it = s_tip_work.find(hash);
-                if (it != s_tip_work.end()) return it->second;
-                MainchainHeaderInfo info;
-                if (!GetMainchainHeaderInfo(hash, info) || !info.chainwork) return std::nullopt;
-                s_tip_work.emplace(hash, *info.chainwork);
-                return info.chainwork;
-            };
-            const ChangedBranches changed = ClassifyChangedBranches(s_chain_tips, chain_tips, base_work, work_of);
-            if (changed.moved_below && (!moved_below || *changed.moved_below < *moved_below)) {
-                moved_below = changed.moved_below;
-            }
-            if (changed.recheck_above && (!keep_up_to || *changed.recheck_above < *keep_up_to)) {
-                LogPrint(BCLog::VALIDATION, "Anchor: the parent chain daemon has a branch forking at height %d %s since its tips were last read; anchor verdicts above that height are re-checked\n",
-                         *changed.recheck_above, changed.moved_below && *changed.moved_below == *changed.recheck_above ? "that it may have stood on" : "that is new");
-                keep_up_to = changed.recheck_above;
-            }
-        }
-        s_chain_tips = std::move(chain_tips);
-        s_have_chain_tips = true;
+        return true;
     };
+
+    // Compare a reading with a list read before, `base_work` being the
+    // chainwork of the tip the daemon moved from when that list was taken,
+    // and record what it shows in keep_up_to and moved_below.
+    const auto compare = [&](const MainchainChainTips& baseline, const MainchainChainTips& chain_tips,
+                             const std::optional<arith_uint256>& base_work) {
+        // The chainwork the comparison needs (tips never connected, and
+        // invalid ones), in one round trip for those not asked before; a
+        // daemon that refuses batches gets one call each, from work_of.
+        std::vector<uint256> unknown;
+        for (const auto& [hash, tip] : chain_tips) {
+            if (s_tip_work.count(hash) || tip.branchlen < 2) continue;
+            if (tip.status == "headers-only" || tip.status == "valid-headers" || tip.status == "invalid") {
+                unknown.push_back(hash);
+            }
+        }
+        if (base_work && unknown.size() >= 2) {
+            std::vector<UniValue> params_list;
+            for (const uint256& hash : unknown) {
+                UniValue params(UniValue::VARR);
+                params.push_back(hash.GetHex());
+                params_list.push_back(params);
+            }
+            try {
+                const std::vector<UniValue> replies = CallMainChainRPCBatch("getblockheader", params_list);
+                for (size_t i = 0; i < unknown.size(); ++i) {
+                    const UniValue& result = find_value(replies[i], "result");
+                    if (!find_value(replies[i], "error").isNull() || !result.isObject()) continue;
+                    const UniValue& work = find_value(result.get_obj(), "chainwork");
+                    if (work.isStr() && IsHex(work.get_str())) s_tip_work.emplace(unknown[i], UintToArith256(uint256S(work.get_str())));
+                }
+            } catch (const std::exception&) {
+                // Asked one at a time by work_of.
+            }
+        }
+        const auto work_of = [](const uint256& hash) -> std::optional<arith_uint256> {
+            const auto it = s_tip_work.find(hash);
+            if (it != s_tip_work.end()) return it->second;
+            MainchainHeaderInfo info;
+            if (!GetMainchainHeaderInfo(hash, info) || !info.chainwork) return std::nullopt;
+            s_tip_work.emplace(hash, *info.chainwork);
+            return info.chainwork;
+        };
+        const ChangedBranches changed = ClassifyChangedBranches(baseline, chain_tips, base_work, work_of);
+        if (changed.moved_below) {
+            LogPrint(BCLog::VALIDATION, "Anchor: the parent chain daemon may have stood on a branch forking at height %d since its tips were read before; anchor verdicts above it are re-checked and the signing record is told\n",
+                     *changed.moved_below);
+            if (!moved_below || *changed.moved_below < *moved_below) moved_below = changed.moved_below;
+        }
+        if (changed.recheck_above && (!keep_up_to || *changed.recheck_above < *keep_up_to)) {
+            if (!changed.moved_below || *changed.moved_below != *changed.recheck_above) {
+                LogPrint(BCLog::VALIDATION, "Anchor: the parent chain daemon has a branch forking at height %d that is new since its tips were read before; anchor verdicts above it are re-checked\n",
+                         *changed.recheck_above);
+            }
+            keep_up_to = changed.recheck_above;
+        }
+    };
+
+    //! This tick's reading of the tips, if it made one, and when it began.
+    MainchainChainTips reading;
+    bool have_reading = false;
+    int64_t reading_started_ms = 0;
 
     if (tip_changed) {
         // The parent chain moved, so some anchor verdicts may be stale: anchors
@@ -1743,24 +1776,53 @@ void AnchorWatchTask(ChainstateManager& chainman)
         keep_up_to = MainchainUnchangedHeight(old_tip, &extension, &old_tip_work);
         if (!extension) moved_below = keep_up_to;
 
-        read_branches(old_tip_work);
-        // A caching proxy may have answered this tick's reading from before
-        // the move: read the list again once a reply must be newer.
-        if (!s_settle_due_ms) {
-            s_settle_old_work = old_tip_work;
-        } else if (!s_settle_old_work || !old_tip_work) {
-            s_settle_old_work.reset();
-        } else if (*old_tip_work < *s_settle_old_work) {
-            s_settle_old_work = old_tip_work;
+        if (read_tips(reading, reading_started_ms)) {
+            have_reading = true;
+            if (!s_have_chain_tips) {
+                // No list to compare with: the first one since start, or since
+                // the daemon last failed to give one. Nothing is kept.
+                keep_up_to = -1;
+            } else {
+                compare(s_chain_tips, reading, old_tip_work);
+                // A caching proxy may have answered this reading from before
+                // the move: compare once more, later, against the same pair.
+                if (s_pending.size() >= ANCHOR_TIPS_PENDING_MAX) {
+                    // Moves faster than the settle time for long: what they
+                    // may hide cannot all be kept apart, so nothing is kept.
+                    keep_up_to = -1;
+                    s_pending.clear();
+                } else {
+                    s_pending.push_back({s_chain_tips, old_tip_work, reading, steady_ms() + AnchorTipsSettleMs()});
+                }
+            }
+            s_chain_tips = reading;
+            s_have_chain_tips = true;
         }
-        s_settle_due_ms = tick_start_ms + ANCHOR_TIPS_SETTLE_SECONDS * 1000;
-    } else if (s_settle_due_ms && tick_start_ms > s_settle_due_ms) {
-        // The first tick that begins more than a proxy's caching time after
-        // the last move: compared with the list read then, against the old
-        // tips of the moves since, so that a branch a cached reply hid then
-        // is found now, at one call per Bitcoin block.
-        s_settle_due_ms = 0;
-        read_branches(s_settle_old_work);
+    }
+    // The moves whose settle time has passed are compared once more, each
+    // against its own list and old-tip work, with a reading begun after that
+    // time: this tick's own, or one made for them.
+    if (!s_pending.empty() && s_pending.front().due_ms < tick_start_steady_ms) {
+        bool settle_only = false;
+        if (!have_reading || reading_started_ms <= s_pending.front().due_ms) {
+            if (read_tips(reading, reading_started_ms)) {
+                have_reading = true;
+                settle_only = !tip_changed;
+            }
+        }
+        while (have_reading && !s_pending.empty() && s_pending.front().due_ms < reading_started_ms) {
+            const PendingSettle& due = s_pending.front();
+            MainchainChainTips unseen;
+            for (const auto& [hash, tip] : reading) {
+                const auto was = due.seen.find(hash);
+                if (was == due.seen.end() || was->second.status != tip.status) unseen.emplace(hash, tip);
+            }
+            compare(due.baseline, unseen, due.work);
+            s_pending.pop_front();
+        }
+        // A reading newer than every move's cache is the better list to
+        // compare the next move with.
+        if (settle_only && s_pending.empty()) s_chain_tips = reading;
     }
     if (keep_up_to) {
         std::function<void(int)> listener;

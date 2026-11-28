@@ -25,7 +25,7 @@ The fix keeps the verdicts a parent move provably cannot have touched, so:
 
   - a tick where the parent stood still costs NO parent-chain call beyond the
     poll itself (`getbestblockhash`), save one read of the parent's branches
-    (`getchaintips`) at the first such tick 12 seconds after a move;
+    (`getchaintips`) at the first such tick past a move's settle time;
   - a tick where the parent appended a block costs a small constant (with
     one read of the parent's branches, `getchaintips`);
   - and neither depends on how many distinct anchors the chain carries.

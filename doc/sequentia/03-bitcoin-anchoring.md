@@ -290,6 +290,11 @@ it decides which:
   new or not. A branch whose last block was known as a header before the
   daemon stood on it leaves the list exactly as it was.
 
+In the last two cases the branch has a block above its fork point besides the
+tip (`branchlen` of at least 2). A failed or unconnected tip alone above the
+fork leaves nothing of its branch that was ever connected, so it proves nothing
+whatever its work.
+
 In each case the verdicts above the branch's fork point (`height - branchlen`)
 are dropped, and the signing record is told that Bitcoin moved off something
 (see "The signing record" in [`04-proof-of-stake.md`](04-proof-of-stake.md)).
@@ -299,14 +304,20 @@ point asked again, and it voids no escape.
 
 A proxy that caches the daemon's replies, as the testnet's shared endpoint does
 for 10 seconds, can answer a move's reading with a list from before a branch it
-hides. So the watcher reads the list once more at the first tick that begins
-more than 12 seconds after a move, when the reply must have been made after
-it, and compares it with the move's list in the same way.
+hides. So each move is compared once more, exactly as it was (the same list
+before it and the same old tip), for whatever its own reading did not show,
+against a reading that begins more than
+`-anchortipssettle` seconds (12 by default) after the move's reading ended, on
+a clock that only runs forward. That setting must be longer than any caching
+proxy between the node and its daemon keeps a reply; the reply is then newer
+than the move. A move that follows before the first one's time adds its own
+comparison and takes nothing from the first.
 
 What that costs:
 
-- one `getchaintips` per tick where the tip moved, and one more at the first
-  tick 12 seconds after it;
+- one `getchaintips` per tick where the tip moved, and one more for that move
+  at the first tick past its settle time (one reading can serve several
+  moves);
 - one header read for the chainwork of each tip that was never connected, and
   of each new invalid tip, kept for as long as the tip is listed;
 - for each new tip, one re-check of the anchors above its fork point, once.
@@ -319,15 +330,15 @@ valid header at about the tip's difficulty, and its fork is at most about 144
 blocks down. On testnet4, minimum-difficulty blocks make a new tip nearly free.
 Tips stay in the daemon's list for good, and each makes every `getchaintips`
 reply about 135 bytes longer and about 7 µs slower, at every tick that reads
-it; a tick where the tip stands still, other than the one 12 seconds after a
-move, never reads the list.
+it; a tick where the tip stands still, other than the one past a move's settle
+time, never reads the list.
 
 The watcher reads at most 50,000 tips (`-anchortipsmax`), with the reply bounded
 while it is read, at 256 bytes a tip. A daemon listing more is treated as one
 that gave no list, below. That bounds what any tick costs this node, at the
 price of a lever: whoever fills the daemon's index past the bound makes the
-node re-ask every anchor at each Bitcoin block. The node logs a warning naming
-the bound the first time.
+node re-ask every anchor at each Bitcoin block, at the move and again at its
+settle reading. The node logs a warning naming the bound the first time.
 
 A Bitcoin endpoint that answers `getbestblockhash` but refuses `getchaintips`
 cannot show those branches, so nothing it said can be kept across a tip move:
@@ -348,9 +359,9 @@ Three limits remain:
   the old tip, all within one hold of the lock that every answer it gives also
   takes.
 - Between two readings of the list, a verdict taken on a branch the daemon then
-  left is used until the next reading: the next tip move, or the reading 12
-  seconds after one. For that long a block anchored on the restored block can
-  be refused, or one anchored on the branch Bitcoin left can be kept; that
+  left is used until the next reading: the next tip move, or a move's settle
+  reading. For that long a block anchored on the restored block can be
+  refused, or one anchored on the branch Bitcoin left can be kept; that
   reading then corrects both.
 - A proxy that caches the daemon's replies can hand the node a header verdict
   older than the tick that would have dropped it (#468).
@@ -358,7 +369,7 @@ Three limits remain:
 The result, measured on regtest:
 
 - a tick where Bitcoin stood still costs one `getbestblockhash`, and the first
-  one 12 seconds after a move one `getchaintips` more;
+  one past a move's settle time one `getchaintips` more;
 - a tick where Bitcoin produced a block adds two `getblockheader` (the extension
   check, and the checkpoint scan's read of the new block), one `getblock` and
   one `getchaintips`;
@@ -381,7 +392,7 @@ daemon since startup, in total and per method. Sample it twice around a known
 interval to see the standing load; `getbestblockhash` is issued once per watcher
 tick and by nothing else, so its count is also the tick count, and what the
 anchor walk cost is everything else less one `getchaintips` per tick where the
-tip moved and one at the tick 12 seconds after (a block producer also calls
+tip moved and one at the tick past its settle time (a block producer also calls
 `getchaintips` when it chooses an anchor).
 `feature_anchor_rpc_cost.py` asserts that this cost does not grow with the
 number of distinct anchors on the chain, and

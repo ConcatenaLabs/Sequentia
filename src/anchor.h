@@ -42,10 +42,15 @@ static const int DEFAULT_ANCHOR_POLL_INTERVAL = 5;
 /** The most parent-chain branch tips the anchor watcher reads in one tick
  *  (-anchortipsmax); a daemon listing more counts as one that gave no list. */
 static const int64_t DEFAULT_ANCHOR_TIPS_MAX = 50000;
-/** Seconds after a tip move at which the anchor watcher reads the daemon's
- *  branch tips once more: longer than a caching proxy keeps a reply (the
- *  testnet's keeps one 10 s), so that reading was answered after the move. */
-static const int64_t ANCHOR_TIPS_SETTLE_SECONDS = 12;
+/** Seconds after the anchor watcher read the daemon's branch tips at a tip
+ *  move before it compares them once more (-anchortipssettle): longer than
+ *  any caching proxy between it and the daemon keeps a reply (the testnet's
+ *  shared endpoint keeps one 10 s), so that the second reading was answered
+ *  after the move. */
+static const int64_t DEFAULT_ANCHOR_TIPS_SETTLE = 12;
+/** Moves the anchor watcher keeps waiting for their second reading at once;
+ *  past it, nothing is kept. */
+static const size_t ANCHOR_TIPS_PENDING_MAX = 8;
 /** Whether the block producer avoids anchoring a new block onto a parent-chain
  *  height that a competing branch is currently contesting (-anchoravoidcontested).
  *  Pure producer-side policy; see GetAnchorForNewBlock. */
@@ -227,7 +232,10 @@ bool ParseMainchainChainTips(const UniValue& result, MainchainChainTips& out);
  *  last block was never connected (the daemon holds it as a header,
  *  "headers-only", or holds its data without having connected it,
  *  "valid-headers"), the part that was active had to outwork the old tip, so
- *  the tip has more chainwork than `old_tip`, new or not.
+ *  the tip has more chainwork than `old_tip`, new or not. In the last two
+ *  cases the branch has a block above the fork besides its tip (branchlen of
+ *  at least 2): an unconnected or failed tip alone above the fork leaves
+ *  nothing of its branch that was ever connected.
  *
  *  `recheck_above`: the lowest fork height (height - branchlen) of every tip of
  *  either kind, and of every other non-active tip that is new or changed: a
@@ -239,7 +247,8 @@ bool ParseMainchainChainTips(const UniValue& result, MainchainChainTips& out);
  *
  *  `work_of` gives a tip's chainwork, or nullopt when it cannot be had; an
  *  unknown chainwork, here or for the old tip, counts as more. Called only for
- *  tips that are not connected, and for invalid ones that are new or changed. */
+ *  tips that are not connected and invalid ones that are new or changed,
+ *  with a branchlen of at least 2. */
 struct ChangedBranches {
     std::optional<int> recheck_above;
     std::optional<int> moved_below;
