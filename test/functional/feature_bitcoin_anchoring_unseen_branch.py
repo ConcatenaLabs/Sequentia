@@ -51,7 +51,14 @@ the replacement, and asserts what the node holds after the next poll:
      branch: the reading once more than 12 s after the move finds it, with no
      Bitcoin block;
  10. more tips than the node reads (-anchortipsmax), counted and by the length
-     of the reply: nothing is kept across a move, and the node says so once.
+     of the reply: nothing is kept across a move, and the node says so once;
+ 11. two moves within the settle time, then a header-only sibling of the
+     middle tip: no comparison takes it for a branch the daemon stood on (it
+     has nothing above the fork but itself, and each comparison pairs a list
+     with the old tip of its own move);
+ 12. a cached flip onto a branch whose next block failed, back, and one more
+     move before the first move's settle time: the first move's comparison,
+     done again with a fresh list, still finds the failed branch.
 
 Topology:
   node0: the parent chain (stands in for Bitcoin): proof of work, so that its
@@ -65,9 +72,11 @@ Topology:
 """
 
 import base64
+import hashlib
 import http.server
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -92,6 +101,56 @@ def make_staker():
     k = ECKey()
     k.generate(compressed=True)
     return byte_to_base58(k.get_bytes() + b'\x01', 239), k.get_pubkey().get_bytes().hex()
+
+
+def bad_coinbase_height(block_hex, header_len):
+    """A copy of a one-transaction proof-of-work parent block whose coinbase
+    names another height, with its merkle root and proof of work made good
+    again: a parent marks it failed when it arrives (bad-cb-height), before
+    it could ever be connected."""
+    raw = bytearray(bytes.fromhex(block_hex))
+    hl = header_len
+
+    def dsha(b):
+        return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+
+    def varint(i):
+        v = raw[i]
+        if v < 0xfd:
+            return v, i + 1
+        n = {0xfd: 2, 0xfe: 4, 0xff: 8}[v]
+        return int.from_bytes(raw[i + 1:i + 1 + n], "little"), i + 1 + n
+
+    ntx, i = varint(hl)
+    assert ntx == 1
+    tx = i
+    i += 5                                     # version, flags
+    nin, i = varint(i)
+    assert nin == 1
+    i += 36                                    # the null prevout
+    slen, i = varint(i)
+    if 0x51 <= raw[i] <= 0x60:                 # a height of 1 to 16 is OP_1..OP_16
+        raw[i] = raw[i] + 1 if raw[i] < 0x60 else 0x5f
+    else:
+        assert 1 <= raw[i] <= 0x4b             # otherwise pushed as data, first
+        raw[i + 1] ^= 0x01                     # another height
+    i += slen + 4
+    nout, i = varint(i)
+    for _ in range(nout):
+        i += 33 if raw[i] in (0x01, 0x0a, 0x0b) else 1         # asset
+        i += 9 if raw[i] == 0x01 else (33 if raw[i] in (0x08, 0x09) else 1)  # value
+        i += 33 if raw[i] in (0x02, 0x03) else 1               # nonce
+        sl, i = varint(i)
+        i += sl
+    i += 4                                     # lock time
+    raw[36:68] = dsha(bytes(raw[tx:tx + 4]) + b"\x00" + bytes(raw[tx + 5:i]))   # one transaction: its txid
+    bits = int.from_bytes(raw[hl - 8:hl - 4], "little")
+    target = (bits & 0xffffff) << (8 * ((bits >> 24) - 3))
+    for nonce in range(1 << 32):
+        raw[hl - 4:hl] = nonce.to_bytes(4, "little")
+        if int.from_bytes(dsha(bytes(raw[:hl])), "little") <= target:
+            break
+    return raw.hex()
 
 
 class TipsProxy:
@@ -548,9 +607,11 @@ class UnseenBranchTest(BitcoinTestFramework):
                       "%r at the next move" % (fork_height, above, quiet, first, later))
         self.record("header-only fork: nothing while the tip stands still", set(quiet) == {"getbestblockhash"}, "%r" % quiet)
         # The move: its extension check and checkpoint scan (2 headers, 1
-        # block), the fork's chainwork (1 header), and the anchors above it.
+        # block), and the anchors above the fork. The fork is one header alone
+        # above its fork point, never connected, so its chainwork is not even
+        # asked: it cannot be evidence.
         self.record("header-only fork: at the next move, the verdicts above its fork are asked again once",
-                    first.get("getblockheader", 0) == 3 + above,
+                    first.get("getblockheader", 0) == 2 + above,
                     "%d header reads, %d anchors above the fork" % (first.get("getblockheader", 0), above))
         self.record("header-only fork: and nothing at the moves after",
                     later.get("getblockheader", 0) == 2, "%d header reads" % later.get("getblockheader", 0))
@@ -741,6 +802,89 @@ class UnseenBranchTest(BitcoinTestFramework):
             if proxy:
                 proxy.stop()
 
+    def stood_on(self, text, height):
+        """Whether the node's log says the daemon may have stood on a branch
+        forking at `height`."""
+        return bool(re.search(r"may have stood on a branch forking at height %d\b|forking at height %d that it may have stood on" % (height, height), text))
+
+    def two_moves_header(self):
+        """Case 11."""
+        p, v, q = self.nodes[0], self.nodes[2], self.nodes[3]
+        name = "two moves, then a header-only sibling of the middle tip"
+        self.settle()
+        w0 = p.getbestblockhash()
+        h0 = p.getblockcount()
+        self.sync_node3(h0)
+        pos = os.path.getsize(v.debug_log_path)
+        self.tick_done()
+        w1 = self.mine()[0]
+        self.tick_done()                       # the first move
+        self.mine()
+        self.tick_done()                       # the second, within the first's settle time at poll 8
+        s = self.generatetoaddress(q, 1, p.getnewaddress(), sync_fun=self.no_op)[0]
+        assert_equal(q.getblockheader(s)["previousblockhash"], w0)
+        assert p.submitheader(q.getblockheader(s, False)) is None
+        tips = {t["hash"]: t for t in p.getchaintips()}
+        assert_equal((tips[s]["status"], tips[s]["branchlen"]), ("headers-only", 1))
+        assert_equal(p.getblockheader(s)["height"], p.getblockheader(w1)["height"])
+        for _ in range(12 // self.options.poll + 2):
+            self.tick_done()                   # both moves' settle readings
+        said = self.stood_on(self.log_from(pos), h0)
+        self.record(name + ": no reading takes it for a branch the daemon stood on",
+                    not said, "said" if said else "not said")
+
+    def hidden_failed_branch(self):
+        """Case 12."""
+        p, v, q = self.nodes[0], self.nodes[2], self.nodes[3]
+        name = "a cached flip onto a branch that failed, then a move before settlement"
+        poll = self.options.poll
+        proxy = TipsProxy(rpc_port(5), rpc_port(0), "cache", ttl=10.0, auth="%s:%s" % (self.rpc_u, self.rpc_p))
+        direct = self.validator_args
+        try:
+            self.validator_args = self.seq_args(2, poll, parent_port=rpc_port(5))
+            f = p.getblockcount()
+            self.sync_node3(f)
+            a = self.mine()[0]
+            # On node3: B1, B2 on the fork point, and B3 on them with a coinbase
+            # naming another height; then A1, A2 on A, which outwork B2.
+            bs = self.generatetoaddress(q, 3, p.getnewaddress(), sync_fun=self.no_op)
+            b_raw = [q.getblock(h, 0) for h in bs[:2]]
+            b3_bad = bad_coinbase_height(q.getblock(bs[2], 0), len(q.getblockheader(bs[2], False)) // 2)
+            q.submitblock(p.getblock(a, 0))
+            q.invalidateblock(bs[0])
+            self.node3_to(a)
+            a_new = self.generatetoaddress(q, 2, p.getnewaddress(), sync_fun=self.no_op)
+            a_raw = [q.getblock(h, 0) for h in a_new]
+            self.settle()
+
+            pos = os.path.getsize(v.debug_log_path)
+            opened = self.open_window()
+            time.sleep(max(0, poll - 8))
+            proxy.prime()                      # the move's reading will come from this cache
+            for raw in b_raw:
+                p.submitblock(raw)
+            assert_equal(p.getbestblockhash(), bs[1])
+            assert_equal(p.submitblock(b3_bad), "bad-cb-height")
+            for raw in a_raw:
+                p.submitblock(raw)
+            assert_equal(p.getbestblockhash(), a_new[1])
+            self.close_window(opened)
+            tips = {t["hash"]: t for t in p.getchaintips()}
+            failed = [t for t in tips.values() if t["status"] == "invalid" and t["height"] - t["branchlen"] == f]
+            assert_equal(len(failed), 1)
+            assert_equal(failed[0]["branchlen"], 3)
+            self.tick_done()                   # the move, answered from the cache
+            self.mine()                        # one more move before its settle time
+            for _ in range(12 // poll + 3):
+                self.tick_done()
+            said = self.stood_on(self.log_from(pos), f)
+            self.record(name + ": the signing record is told, at the first move's comparison done again",
+                        said, "said" if said else "not said")
+        finally:
+            self.validator_args = direct
+            self.restart_node(2, extra_args=self.validator_args)
+            proxy.stop()
+
     def run_test(self):
         p = self.nodes[0]
         p.createwallet(wallet_name="w", descriptors=True)
@@ -759,6 +903,8 @@ class UnseenBranchTest(BitcoinTestFramework):
         self.withheld_tip()
         self.cached_tips()
         self.bounds()
+        self.two_moves_header()
+        self.hidden_failed_branch()
 
         wrong = [name for name, (ok, _) in self.results.items() if not ok]
         for name, (ok, detail) in self.results.items():

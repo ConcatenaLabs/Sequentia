@@ -17,7 +17,7 @@ nodes 1-4 are a committee of four, quorum 3; two are stopped, so the member
 under test (M) is held at a height that cannot certify and signs rivals there
 only by escaping. Bitcoin produces a block at every poll of M's watcher, so its
 tip moves and the branches are read each time. The test counts the rivals M
-signs at the held height in four equal phases at the mainnet defaults (rounds of
+signs at the held height in five equal phases at the mainnet defaults (rounds of
 9450 ms, a poll every 5 seconds):
 
   - Bitcoin blocks only;
@@ -27,16 +27,20 @@ signs at the held height in four equal phases at the mainnet defaults (rounds of
     a sibling of it with as much work, valid proof of work and a coinbase
     naming another height, which the parent marks failed when it arrives
     without ever connecting it;
-  - the same with siblings of the block the held block's anchor rests on.
+  - the same with siblings of the block the held block's anchor rests on;
+  - two Bitcoin blocks at consecutive ticks, within the settle time, then a
+    header-only sibling of the first: more work than the tip before the
+    first move, so a comparison that paired the newest list with that older
+    tip would take it for a branch the daemon stood on.
 
 No escape may be voided in any phase, and M signs as many rivals with the
 forks as without (one fewer at most, for the phase boundary).
 """
 
-import hashlib
 import re
 import time
 
+from feature_bitcoin_anchoring_unseen_branch import bad_coinbase_height
 from feature_pos_signing_record_anchor import PosSigningRecordAnchorTest, M
 from test_framework.util import assert_equal, p2p_port, rpc_port
 
@@ -83,11 +87,12 @@ class SigningRecordBranchForksTest(PosSigningRecordAnchorTest):
                 out.append(mm.group(1))
         return out
 
-    def bad_sibling(self, of):
+    def bad_sibling(self, of, header_only=False):
         """A block of as much work as the parent's block `of`, on its parent,
         with valid proof of work and a coinbase that names another height: the
         parent marks it failed when it arrives (bad-cb-height) and never
-        connects it."""
+        connects it. With `header_only`, a valid sibling the parent learns as
+        a header only."""
         p, q = self.nodes[0], self.nodes[5]
         for hh in range(q.getblockcount() + 1, p.getblockcount() + 1):
             q.submitblock(p.getblock(p.getblockhash(hh), 0))
@@ -98,49 +103,14 @@ class SigningRecordBranchForksTest(PosSigningRecordAnchorTest):
         blk = self.generatetoaddress(q, 1, p.getnewaddress(), sync_fun=self.no_op)[0]
         raw = bytearray(bytes.fromhex(q.getblock(blk, 0)))
         hl = len(q.getblockheader(blk, False)) // 2
+        header = q.getblockheader(blk, False)
         q.invalidateblock(blk)
         q.reconsiderblock(of)
+        if header_only:
+            assert p.submitheader(header) is None
+            return
 
-        def dsha(b):
-            return hashlib.sha256(hashlib.sha256(b).digest()).digest()
-
-        def varint(i):
-            v = raw[i]
-            if v < 0xfd:
-                return v, i + 1
-            n = {0xfd: 2, 0xfe: 4, 0xff: 8}[v]
-            return int.from_bytes(raw[i + 1:i + 1 + n], "little"), i + 1 + n
-
-        ntx, i = varint(hl)
-        assert ntx == 1
-        tx = i
-        i += 5                                     # version, flags
-        nin, i = varint(i)
-        assert nin == 1
-        i += 36                                    # the null prevout
-        slen, i = varint(i)
-        if 0x51 <= raw[i] <= 0x60:                 # a height of 1 to 16 is OP_1..OP_16
-            raw[i] = raw[i] + 1 if raw[i] < 0x60 else 0x5f
-        else:
-            assert 1 <= raw[i] <= 0x4b             # otherwise pushed as data, first
-            raw[i + 1] ^= 0x01                     # another height
-        i += slen + 4
-        nout, i = varint(i)
-        for _ in range(nout):
-            i += 33 if raw[i] in (0x01, 0x0a, 0x0b) else 1         # asset
-            i += 9 if raw[i] == 0x01 else (33 if raw[i] in (0x08, 0x09) else 1)  # value
-            i += 33 if raw[i] in (0x02, 0x03) else 1               # nonce
-            sl, i = varint(i)
-            i += sl
-        i += 4                                     # lock time
-        raw[36:68] = dsha(bytes(raw[tx:tx + 4]) + b"\x00" + bytes(raw[tx + 5:i]))   # one transaction: its txid
-        bits = int.from_bytes(raw[hl - 8:hl - 4], "little")
-        target = (bits & 0xffffff) << (8 * ((bits >> 24) - 3))
-        for nonce in range(1 << 32):
-            raw[hl - 4:hl] = nonce.to_bytes(4, "little")
-            if int.from_bytes(dsha(bytes(raw[:hl])), "little") <= target:
-                break
-        assert_equal(p.submitblock(raw.hex()), "bad-cb-height")
+        assert_equal(p.submitblock(bad_coinbase_height(raw.hex(), hl)), "bad-cb-height")
 
     def phase(self, h, forks, deep=None):
         """Run PHASE_S seconds with one Bitcoin block after each tick of M,
@@ -167,6 +137,22 @@ class SigningRecordBranchForksTest(PosSigningRecordAnchorTest):
                 assert p.submitheader(q.getblockheader(blk, False)) is None
                 q.invalidateblock(blk)
                 made += 1
+            elif forks == "two-then-header":
+                # A second Bitcoin block at the next tick, and after M's watcher
+                # has seen it, a header-only sibling of the first: as much
+                # work as the tip of the first move, more than the one before.
+                for _ in range(2):
+                    t1 = self.ticks()
+                    while self.ticks() == t1 and time.time() < end:
+                        time.sleep(0.02)
+                    if time.time() >= end:
+                        break
+                    if _ == 0:
+                        self.parent_mine(1)
+                else:
+                    time.sleep(0.5)
+                    self.bad_sibling(tip, header_only=True)
+                    made += 1
             elif forks in ("invalid", "deep-invalid"):
                 t1 = self.ticks()
                 while self.ticks() == t1 and time.time() < end:
@@ -200,6 +186,7 @@ class SigningRecordBranchForksTest(PosSigningRecordAnchorTest):
         # height: every block held at h is anchored at or above it.
         anchor_height = self.nodes[2].getblockheader(self.nodes[2].getblockhash(h - 1))["anchorheight"]
         deep, deep_voids, made_deep = self.phase(h, forks="deep-invalid", deep=p.getblockhash(anchor_height))
+        two, two_voids, made_two = self.phase(h, forks="two-then-header")
         invalid_tips = sum(1 for t in p.getchaintips() if t["status"] == "invalid")
         self.log.info("Bitcoin blocks only: %d rivals signed, %d escape voids; with %d header-only forks: "
                       "%d rivals signed, %d escape voids; with %d equal-work invalid siblings: %d rivals signed, "
@@ -211,7 +198,11 @@ class SigningRecordBranchForksTest(PosSigningRecordAnchorTest):
         assert made_bad >= PHASE_S // POLL_S // 2 - 2 and made_deep >= PHASE_S // POLL_S // 2 - 2, \
             "too few invalid siblings (%d, %d)" % (made_bad, made_deep)
         assert invalid_tips >= made_bad + made_deep, "the parent did not mark every sibling failed"
-        assert plain_voids == 0 and forked_voids == 0 and bad_voids == 0 and deep_voids == 0, "an escape was voided"
+        self.log.info("two Bitcoin blocks, then a header-only sibling of the first, %d times: %d rivals signed, "
+                      "%d escape voids" % (made_two, len(two), two_voids))
+        assert made_two >= PHASE_S // POLL_S // 3 - 2, "too few header siblings (%d)" % made_two
+        assert plain_voids == 0 and forked_voids == 0 and bad_voids == 0 and deep_voids == 0 and two_voids == 0, \
+            "an escape was voided"
         assert len(forked) >= 1 and len(forked) >= len(plain) - 1, "M signed fewer rivals with the forks"
         assert len(bad) >= 1 and len(bad) >= len(plain) - 1, "M signed fewer rivals with the invalid siblings"
         assert len(deep) >= 1 and len(deep) >= len(plain) - 1, "M signed fewer rivals with the deep invalid siblings"
